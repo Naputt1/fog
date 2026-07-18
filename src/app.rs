@@ -120,6 +120,12 @@ impl App {
                         self.select_end = None;
                     }
                 }
+                MouseEventKind::ScrollUp => {
+                    self.scroll_to(self.scroll_offset.saturating_add(3));
+                }
+                MouseEventKind::ScrollDown => {
+                    self.scroll_to(self.scroll_offset.saturating_sub(3));
+                }
                 _ => {}
             },
             _ => {}
@@ -256,19 +262,18 @@ impl App {
                 self.scroll_to(self.scroll_offset.saturating_sub(1));
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                self.scroll_offset = self.scroll_offset.saturating_add(1);
+                self.scroll_to(self.scroll_offset.saturating_add(1));
             }
             KeyCode::PageUp => {
                 let h = self.content_height();
-                self.scroll_offset = self.scroll_offset.saturating_add(h as usize);
+                self.scroll_to(self.scroll_offset.saturating_add(h as usize));
             }
             KeyCode::PageDown => {
                 let h = self.content_height();
                 self.scroll_to(self.scroll_offset.saturating_sub(h as usize));
             }
             KeyCode::Home | KeyCode::Char('g') => {
-                let total = self.current_total_lines();
-                self.scroll_offset = total.saturating_sub(1);
+                self.scroll_to(self.current_total_lines());
             }
             KeyCode::End | KeyCode::Char('G') => {
                 self.scroll_offset = 0;
@@ -343,17 +348,14 @@ impl App {
     }
 
     fn scroll_to(&mut self, target: usize) {
-        let max = self
-            .current_total_lines()
-            .saturating_sub(self.content_height() as usize + 1);
+        let visible = self.content_height() as usize;
+        let total = self.current_total_lines();
+        let max = total.saturating_sub(visible);
         self.scroll_offset = target.min(max);
     }
 
     fn content_height(&self) -> u16 {
-        match self.items.get(self.tabs.index) {
-            Some(TabItem::Service(_)) | Some(TabItem::Terminal(_)) => 20,
-            None => 0,
-        }
+        self.content_area.height.saturating_sub(2)
     }
 
     fn current_total_lines(&self) -> usize {
