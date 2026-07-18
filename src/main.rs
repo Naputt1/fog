@@ -1,8 +1,10 @@
 use std::io::stdout;
 use std::{fs, io};
 mod app;
+mod click_tab;
 mod config;
 mod service;
+mod terminal;
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -11,7 +13,6 @@ use crossterm::terminal::{
 
 use crate::app::App;
 use crate::config::Config;
-mod click_tab;
 
 fn main() -> io::Result<()> {
     enable_raw_mode()?;

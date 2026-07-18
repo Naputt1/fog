@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use std::fmt;
 use std::{
     collections::VecDeque,
     fs,
@@ -15,7 +16,7 @@ use std::{
 
 const MAX_LINES: usize = 2000;
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct Service {
     pub path: String,
     pub cmd: String,
@@ -28,6 +29,22 @@ pub struct Service {
     output: Arc<Mutex<VecDeque<String>>>,
     #[serde(skip)]
     signal_write: Option<OwnedFd>,
+    #[serde(skip)]
+    pub stopped: bool,
+}
+
+impl fmt::Debug for Service {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Service")
+            .field("path", &self.path)
+            .field("cmd", &self.cmd)
+            .field("child", &self.child)
+            .field("handler", &self.handler)
+            .field("output", &self.output)
+            .field("signal_write", &self.signal_write)
+            .field("stopped", &self.stopped)
+            .finish()
+    }
 }
 
 impl Service {
@@ -136,11 +153,54 @@ impl Service {
         Ok(())
     }
 
-    pub fn tail(&self, n: usize) -> Vec<String> {
+    pub fn tail(&self, n: usize, offset: usize) -> Vec<String> {
         let output = self.output.lock().unwrap();
         let len = output.len();
-        let start = len.saturating_sub(n);
-        output.range(start..).cloned().collect()
+        let end = len.saturating_sub(offset);
+        let start = end.saturating_sub(n);
+        output.range(start..end).cloned().collect()
+    }
+
+    pub fn total_lines(&self) -> usize {
+        self.output.lock().unwrap().len()
+    }
+
+    fn kill_inner(&mut self) {
+        if let Some(ref w) = self.signal_write {
+            let byte: [u8; 1] = [0];
+            unsafe {
+                libc::write(w.as_raw_fd(), byte.as_ptr() as *const libc::c_void, 1);
+            }
+        }
+        self.signal_write = None;
+
+        if let Some(child) = &self.child {
+            let pid = child.id() as libc::pid_t;
+            let _ = unsafe { libc::kill(-pid, libc::SIGKILL) };
+            kill_descendants(pid);
+        }
+
+        if let Some(handler) = self.handler.take() {
+            let _ = handler.join();
+        }
+
+        if let Some(mut child) = self.child.take() {
+            let _ = child.wait();
+        }
+    }
+
+    pub fn kill(&mut self) {
+        if self.child.is_none() {
+            return;
+        }
+        self.kill_inner();
+        self.stopped = true;
+    }
+
+    pub fn restart(&mut self) -> Result<(), std::io::Error> {
+        self.kill_inner();
+        self.stopped = false;
+        self.run()
     }
 }
 
@@ -189,32 +249,6 @@ impl Drop for Service {
             _ = fs::write(format!("temp/{}.txt", name), &text);
         }
 
-        // Write a byte to signal the reader thread (more reliable than close()
-        // on macOS where poll() doesn't always wake when a pipe is closed)
-        if let Some(ref w) = self.signal_write {
-            let byte: [u8; 1] = [0];
-            unsafe {
-                libc::write(
-                    w.as_raw_fd(),
-                    byte.as_ptr() as *const libc::c_void,
-                    1,
-                );
-            }
-        }
-        self.signal_write = None;
-
-        if let Some(child) = &self.child {
-            let pid = child.id() as libc::pid_t;
-            let _ = unsafe { libc::kill(-pid, libc::SIGKILL) };
-            kill_descendants(pid);
-        }
-
-        if let Some(handler) = self.handler.take() {
-            _ = handler.join();
-        }
-
-        if let Some(child) = &mut self.child {
-            let _ = child.wait();
-        }
+        self.kill_inner();
     }
 }
