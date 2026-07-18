@@ -9,8 +9,8 @@ use std::{
 const MAX_LINES: usize = 2000;
 
 pub struct TerminalSession {
-    output: Arc<Mutex<VecDeque<String>>>,
-    partial: Arc<Mutex<String>>,
+    pub output: Arc<Mutex<VecDeque<String>>>,
+    pub partial: Arc<Mutex<String>>,
     handler: Option<JoinHandle<()>>,
     writer: Option<Box<dyn std::io::Write + Send>>,
     child: Option<Box<dyn Child + Send + Sync>>,

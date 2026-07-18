@@ -26,7 +26,7 @@ pub struct Service {
     #[serde(skip)]
     handler: Option<JoinHandle<()>>,
     #[serde(skip)]
-    output: Arc<Mutex<VecDeque<String>>>,
+    pub output: Arc<Mutex<VecDeque<String>>>,
     #[serde(skip)]
     signal_write: Option<OwnedFd>,
     #[serde(skip)]
