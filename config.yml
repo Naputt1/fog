@@ -1,0 +1,5 @@
+service:
+  - path: "/Users/naputt/code/cinema_ticket/backend"
+    cmd: "air"
+  - path: "/Users/naputt/code/cinema_ticket/frontend"
+    cmd: "npm run dev"
