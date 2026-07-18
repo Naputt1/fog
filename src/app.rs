@@ -1,7 +1,6 @@
 use crate::click_tab::{ClickTab, TabKind};
 use crate::service::Service;
 use crate::terminal::TerminalSession;
-use ansi_to_tui::IntoText;
 use crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
@@ -403,26 +402,12 @@ impl App {
                 let output = s.output.lock().unwrap();
                 output.iter().cloned().collect()
             }
-            Some(TabItem::Terminal(t)) => {
-                let output = t.output.lock().unwrap();
-                let partial = t.partial.lock().unwrap();
-                let mut all: Vec<String> = output.iter().cloned().collect();
-                if !partial.is_empty() {
-                    all.push(partial.clone());
-                }
-                all
-            }
+            Some(TabItem::Terminal(t)) => t.get_all_lines(),
             None => return,
         };
-        let is_terminal = self.is_terminal_tab(self.tabs.index);
         let mut selected = String::new();
         for i in sel_start.0..=sel_end.0 {
-            let Some(raw) = lines.get(i) else { continue };
-            let text = if is_terminal {
-                String::from_utf8_lossy(&strip_ansi_escapes::strip(raw)).into_owned()
-            } else {
-                raw.clone()
-            };
+            let Some(text) = lines.get(i) else { continue };
             if sel_start.0 == sel_end.0 {
                 let s: String = text.chars().skip(sel_start.1).take(sel_end.1 - sel_start.1).collect();
                 selected.push_str(&s);
@@ -588,25 +573,7 @@ impl App {
                 let lines: Vec<Line> = raw.into_iter().map(Line::from).collect();
                 (lines, total)
             }
-            Some(TabItem::Terminal(t)) => {
-                let total = t.total_lines();
-                let raw = t.tail(visible_height, self.scroll_offset);
-                let lines: Vec<Line> = raw
-                    .into_iter()
-                    .map(|l| match l.into_text() {
-                        Ok(text) => {
-                            let spans: Vec<Span<'static>> = text
-                                .lines
-                                .into_iter()
-                                .flat_map(|line| line.spans.into_iter())
-                                .collect();
-                            Line::from(spans)
-                        }
-                        Err(_) => Line::from(l),
-                    })
-                    .collect();
-                (lines, total)
-            }
+            Some(TabItem::Terminal(t)) => t.get_screen(visible_height, self.scroll_offset),
             None => (vec![Line::from("no tab")], 0),
         };
         self.apply_sel(&mut lines);
@@ -614,13 +581,15 @@ impl App {
         let widget = Paragraph::new(Text::from(lines)).block(block);
         frame.render_widget(widget, content_area);
 
-        if in_terminal_input {
-            let cursor_y = content_area.bottom().saturating_sub(2);
-            if cursor_y > content_area.y {
-                frame.set_cursor_position(Position {
-                    x: content_area.x + 1,
-                    y: cursor_y,
-                });
+        if in_terminal_input && self.scroll_offset == 0 {
+            if let Some(TabItem::Terminal(t)) = self.items.get_mut(self.tabs.index) {
+                if let Some((row, col)) = t.cursor_position() {
+                    let x = content_area.x + 1 + col;
+                    let y = content_area.y + 1 + row;
+                    if x < content_area.right() && y < content_area.bottom() {
+                        frame.set_cursor_position(Position { x, y });
+                    }
+                }
             }
         }
 

@@ -1,26 +1,71 @@
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize};
+use ratatui::{
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+};
 use std::{
-    collections::VecDeque,
     io::Read,
     sync::{Arc, Mutex},
     thread::{self, JoinHandle},
 };
 
-const MAX_LINES: usize = 2000;
+const MAX_SCROLLBACK: usize = 2000;
+
+fn cell_style(cell: &vt100::Cell) -> Style {
+    let mut style = Style::default();
+    style = match cell.fgcolor() {
+        vt100::Color::Default => style,
+        vt100::Color::Idx(i) => style.fg(Color::Indexed(i)),
+        vt100::Color::Rgb(r, g, b) => style.fg(Color::Rgb(r, g, b)),
+    };
+    style = match cell.bgcolor() {
+        vt100::Color::Default => style,
+        vt100::Color::Idx(i) => style.bg(Color::Indexed(i)),
+        vt100::Color::Rgb(r, g, b) => style.bg(Color::Rgb(r, g, b)),
+    };
+    if cell.bold() {
+        style = style.add_modifier(Modifier::BOLD);
+    }
+    if cell.italic() {
+        style = style.add_modifier(Modifier::ITALIC);
+    }
+    if cell.underline() {
+        style = style.add_modifier(Modifier::UNDERLINED);
+    }
+    if cell.inverse() {
+        style = style.add_modifier(Modifier::REVERSED);
+    }
+    if cell.dim() {
+        style = style.add_modifier(Modifier::DIM);
+    }
+    style
+}
 
 pub struct TerminalSession {
-    pub output: Arc<Mutex<VecDeque<String>>>,
-    pub partial: Arc<Mutex<String>>,
+    parser: Arc<Mutex<vt100::Parser>>,
     handler: Option<JoinHandle<()>>,
     writer: Option<Box<dyn std::io::Write + Send>>,
     child: Option<Box<dyn Child + Send + Sync>>,
     master: Option<Box<dyn MasterPty + Send>>,
 }
 
+fn scrollback_len(screen: &mut vt100::Screen) -> usize {
+    let prev = screen.scrollback();
+    screen.set_scrollback(usize::MAX);
+    let n = screen.scrollback();
+    screen.set_scrollback(prev);
+    n
+}
+
 impl TerminalSession {
     pub fn new() -> std::io::Result<Self> {
         let pty_system = portable_pty::native_pty_system();
-        let size = PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 };
+        let size = PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
         let pair = pty_system.openpty(size).map_err(|e| {
             std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
         })?;
@@ -39,68 +84,25 @@ impl TerminalSession {
                 std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
             })?;
 
-        let output = Arc::new(Mutex::new(VecDeque::with_capacity(MAX_LINES)));
-        let partial = Arc::new(Mutex::new(String::new()));
-        let output_clone = output.clone();
-        let partial_clone = partial.clone();
+        let parser = Arc::new(Mutex::new(vt100::Parser::new(24, 80, MAX_SCROLLBACK)));
+        let parser_clone = parser.clone();
 
         let handler = thread::spawn(move || {
             let mut buf = [0u8; 4096];
-            let mut line_buf: Vec<u8> = Vec::new();
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
-                        for &b in &buf[..n] {
-                            match b {
-                                b'\n' => {
-                                    let s = String::from_utf8_lossy(&line_buf).into_owned();
-                                    line_buf.clear();
-                                    let mut out = output_clone.lock().unwrap();
-                                    out.push_back(s);
-                                    while out.len() > MAX_LINES {
-                                        out.pop_front();
-                                    }
-                                }
-                                b'\r' => {
-                                    if !line_buf.is_empty() {
-                                        let s =
-                                            String::from_utf8_lossy(&line_buf).into_owned();
-                                        line_buf.clear();
-                                        let mut out = output_clone.lock().unwrap();
-                                        out.push_back(s);
-                                        while out.len() > MAX_LINES {
-                                            out.pop_front();
-                                        }
-                                    }
-                                }
-                                0x08 | 0x7f => {
-                                    line_buf.pop();
-                                }
-                                _ => {
-                                    line_buf.push(b);
-                                }
-                            }
-                        }
-                        // Update partial for rendering incomplete lines (prompts)
-                        let s = String::from_utf8_lossy(&line_buf).into_owned();
-                        let mut p = partial_clone.lock().unwrap();
-                        *p = s;
+                        let mut p = parser_clone.lock().unwrap();
+                        p.process(&buf[..n]);
                     }
                     Err(_) => break,
                 }
             }
-            // Flush remaining
-            if !line_buf.is_empty() {
-                let s = String::from_utf8_lossy(&line_buf).into_owned();
-                let mut out = output_clone.lock().unwrap();
-                out.push_back(s);
-            }
         });
 
         Ok(Self {
-            output,
-            partial,
+            parser,
             handler: Some(handler),
             writer: Some(writer),
             child: Some(child),
@@ -115,33 +117,128 @@ impl TerminalSession {
         }
     }
 
-    pub fn tail(&self, n: usize, offset: usize) -> Vec<String> {
-        let output = self.output.lock().unwrap();
-        let partial = self.partial.lock().unwrap();
-        let has_partial = !partial.is_empty();
-        let total = output.len() + if has_partial { 1 } else { 0 };
+    pub fn total_lines(&self) -> usize {
+        let mut parser = self.parser.lock().unwrap();
+        let screen = parser.screen_mut();
+        let (vis_rows, _) = screen.size();
+        let sb = scrollback_len(screen);
+        sb + vis_rows as usize
+    }
 
-        let end = total.saturating_sub(offset);
-        let start = end.saturating_sub(n);
+    pub fn get_screen(&self, n: usize, offset: usize) -> (Vec<Line<'static>>, usize) {
+        let mut parser = self.parser.lock().unwrap();
+        let screen = parser.screen_mut();
+        let (vis_rows, cols) = screen.size();
+        let sb = scrollback_len(screen);
+        let total = sb + vis_rows as usize;
 
-        let mut result = Vec::with_capacity(n);
-        let completed = output.len();
-
-        for i in start..end {
-            if i < completed {
-                result.push(output[i].clone());
-            } else {
-                result.push(partial.clone());
-            }
+        if offset >= total.saturating_sub(1) {
+            screen.set_scrollback(0);
+            return (vec![Line::from("(top)")], total);
         }
 
+        let scroll_off = offset.min(sb);
+        screen.set_scrollback(scroll_off);
+
+        let rows_to_read = n
+            .min(vis_rows as usize)
+            .min(total.saturating_sub(offset));
+
+        let mut lines = Vec::with_capacity(rows_to_read);
+        for row in 0..rows_to_read as u16 {
+            let mut last_col = 0u16;
+            for col in 0..cols {
+                if let Some(cell) = screen.cell(row, col) {
+                    if !cell.contents().is_empty() {
+                        last_col = col;
+                    }
+                }
+            }
+
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            let mut buf = String::new();
+            let mut cur = Style::default();
+
+            for col in 0..=last_col {
+                if let Some(cell) = screen.cell(row, col) {
+                    let text = cell.contents();
+                    if text.is_empty() {
+                        if buf.is_empty() || cur != Style::default() || !buf.chars().all(|c| c == ' ') {
+                            if !buf.is_empty() {
+                                spans.push(Span::styled(std::mem::take(&mut buf), cur));
+                            }
+                            cur = Style::default();
+                        }
+                        buf.push(' ');
+                    } else {
+                        let s = cell_style(cell);
+                        if buf.is_empty() {
+                            cur = s;
+                            buf.push_str(text);
+                        } else if s == cur {
+                            buf.push_str(text);
+                        } else {
+                            spans.push(Span::styled(std::mem::take(&mut buf), cur));
+                            cur = s;
+                            buf.push_str(text);
+                        }
+                    }
+                }
+            }
+            if !buf.is_empty() {
+                spans.push(Span::styled(buf, cur));
+            }
+            if spans.is_empty() {
+                spans.push(Span::raw(""));
+            }
+            lines.push(Line::from(spans));
+        }
+
+        (lines, total)
+    }
+
+    pub fn get_all_lines(&self) -> Vec<String> {
+        let mut parser = self.parser.lock().unwrap();
+        let screen = parser.screen_mut();
+        let (vis_rows, cols) = screen.size();
+        let sb = scrollback_len(screen);
+        let total = sb + vis_rows as usize;
+
+        let mut result = Vec::with_capacity(total);
+        let mut remain = total;
+
+        while remain > 0 {
+            let off = remain.saturating_sub(vis_rows as usize);
+            screen.set_scrollback(off);
+            let take = remain.min(vis_rows as usize);
+            for r in 0..take as u16 {
+                let mut line = String::with_capacity(cols as usize);
+                for c in 0..cols {
+                    if let Some(cell) = screen.cell(r, c) {
+                        line.push_str(cell.contents());
+                    }
+                }
+                result.push(line);
+            }
+            remain = remain.saturating_sub(take);
+        }
+
+        screen.set_scrollback(0);
         result
     }
 
-    pub fn total_lines(&self) -> usize {
-        let output = self.output.lock().unwrap();
-        let partial = self.partial.lock().unwrap();
-        output.len() + if partial.is_empty() { 0 } else { 1 }
+    pub fn cursor_position(&self) -> Option<(u16, u16)> {
+        let parser = self.parser.lock().unwrap();
+        let screen = parser.screen();
+        if screen.hide_cursor() {
+            return None;
+        }
+        let (row, col) = screen.cursor_position();
+        let (rows, _) = screen.size();
+        if row >= rows {
+            return None;
+        }
+        Some((row, col))
     }
 
     pub fn resize(&mut self, cols: u16, rows: u16) {
@@ -153,6 +250,8 @@ impl TerminalSession {
                 pixel_height: 0,
             });
         }
+        let mut p = self.parser.lock().unwrap();
+        p.screen_mut().set_size(rows, cols);
     }
 }
 
