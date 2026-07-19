@@ -198,28 +198,31 @@ impl Service {
         let screen = parser.screen_mut();
         let (vis_rows, cols) = screen.size();
         let sb = scrollback_len(screen);
-        let total = sb + vis_rows as usize;
 
-        let mut result = Vec::with_capacity(total);
-        let mut remain = total;
+        let mut result = Vec::with_capacity(sb + vis_rows as usize);
 
-        while remain > 0 {
-            let off = remain.saturating_sub(vis_rows as usize);
-            screen.set_scrollback(off);
-            let take = remain.min(vis_rows as usize);
-            for r in 0..take as u16 {
-                let mut line = String::with_capacity(cols as usize);
-                for c in 0..cols {
-                    if let Some(cell) = screen.cell(r, c) {
-                        line.push_str(cell.contents());
-                    }
+        for n in (1..=sb).rev() {
+            screen.set_scrollback(n);
+            let mut line = String::with_capacity(cols as usize);
+            for c in 0..cols {
+                if let Some(cell) = screen.cell(0, c) {
+                    line.push_str(cell.contents());
                 }
-                result.push(line);
             }
-            remain = remain.saturating_sub(take);
+            result.push(line);
         }
 
         screen.set_scrollback(0);
+        for r in 0..vis_rows {
+            let mut line = String::with_capacity(cols as usize);
+            for c in 0..cols {
+                if let Some(cell) = screen.cell(r, c) {
+                    line.push_str(cell.contents());
+                }
+            }
+            result.push(line);
+        }
+
         result
     }
 
