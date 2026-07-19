@@ -398,10 +398,7 @@ impl App {
             (end, start)
         };
         let lines: Vec<String> = match self.items.get(self.tabs.index) {
-            Some(TabItem::Service(s)) => {
-                let output = s.output.lock().unwrap();
-                output.iter().cloned().collect()
-            }
+            Some(TabItem::Service(s)) => s.get_all_lines(),
             Some(TabItem::Terminal(t)) => t.get_all_lines(),
             None => return,
         };
@@ -566,13 +563,12 @@ impl App {
         });
         let visible_height = inner.height as usize;
 
-        let (mut lines, _total): (Vec<Line>, usize) = match self.items.get_mut(self.tabs.index) {
-            Some(TabItem::Service(s)) => {
-                let total = s.total_lines();
-                let raw = s.tail(visible_height, self.scroll_offset);
-                let lines: Vec<Line> = raw.into_iter().map(Line::from).collect();
-                (lines, total)
-            }
+        if let Some(TabItem::Service(s)) = self.items.get_mut(self.tabs.index) {
+            s.resize(inner.width, visible_height as u16);
+        }
+
+        let (mut lines, _total) = match self.items.get_mut(self.tabs.index) {
+            Some(TabItem::Service(s)) => s.get_screen(visible_height, self.scroll_offset),
             Some(TabItem::Terminal(t)) => t.get_screen(visible_height, self.scroll_offset),
             None => (vec![Line::from("no tab")], 0),
         };

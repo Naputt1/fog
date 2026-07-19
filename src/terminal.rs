@@ -11,7 +11,7 @@ use std::{
 
 const MAX_SCROLLBACK: usize = 2000;
 
-fn cell_style(cell: &vt100::Cell) -> Style {
+pub fn cell_style(cell: &vt100::Cell) -> Style {
     let mut style = Style::default();
     style = match cell.fgcolor() {
         vt100::Color::Default => style,

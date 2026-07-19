@@ -1,20 +1,29 @@
+use portable_pty::{Child, CommandBuilder, MasterPty, PtySize};
+use ratatui::{
+    style::Style,
+    text::{Line, Span},
+};
 use serde::Deserialize;
-use std::fmt;
 use std::{
-    collections::VecDeque,
-    fs,
-    io::{self, Read},
-    os::unix::{
-        io::{AsRawFd, FromRawFd, OwnedFd},
-        process::CommandExt,
-    },
+    fmt, fs,
+    io::Read,
     path::Path,
-    process::{Child, Command, Stdio},
     sync::{Arc, Mutex},
     thread::{self, JoinHandle},
 };
 
-const MAX_LINES: usize = 2000;
+use crate::terminal::cell_style;
+
+const MAX_SCROLLBACK: usize = 2000;
+const COLS: u16 = 256;
+
+fn scrollback_len(screen: &mut vt100::Screen) -> usize {
+    let prev = screen.scrollback();
+    screen.set_scrollback(usize::MAX);
+    let n = screen.scrollback();
+    screen.set_scrollback(prev);
+    n
+}
 
 #[derive(Deserialize)]
 pub struct Service {
@@ -22,13 +31,13 @@ pub struct Service {
     pub cmd: String,
 
     #[serde(skip)]
-    child: Option<Child>,
+    child: Option<Box<dyn Child + Send + Sync>>,
     #[serde(skip)]
     handler: Option<JoinHandle<()>>,
     #[serde(skip)]
-    pub output: Arc<Mutex<VecDeque<String>>>,
+    pub parser: Arc<Mutex<vt100::Parser>>,
     #[serde(skip)]
-    signal_write: Option<OwnedFd>,
+    master: Option<Box<dyn MasterPty + Send>>,
     #[serde(skip)]
     pub stopped: bool,
 }
@@ -40,8 +49,6 @@ impl fmt::Debug for Service {
             .field("cmd", &self.cmd)
             .field("child", &self.child)
             .field("handler", &self.handler)
-            .field("output", &self.output)
-            .field("signal_write", &self.signal_write)
             .field("stopped", &self.stopped)
             .finish()
     }
@@ -51,100 +58,50 @@ impl Service {
     pub fn run(&mut self) -> Result<(), std::io::Error> {
         let part: Vec<&str> = self.cmd.split_whitespace().collect();
 
-        let mut raw = [0i32; 2];
-        if unsafe { libc::pipe(raw.as_mut_ptr()) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let signal_read = unsafe { OwnedFd::from_raw_fd(raw[0]) };
-        let signal_write = unsafe { OwnedFd::from_raw_fd(raw[1]) };
-        self.signal_write = Some(signal_write);
+        let pty_system = portable_pty::native_pty_system();
+        let pair = pty_system
+            .openpty(PtySize {
+                rows: 24,
+                cols: COLS,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
 
-        let mut child = Command::new(part[0]);
-        let child = child
-            .args(&part[1..])
-            .current_dir(&self.path)
-            .stdout(Stdio::piped())
-            .process_group(0);
-        unsafe {
-            child.pre_exec(|| {
-                libc::dup2(1, 2);
-                Ok(())
-            });
-        }
-        let mut child = child.spawn()?;
-        let mut stdout = child.stdout.take().unwrap();
+        let mut cmd = CommandBuilder::new(part[0]);
+        cmd.args(&part[1..]);
+        cmd.cwd(&self.path);
+
+        let child = pair
+            .slave
+            .spawn_command(cmd)
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
 
         self.child = Some(child);
 
-        let output_mutex = self.output.clone();
+        let mut reader = pair
+            .master
+            .try_clone_reader()
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+
+        self.master = Some(pair.master);
+
+        self.parser = Arc::new(Mutex::new(vt100::Parser::new(
+            24, COLS, MAX_SCROLLBACK,
+        )));
+        let parser = self.parser.clone();
+
         let handler = thread::spawn(move || {
-            let stdout_fd = stdout.as_raw_fd();
-            let signal_fd = signal_read.as_raw_fd();
-            let mut fds = [
-                libc::pollfd {
-                    fd: stdout_fd,
-                    events: libc::POLLIN,
-                    revents: 0,
-                },
-                libc::pollfd {
-                    fd: signal_fd,
-                    events: libc::POLLIN,
-                    revents: 0,
-                },
-            ];
-            let mut buffer = [0; 1024];
-            let mut current_line = String::new();
-            let mut after_cr = false;
+            let mut buf = [0u8; 4096];
             loop {
-                let ret = unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
-                if ret < 0 {
-                    break;
-                }
-                if fds[1].revents != 0 {
-                    break;
-                }
-                if fds[0].revents & libc::POLLIN != 0 {
-                    match stdout.read(&mut buffer) {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            let mut output = output_mutex.lock().unwrap();
-                            for &byte in &buffer[..n] {
-                                match byte {
-                                    b'\r' => {
-                                        output.push_back(std::mem::take(&mut current_line));
-                                        if output.len() > MAX_LINES {
-                                            output.pop_front();
-                                        }
-                                        after_cr = true;
-                                    }
-                                    b'\n' => {
-                                        if !after_cr {
-                                            output.push_back(std::mem::take(&mut current_line));
-                                            if output.len() > MAX_LINES {
-                                                output.pop_front();
-                                            }
-                                        }
-                                        after_cr = false;
-                                    }
-                                    _ => {
-                                        after_cr = false;
-                                        current_line.push(byte as char);
-                                    }
-                                }
-                            }
+                match reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if let Ok(mut p) = parser.lock() {
+                            p.process(&buf[..n]);
                         }
-                        Err(_) => break,
                     }
-                }
-                if fds[0].revents & (libc::POLLHUP | libc::POLLERR) != 0 {
-                    break;
-                }
-            }
-            if !current_line.is_empty() {
-                let mut output = output_mutex.lock().unwrap();
-                output.push_back(std::mem::take(&mut current_line));
-                if output.len() > MAX_LINES {
-                    output.pop_front();
+                    Err(_) => break,
                 }
             }
         });
@@ -153,40 +110,155 @@ impl Service {
         Ok(())
     }
 
-    pub fn tail(&self, n: usize, offset: usize) -> Vec<String> {
-        let output = self.output.lock().unwrap();
-        let len = output.len();
-        let end = len.saturating_sub(offset);
-        let start = end.saturating_sub(n);
-        output.range(start..end).cloned().collect()
+    pub fn get_screen(&self, n: usize, offset: usize) -> (Vec<Line<'static>>, usize) {
+        let mut parser = self.parser.lock().unwrap();
+        let screen = parser.screen_mut();
+        let (vis_rows, cols) = screen.size();
+        let sb = scrollback_len(screen);
+        let total = sb + vis_rows as usize;
+
+        if offset >= total.saturating_sub(1) {
+            screen.set_scrollback(0);
+            return (vec![Line::from("(top)")], total);
+        }
+
+        let scroll_off = offset.min(sb);
+        screen.set_scrollback(scroll_off);
+
+        let rows_to_read = n
+            .min(vis_rows as usize)
+            .min(total.saturating_sub(offset));
+
+        if rows_to_read == 0 {
+            return (vec![], total);
+        }
+
+        let mut lines = Vec::with_capacity(rows_to_read);
+        for row in 0..rows_to_read as u16 {
+            let mut last_col = 0u16;
+            for col in 0..cols {
+                if let Some(cell) = screen.cell(row, col)
+                    && !cell.contents().is_empty()
+                {
+                    last_col = col;
+                }
+            }
+
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            let mut buf = String::new();
+            let mut cur = Style::default();
+
+            for col in 0..=last_col {
+                if let Some(cell) = screen.cell(row, col) {
+                    let text = cell.contents();
+                    if text.is_empty() {
+                        if buf.is_empty()
+                            || cur != Style::default()
+                            || !buf.chars().all(|c| c == ' ')
+                        {
+                            if !buf.is_empty() {
+                                spans.push(Span::styled(std::mem::take(&mut buf), cur));
+                            }
+                            cur = Style::default();
+                        }
+                        buf.push(' ');
+                    } else {
+                        let s = cell_style(cell);
+                        if buf.is_empty() {
+                            cur = s;
+                            buf.push_str(text);
+                        } else if s == cur {
+                            buf.push_str(text);
+                        } else {
+                            spans.push(Span::styled(std::mem::take(&mut buf), cur));
+                            cur = s;
+                            buf.push_str(text);
+                        }
+                    }
+                }
+            }
+            if !buf.is_empty() {
+                spans.push(Span::styled(buf, cur));
+            }
+            if spans.is_empty() {
+                spans.push(Span::raw(""));
+            }
+            lines.push(Line::from(spans));
+        }
+
+        (lines, total)
     }
 
     pub fn total_lines(&self) -> usize {
-        self.output.lock().unwrap().len()
+        let mut parser = self.parser.lock().unwrap();
+        let screen = parser.screen_mut();
+        let (vis_rows, _) = screen.size();
+        let sb = scrollback_len(screen);
+        sb + vis_rows as usize
+    }
+
+    pub fn get_all_lines(&self) -> Vec<String> {
+        let mut parser = self.parser.lock().unwrap();
+        let screen = parser.screen_mut();
+        let (vis_rows, cols) = screen.size();
+        let sb = scrollback_len(screen);
+        let total = sb + vis_rows as usize;
+
+        let mut result = Vec::with_capacity(total);
+        let mut remain = total;
+
+        while remain > 0 {
+            let off = remain.saturating_sub(vis_rows as usize);
+            screen.set_scrollback(off);
+            let take = remain.min(vis_rows as usize);
+            for r in 0..take as u16 {
+                let mut line = String::with_capacity(cols as usize);
+                for c in 0..cols {
+                    if let Some(cell) = screen.cell(r, c) {
+                        line.push_str(cell.contents());
+                    }
+                }
+                result.push(line);
+            }
+            remain = remain.saturating_sub(take);
+        }
+
+        screen.set_scrollback(0);
+        result
+    }
+
+    pub fn resize(&mut self, cols: u16, rows: u16) {
+        if let Some(ref m) = self.master {
+            let _ = m.resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            });
+        }
+        let mut p = self.parser.lock().unwrap();
+        p.screen_mut().set_size(rows, cols);
     }
 
     fn kill_inner(&mut self) {
-        if let Some(ref w) = self.signal_write {
-            let byte: [u8; 1] = [0];
-            unsafe {
-                libc::write(w.as_raw_fd(), byte.as_ptr() as *const libc::c_void, 1);
+        if let Some(ref child) = self.child {
+            if let Some(pid) = child.process_id() {
+                let pid = pid as libc::pid_t;
+                let _ = unsafe { libc::kill(-pid, libc::SIGKILL) };
+                kill_descendants(pid);
             }
         }
-        self.signal_write = None;
 
-        if let Some(child) = &self.child {
-            let pid = child.id() as libc::pid_t;
-            let _ = unsafe { libc::kill(-pid, libc::SIGKILL) };
-            kill_descendants(pid);
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
         }
 
         if let Some(handler) = self.handler.take() {
             let _ = handler.join();
         }
 
-        if let Some(mut child) = self.child.take() {
-            let _ = child.wait();
-        }
+        self.master = None;
     }
 
     pub fn kill(&mut self) {
@@ -206,9 +278,7 @@ impl Service {
 
 #[cfg(target_os = "macos")]
 fn kill_descendants(pid: libc::pid_t) {
-    use std::collections::VecDeque;
-
-    let mut queue = VecDeque::new();
+    let mut queue = std::collections::VecDeque::new();
     queue.push_back(pid);
 
     while let Some(current_pid) = queue.pop_front() {
@@ -244,10 +314,8 @@ impl Drop for Service {
 
         let _ = fs::create_dir_all("temp");
 
-        if let Ok(output) = self.output.lock() {
-            let text = output.iter().cloned().collect::<Vec<_>>().join("\n");
-            _ = fs::write(format!("temp/{}.txt", name), &text);
-        }
+        let text = self.get_all_lines().join("\n");
+        _ = fs::write(format!("temp/{}.txt", name), &text);
 
         self.kill_inner();
     }
