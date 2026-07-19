@@ -11,6 +11,7 @@ use std::{
 };
 
 const MAX_SCROLLBACK: usize = 2000;
+const INITIAL_COLS: u16 = 256;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Init {
@@ -171,7 +172,7 @@ impl Terminal {
         let pty_system = portable_pty::native_pty_system();
         let size = PtySize {
             rows: 24,
-            cols: 80,
+            cols: INITIAL_COLS,
             pixel_width: 0,
             pixel_height: 0,
         };
@@ -199,12 +200,12 @@ impl Terminal {
 
         let _ = writeln!(writer, "cd {} && {}", path, cmd);
 
-        self.parser = Arc::new(Mutex::new(vt100::Parser::new(24, 80, MAX_SCROLLBACK)));
+        self.parser = Arc::new(Mutex::new(vt100::Parser::new(24, INITIAL_COLS, MAX_SCROLLBACK)));
         self.handler = Some(spawn_reader(self.parser.clone(), reader));
         self.writer = Some(writer);
         self.child = Some(child);
         self.master = Some(pair.master);
-        self.max_cols = 80;
+        self.max_cols = INITIAL_COLS;
         self.max_rows = 24;
 
         Ok(())
