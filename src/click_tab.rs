@@ -23,13 +23,7 @@ impl TabEntry {
     fn display_name(&self) -> String {
         match self.kind {
             TabKind::Terminal => format!("$ {}", self.name),
-            TabKind::Service => {
-                if self.stopped {
-                    format!("{} [stopped]", self.name)
-                } else {
-                    self.name.clone()
-                }
-            }
+            TabKind::Service => self.name.clone(),
         }
     }
 }
@@ -57,15 +51,28 @@ impl ClickTab {
     pub fn new(names: Vec<String>) -> Self {
         let entries = names
             .into_iter()
-            .map(|name| TabEntry { name, kind: TabKind::Service, stopped: false })
+            .map(|name| TabEntry {
+                name,
+                kind: TabKind::Service,
+                stopped: false,
+            })
             .collect();
         let mut list_state = ListState::default();
         list_state.select(Some(0));
-        Self { entries, index: 0, area: None, list_state }
+        Self {
+            entries,
+            index: 0,
+            area: None,
+            list_state,
+        }
     }
 
     pub fn add(&mut self, name: String, kind: TabKind) {
-        self.entries.push(TabEntry { name, kind, stopped: false });
+        self.entries.push(TabEntry {
+            name,
+            kind,
+            stopped: false,
+        });
         self.index = self.entries.len() - 1;
         self.list_state.select(Some(self.index));
     }

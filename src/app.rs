@@ -1,23 +1,17 @@
 use crate::click_tab::{ClickTab, TabKind};
-use crate::service::Service;
-use crate::terminal::TerminalSession;
+use crate::terminal::Terminal;
 use crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
 use ratatui::{
     DefaultTerminal, Frame,
     layout::{Constraint, Layout, Margin, Position, Rect},
-    style::{Color, Style, Stylize},
+    style::{Style, Stylize},
     symbols::border,
     text::{Line, Span, Text},
     widgets::{Block, Paragraph, Wrap},
 };
-use std::{io, path::Path, time::Duration};
-
-enum TabItem {
-    Service(Service),
-    Terminal(TerminalSession),
-}
+use std::{io, time::Duration};
 
 enum Mode {
     Normal,
@@ -25,12 +19,10 @@ enum Mode {
 }
 
 pub struct App {
-    items: Vec<TabItem>,
+    items: Vec<Terminal>,
     tabs: ClickTab,
     mode: Mode,
     scroll_offset: usize,
-    command_buf: String,
-    command_mode: bool,
     exit: bool,
     selecting: bool,
     select_start: Option<(usize, usize)>,
@@ -39,26 +31,22 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(services: Vec<Service>) -> Self {
-        let mut names = Vec::new();
-        for service in services.iter() {
-            let dir = Path::new(&service.path)
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .into_owned();
-            names.push(dir);
+    pub fn new(items: Vec<Terminal>) -> Self {
+        let names: Vec<String> = items.iter().map(|t| t.name.clone()).collect();
+        let mut tabs = ClickTab::new(names);
+        for (i, item) in items.iter().enumerate() {
+            tabs.entries[i].kind = if item.is_shell() {
+                TabKind::Terminal
+            } else {
+                TabKind::Service
+            };
         }
-
-        let items = services.into_iter().map(TabItem::Service).collect();
 
         Self {
             items,
-            tabs: ClickTab::new(names),
+            tabs,
             mode: Mode::Normal,
             scroll_offset: 0,
-            command_buf: String::new(),
-            command_mode: false,
             exit: false,
             selecting: false,
             select_start: None,
@@ -68,14 +56,6 @@ impl App {
     }
 
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
-        for item in self.items.iter_mut() {
-            if let TabItem::Service(s) = item {
-                if let Err(e) = s.run() {
-                    eprintln!("error: {}", e);
-                }
-            }
-        }
-
         while !self.exit {
             terminal.draw(|frame| self.draw(frame))?;
             if event::poll(Duration::from_millis(50))? {
@@ -135,10 +115,12 @@ impl App {
     fn on_tab_switch(&mut self) {
         self.scroll_offset = 0;
         self.clear_selection();
-        if self.is_terminal_tab(self.tabs.index) {
-            self.mode = Mode::TerminalInput;
-        } else {
-            self.mode = Mode::Normal;
+        if let Some(item) = self.items.get(self.tabs.index) {
+            self.mode = if item.is_shell() {
+                Mode::TerminalInput
+            } else {
+                Mode::Normal
+            };
         }
     }
 
@@ -148,8 +130,8 @@ impl App {
         self.select_end = None;
     }
 
-    fn is_terminal_tab(&self, idx: usize) -> bool {
-        matches!(self.items.get(idx), Some(TabItem::Terminal(_)))
+    fn is_shell_tab(&self, idx: usize) -> bool {
+        self.items.get(idx).map(|t| t.is_shell()).unwrap_or(false)
     }
 
     fn handle_key(&mut self, key: KeyEvent) {
@@ -169,7 +151,8 @@ impl App {
                 }
                 KeyCode::Char('p') => {
                     let prev = self.tabs.index;
-                    self.tabs.index = (self.tabs.index + self.items.len() - 1) % self.items.len();
+                    self.tabs.index =
+                        (self.tabs.index + self.items.len() - 1) % self.items.len();
                     if prev != self.tabs.index {
                         self.on_tab_switch();
                     }
@@ -183,46 +166,9 @@ impl App {
             }
         }
 
-        if self.command_mode {
-            self.handle_command_key(key);
-            return;
-        }
-
         match self.mode {
             Mode::TerminalInput => self.handle_terminal_key(key),
             Mode::Normal => self.handle_normal_key(key),
-        }
-    }
-
-    fn handle_command_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Esc => {
-                self.command_mode = false;
-                self.command_buf.clear();
-            }
-            KeyCode::Enter => {
-                let cmd = std::mem::take(&mut self.command_buf);
-                self.command_mode = false;
-                self.execute_command(&cmd);
-            }
-            KeyCode::Backspace => {
-                self.command_buf.pop();
-            }
-            KeyCode::Char(c) => {
-                if key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT {
-                    self.command_buf.push(c);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn execute_command(&mut self, cmd: &str) {
-        match cmd {
-            "q" | "quit" => self.exit = true,
-            "kill" => self.kill_current(),
-            "restart" => self.restart_current(),
-            _ => {}
         }
     }
 
@@ -231,10 +177,9 @@ impl App {
             self.mode = Mode::Normal;
             return;
         }
-
-        if let Some(TabItem::Terminal(t)) = self.items.get_mut(self.tabs.index) {
+        if let Some(item) = self.items.get_mut(self.tabs.index) {
             if let Some(bytes) = key_to_bytes(key) {
-                t.write(&bytes);
+                item.write(&bytes);
             }
         }
     }
@@ -252,7 +197,8 @@ impl App {
             }
             KeyCode::Char('k') | KeyCode::Char('l') | KeyCode::Left => {
                 let prev = self.tabs.index;
-                self.tabs.index = (self.tabs.index + self.items.len() - 1) % self.items.len();
+                self.tabs.index =
+                    (self.tabs.index + self.items.len() - 1) % self.items.len();
                 if prev != self.tabs.index {
                     self.on_tab_switch();
                 }
@@ -278,37 +224,19 @@ impl App {
                 self.scroll_offset = 0;
             }
             KeyCode::Char('i') => {
-                if self.is_terminal_tab(self.tabs.index) {
-                    self.mode = Mode::TerminalInput;
-                }
+                self.mode = Mode::TerminalInput;
             }
-            KeyCode::Char('x') => self.kill_current(),
             KeyCode::Char('R') => self.restart_current(),
             KeyCode::Char('t') => self.new_terminal(),
             KeyCode::Char('d') => self.close_tab(),
-            KeyCode::Char(':') => {
-                self.command_mode = true;
-                self.command_buf.clear();
-            }
             _ => {}
         }
     }
 
-    fn kill_current(&mut self) {
-        if !self.is_terminal_tab(self.tabs.index) {
-            if let Some(TabItem::Service(s)) = self.items.get_mut(self.tabs.index) {
-                s.kill();
-                if let Some(e) = self.tabs.entries.get_mut(self.tabs.index) {
-                    e.stopped = true;
-                }
-            }
-        }
-    }
-
     fn restart_current(&mut self) {
-        if !self.is_terminal_tab(self.tabs.index) {
-            if let Some(TabItem::Service(s)) = self.items.get_mut(self.tabs.index) {
-                if let Err(e) = s.restart() {
+        if let Some(item) = self.items.get_mut(self.tabs.index) {
+            if !item.is_shell() {
+                if let Err(e) = item.restart() {
                     eprintln!("restart error: {}", e);
                 }
                 if let Some(e) = self.tabs.entries.get_mut(self.tabs.index) {
@@ -319,10 +247,10 @@ impl App {
     }
 
     fn new_terminal(&mut self) {
-        match TerminalSession::new() {
+        match Terminal::spawn_shell("bash".to_string()) {
             Ok(term) => {
                 let id = self.items.len();
-                self.items.push(TabItem::Terminal(term));
+                self.items.push(term);
                 self.tabs.add("bash".to_string(), TabKind::Terminal);
                 self.tabs.index = id;
                 self.scroll_offset = 0;
@@ -333,16 +261,20 @@ impl App {
     }
 
     fn close_tab(&mut self) {
-        if self.is_terminal_tab(self.tabs.index) && self.items.len() > 1 {
-            let idx = self.tabs.index;
-            self.items.remove(idx);
-            self.tabs.remove(idx);
-            self.scroll_offset = 0;
-            if self.tabs.index < self.items.len() && self.is_terminal_tab(self.tabs.index) {
-                self.mode = Mode::TerminalInput;
-            } else {
-                self.mode = Mode::Normal;
-            }
+        if self.items.len() <= 1 {
+            return;
+        }
+        if !self.is_shell_tab(self.tabs.index) {
+            return;
+        }
+        let idx = self.tabs.index;
+        self.items.remove(idx);
+        self.tabs.remove(idx);
+        self.scroll_offset = 0;
+        if self.tabs.index < self.items.len() && self.is_shell_tab(self.tabs.index) {
+            self.mode = Mode::TerminalInput;
+        } else {
+            self.mode = Mode::Normal;
         }
     }
 
@@ -359,8 +291,7 @@ impl App {
 
     fn current_total_lines(&self) -> usize {
         match self.items.get(self.tabs.index) {
-            Some(TabItem::Service(s)) => s.total_lines(),
-            Some(TabItem::Terminal(t)) => t.total_lines(),
+            Some(item) => item.total_lines(),
             None => 0,
         }
     }
@@ -391,22 +322,27 @@ impl App {
     }
 
     fn copy_selection(&self, start: (usize, usize), end: (usize, usize)) {
-        let (sel_start, sel_end) = if start.0 < end.0 || (start.0 == end.0 && start.1 <= end.1)
-        {
-            (start, end)
-        } else {
-            (end, start)
-        };
+        let (sel_start, sel_end) =
+            if start.0 < end.0 || (start.0 == end.0 && start.1 <= end.1) {
+                (start, end)
+            } else {
+                (end, start)
+            };
         let lines: Vec<String> = match self.items.get(self.tabs.index) {
-            Some(TabItem::Service(s)) => s.get_all_lines(),
-            Some(TabItem::Terminal(t)) => t.get_all_lines(),
+            Some(item) => item.get_all_lines(),
             None => return,
         };
         let mut selected = String::new();
         for i in sel_start.0..=sel_end.0 {
-            let Some(text) = lines.get(i) else { continue };
+            let Some(text) = lines.get(i) else {
+                continue;
+            };
             if sel_start.0 == sel_end.0 {
-                let s: String = text.chars().skip(sel_start.1).take(sel_end.1 - sel_start.1).collect();
+                let s: String = text
+                    .chars()
+                    .skip(sel_start.1)
+                    .take(sel_end.1 - sel_start.1)
+                    .collect();
                 selected.push_str(&s);
             } else if i == sel_start.0 {
                 let s: String = text.chars().skip(sel_start.1).collect();
@@ -433,11 +369,12 @@ impl App {
     fn apply_sel(&self, lines: &mut [Line<'static>]) {
         let Some(start) = self.select_start else { return };
         let Some(end) = self.select_end else { return };
-        let (sel_start, sel_end) = if start.0 < end.0 || (start.0 == end.0 && start.1 <= end.1) {
-            (start, end)
-        } else {
-            (end, start)
-        };
+        let (sel_start, sel_end) =
+            if start.0 < end.0 || (start.0 == end.0 && start.1 <= end.1) {
+                (start, end)
+            } else {
+                (end, start)
+            };
         let total = self.current_total_lines();
         let visible = lines.len();
         let offset = self.scroll_offset;
@@ -493,47 +430,32 @@ impl App {
 
     fn draw(&mut self, frame: &mut Frame) {
         let area = frame.area();
-        let has_command = self.command_mode;
         let sidebar_width = self.tabs.min_width();
 
-        let main = Layout::horizontal([
-            Constraint::Min(1),
-            Constraint::Length(sidebar_width),
-        ])
-        .split(area);
+        let main =
+            Layout::horizontal([Constraint::Min(1), Constraint::Length(sidebar_width)])
+                .split(area);
 
         let content_area = main[0];
         let sidebar_area = main[1];
 
         for (i, item) in self.items.iter_mut().enumerate() {
-            if let TabItem::Service(s) = item {
-                s.refresh_status();
-                if let Some(entry) = self.tabs.entries.get_mut(i) {
-                    entry.stopped = s.stopped;
-                }
+            item.refresh_status();
+            if let Some(entry) = self.tabs.entries.get_mut(i) {
+                entry.stopped = item.stopped;
             }
         }
 
         self.tabs.draw(frame, sidebar_area);
 
-        let content_layout = if has_command {
-            Layout::vertical([Constraint::Min(1), Constraint::Length(1)])
-        } else {
-            Layout::vertical([Constraint::Min(1)])
-        };
+        self.content_area = content_area;
 
-        let content_chunks = content_layout.split(content_area);
-        let inner_content = content_chunks[0];
-        self.content_area = inner_content;
-
-        if let Some(TabItem::Terminal(t)) = self.items.get_mut(self.tabs.index) {
-            let w = content_area.width.saturating_sub(2).max(10);
-            let h = content_area.height.saturating_sub(2).max(3);
-            t.resize(w, h);
-        }
-
-        let is_terminal = self.is_terminal_tab(self.tabs.index);
-        let in_terminal_input = is_terminal && matches!(self.mode, Mode::TerminalInput);
+        let is_shell = self
+            .items
+            .get(self.tabs.index)
+            .map(|t| t.is_shell())
+            .unwrap_or(false);
+        let in_terminal_input = matches!(self.mode, Mode::TerminalInput);
 
         let instructions = if in_terminal_input {
             Line::from(vec![
@@ -542,7 +464,7 @@ impl App {
                 " Esc ".into(),
                 "scroll".blue().bold(),
             ])
-        } else if is_terminal {
+        } else if is_shell {
             Line::from(vec![
                 " Q ".into(),
                 "quit".blue().bold(),
@@ -557,14 +479,12 @@ impl App {
             Line::from(vec![
                 " Q ".into(),
                 "quit".blue().bold(),
-                " X ".into(),
-                "kill".blue().bold(),
                 " R ".into(),
                 "restart".blue().bold(),
+                " I ".into(),
+                "input".blue().bold(),
                 " T ".into(),
                 "new-term".blue().bold(),
-                " : ".into(),
-                "cmd".blue().bold(),
             ])
         };
 
@@ -578,13 +498,12 @@ impl App {
         });
         let visible_height = inner.height as usize;
 
-        if let Some(TabItem::Service(s)) = self.items.get_mut(self.tabs.index) {
-            s.resize(inner.width, visible_height as u16);
+        if let Some(item) = self.items.get_mut(self.tabs.index) {
+            item.resize(inner.width, visible_height as u16);
         }
 
         let (mut lines, _total) = match self.items.get_mut(self.tabs.index) {
-            Some(TabItem::Service(s)) => s.get_screen(visible_height, self.scroll_offset),
-            Some(TabItem::Terminal(t)) => t.get_screen(visible_height, self.scroll_offset),
+            Some(item) => item.get_screen(visible_height, self.scroll_offset),
             None => (vec![Line::from("no tab")], 0),
         };
         self.apply_sel(&mut lines);
@@ -595,31 +514,14 @@ impl App {
         frame.render_widget(widget, content_area);
 
         if in_terminal_input && self.scroll_offset == 0 {
-            if let Some(TabItem::Terminal(t)) = self.items.get_mut(self.tabs.index) {
-                if let Some((row, col)) = t.cursor_position() {
+            if let Some(item) = self.items.get(self.tabs.index) {
+                if let Some((row, col)) = item.cursor_position() {
                     let x = content_area.x + 1 + col;
                     let y = content_area.y + 1 + row;
                     if x < content_area.right() && y < content_area.bottom() {
                         frame.set_cursor_position(Position { x, y });
                     }
                 }
-            }
-        }
-
-        if has_command {
-            let cmd_area = content_chunks[1];
-            let prompt = format!(":{}", self.command_buf);
-            let cmd_block = Block::bordered()
-                .border_set(border::THICK)
-                .style(Style::default().bg(Color::DarkGray).fg(Color::White));
-            frame.render_widget(
-                Paragraph::new(Line::from(Span::raw(prompt))).block(cmd_block),
-                cmd_area,
-            );
-            let x = cmd_area.x + 1 + self.command_buf.len() as u16;
-            let y = cmd_area.y + 1;
-            if x < cmd_area.right() && y < cmd_area.bottom() {
-                frame.set_cursor_position(Position { x, y });
             }
         }
     }
@@ -648,8 +550,9 @@ fn key_to_bytes(key: KeyEvent) -> Option<Vec<u8>> {
                     _ => return None,
                 };
                 Some(vec![byte])
-            } else if key.modifiers == KeyModifiers::SHIFT || key.modifiers == KeyModifiers::NONE {
-                let mut s = vec![0u8; 4];
+            } else if key.modifiers == KeyModifiers::SHIFT || key.modifiers == KeyModifiers::NONE
+            {
+                let mut s = [0u8; 4];
                 let encoded = c.encode_utf8(&mut s);
                 Some(encoded.as_bytes().to_vec())
             } else {

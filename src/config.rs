@@ -1,8 +1,12 @@
 use serde::Deserialize;
 
-use crate::service::Service;
+#[derive(Debug, Deserialize)]
+pub struct ConfigEntry {
+    pub path: String,
+    pub cmd: String,
+}
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
-    pub service: Vec<Service>,
+    pub service: Vec<ConfigEntry>,
 }
