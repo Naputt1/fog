@@ -86,9 +86,7 @@ impl Service {
 
         self.master = Some(pair.master);
 
-        self.parser = Arc::new(Mutex::new(vt100::Parser::new(
-            24, COLS, MAX_SCROLLBACK,
-        )));
+        self.parser = Arc::new(Mutex::new(vt100::Parser::new(24, COLS, MAX_SCROLLBACK)));
         let parser = self.parser.clone();
 
         let handler = thread::spawn(move || {
@@ -125,9 +123,7 @@ impl Service {
         let scroll_off = offset.min(sb);
         screen.set_scrollback(scroll_off);
 
-        let rows_to_read = n
-            .min(vis_rows as usize)
-            .min(total.saturating_sub(offset));
+        let rows_to_read = n.min(vis_rows as usize).min(total.saturating_sub(offset));
 
         if rows_to_read == 0 {
             return (vec![], total);
@@ -274,6 +270,23 @@ impl Service {
         self.stopped = false;
         self.run()
     }
+
+    pub fn refresh_status(&mut self) {
+        if self.stopped {
+            return;
+        }
+        if let Some(ref child) = self.child {
+            if let Some(pid) = child.process_id() {
+                let mut status: i32 = 0;
+                let ret = unsafe {
+                    libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG)
+                };
+                if ret != 0 {
+                    self.stopped = true;
+                }
+            }
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -283,8 +296,7 @@ fn kill_descendants(pid: libc::pid_t) {
 
     while let Some(current_pid) = queue.pop_front() {
         unsafe {
-            let byte_count =
-                libc::proc_listchildpids(current_pid, std::ptr::null_mut(), 0);
+            let byte_count = libc::proc_listchildpids(current_pid, std::ptr::null_mut(), 0);
             if byte_count > 0 {
                 let pid_count = byte_count as usize / std::mem::size_of::<libc::pid_t>();
                 let mut children: Vec<libc::pid_t> = vec![0; pid_count];

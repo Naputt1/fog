@@ -1,10 +1,9 @@
 use ratatui::{
     Frame,
     layout::{Position, Rect},
-    style::{Color, Style, Stylize},
-    symbols,
-    text::Line,
-    widgets::Tabs,
+    style::Style,
+    widgets::{List, ListItem, ListState},
+    text::{Line, Span},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -35,11 +34,23 @@ impl TabEntry {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ClickTab {
     pub entries: Vec<TabEntry>,
     pub index: usize,
     area: Option<Rect>,
+    list_state: ListState,
+}
+
+impl Default for ClickTab {
+    fn default() -> Self {
+        Self {
+            entries: Vec::new(),
+            index: 0,
+            area: None,
+            list_state: ListState::default(),
+        }
+    }
 }
 
 impl ClickTab {
@@ -48,12 +59,15 @@ impl ClickTab {
             .into_iter()
             .map(|name| TabEntry { name, kind: TabKind::Service, stopped: false })
             .collect();
-        Self { entries, index: 0, area: None }
+        let mut list_state = ListState::default();
+        list_state.select(Some(0));
+        Self { entries, index: 0, area: None, list_state }
     }
 
     pub fn add(&mut self, name: String, kind: TabKind) {
         self.entries.push(TabEntry { name, kind, stopped: false });
         self.index = self.entries.len() - 1;
+        self.list_state.select(Some(self.index));
     }
 
     pub fn remove(&mut self, idx: usize) {
@@ -64,53 +78,60 @@ impl ClickTab {
         if self.index >= self.entries.len() && !self.entries.is_empty() {
             self.index = self.entries.len() - 1;
         }
+        self.list_state.select(Some(self.index));
+    }
+
+    pub fn min_width(&self) -> u16 {
+        let max_name = self
+            .entries
+            .iter()
+            .map(|e| e.display_name().len())
+            .max()
+            .unwrap_or(0);
+        (max_name + 5) as u16
     }
 
     pub fn click(&mut self, x: u16, y: u16) {
-        let tab_area = self.area.expect("missing tab area");
-
-        if !tab_area.contains(Position { x, y }) {
+        let sidebar_area = self.area.expect("missing sidebar area");
+        if !sidebar_area.contains(Position { x, y }) {
             return;
         }
-
-        let mut padding: usize = 0;
-        for (i, entry) in self.entries.iter().enumerate() {
-            let name_len = entry.display_name().len();
-            if x as usize <= padding + name_len {
-                self.index = i;
-                return;
-            }
-            padding += name_len + 2;
+        let row = y.saturating_sub(sidebar_area.y);
+        if (row as usize) < self.entries.len() {
+            self.index = row as usize;
+            self.list_state.select(Some(self.index));
         }
     }
 
     pub fn draw(&mut self, frame: &mut Frame, area: Rect) {
         self.area = Some(area);
-        let display_names: Vec<Line> = self
+
+        let items: Vec<ListItem> = self
             .entries
             .iter()
             .map(|e| {
                 let name = e.display_name();
+                let status = if e.stopped { "○" } else { "●" };
+                let line = Line::from(Span::raw(format!("{} {}", status, name)));
+                let item = ListItem::new(line);
                 match e.kind {
-                    TabKind::Terminal => Line::from(name).green(),
+                    TabKind::Terminal => item.style(Style::default().green()),
                     TabKind::Service => {
                         if e.stopped {
-                            Line::from(name).red().dim()
+                            item.style(Style::default().red().dim())
                         } else {
-                            Line::from(name)
+                            item.style(Style::default())
                         }
                     }
                 }
             })
             .collect();
 
-        let tabs = Tabs::new(display_names)
-            .style(Color::White)
+        let list = List::new(items)
             .highlight_style(Style::default().magenta().on_black().bold())
-            .select(Some(self.index))
-            .divider(symbols::DOT)
-            .padding(" ", " ");
+            .highlight_symbol("▸ ");
 
-        frame.render_widget(tabs, area);
+        self.list_state.select(Some(self.index));
+        frame.render_stateful_widget(list, area, &mut self.list_state);
     }
 }

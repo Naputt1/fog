@@ -243,24 +243,24 @@ impl App {
         match key.code {
             KeyCode::Char('q') => self.exit = true,
             KeyCode::Esc => {}
-            KeyCode::Char('h') | KeyCode::Right => {
+            KeyCode::Char('j') | KeyCode::Char('h') | KeyCode::Right => {
                 let prev = self.tabs.index;
                 self.tabs.index = (self.tabs.index + 1) % self.items.len();
                 if prev != self.tabs.index {
                     self.on_tab_switch();
                 }
             }
-            KeyCode::Char('l') | KeyCode::Left => {
+            KeyCode::Char('k') | KeyCode::Char('l') | KeyCode::Left => {
                 let prev = self.tabs.index;
                 self.tabs.index = (self.tabs.index + self.items.len() - 1) % self.items.len();
                 if prev != self.tabs.index {
                     self.on_tab_switch();
                 }
             }
-            KeyCode::Char('j') | KeyCode::Down => {
+            KeyCode::Down => {
                 self.scroll_to(self.scroll_offset.saturating_sub(1));
             }
-            KeyCode::Char('k') | KeyCode::Up => {
+            KeyCode::Up => {
                 self.scroll_to(self.scroll_offset.saturating_add(1));
             }
             KeyCode::PageUp => {
@@ -494,22 +494,37 @@ impl App {
     fn draw(&mut self, frame: &mut Frame) {
         let area = frame.area();
         let has_command = self.command_mode;
+        let sidebar_width = self.tabs.min_width();
 
-        let layout = if has_command {
-            Layout::vertical([
-                Constraint::Length(1),
-                Constraint::Min(1),
-                Constraint::Length(1),
-            ])
+        let main = Layout::horizontal([
+            Constraint::Min(1),
+            Constraint::Length(sidebar_width),
+        ])
+        .split(area);
+
+        let content_area = main[0];
+        let sidebar_area = main[1];
+
+        for (i, item) in self.items.iter_mut().enumerate() {
+            if let TabItem::Service(s) = item {
+                s.refresh_status();
+                if let Some(entry) = self.tabs.entries.get_mut(i) {
+                    entry.stopped = s.stopped;
+                }
+            }
+        }
+
+        self.tabs.draw(frame, sidebar_area);
+
+        let content_layout = if has_command {
+            Layout::vertical([Constraint::Min(1), Constraint::Length(1)])
         } else {
-            Layout::vertical([Constraint::Length(1), Constraint::Min(1)])
+            Layout::vertical([Constraint::Min(1)])
         };
 
-        let chunks = layout.split(area);
-        self.tabs.draw(frame, chunks[0]);
-
-        let content_area = chunks[1];
-        self.content_area = content_area;
+        let content_chunks = content_layout.split(content_area);
+        let inner_content = content_chunks[0];
+        self.content_area = inner_content;
 
         if let Some(TabItem::Terminal(t)) = self.items.get_mut(self.tabs.index) {
             let w = content_area.width.saturating_sub(2).max(10);
@@ -590,7 +605,7 @@ impl App {
         }
 
         if has_command {
-            let cmd_area = chunks[2];
+            let cmd_area = content_chunks[1];
             let prompt = format!(":{}", self.command_buf);
             let cmd_block = Block::bordered()
                 .border_set(border::THICK)
