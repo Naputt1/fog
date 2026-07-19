@@ -47,6 +47,8 @@ pub struct TerminalSession {
     writer: Option<Box<dyn std::io::Write + Send>>,
     child: Option<Box<dyn Child + Send + Sync>>,
     master: Option<Box<dyn MasterPty + Send>>,
+    max_cols: u16,
+    max_rows: u16,
 }
 
 fn scrollback_len(screen: &mut vt100::Screen) -> usize {
@@ -107,6 +109,8 @@ impl TerminalSession {
             writer: Some(writer),
             child: Some(child),
             master: Some(pair.master),
+            max_cols: 80,
+            max_rows: 24,
         })
     }
 
@@ -254,7 +258,13 @@ impl TerminalSession {
             });
         }
         let mut p = self.parser.lock().unwrap();
-        p.screen_mut().set_size(rows, cols);
+        if cols > self.max_cols || rows > self.max_rows {
+            let new_cols = cols.max(self.max_cols);
+            let new_rows = rows.max(self.max_rows);
+            self.max_cols = new_cols;
+            self.max_rows = new_rows;
+            p.screen_mut().set_size(new_rows, new_cols);
+        }
     }
 }
 

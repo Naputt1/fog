@@ -40,6 +40,10 @@ pub struct Service {
     master: Option<Box<dyn MasterPty + Send>>,
     #[serde(skip)]
     pub stopped: bool,
+    #[serde(skip)]
+    max_cols: u16,
+    #[serde(skip)]
+    max_rows: u16,
 }
 
 impl fmt::Debug for Service {
@@ -87,6 +91,8 @@ impl Service {
         self.master = Some(pair.master);
 
         self.parser = Arc::new(Mutex::new(vt100::Parser::new(24, COLS, MAX_SCROLLBACK)));
+        self.max_cols = COLS;
+        self.max_rows = 24;
         let parser = self.parser.clone();
 
         let handler = thread::spawn(move || {
@@ -236,7 +242,13 @@ impl Service {
             });
         }
         let mut p = self.parser.lock().unwrap();
-        p.screen_mut().set_size(rows, cols);
+        if cols > self.max_cols || rows > self.max_rows {
+            let new_cols = cols.max(self.max_cols);
+            let new_rows = rows.max(self.max_rows);
+            self.max_cols = new_cols;
+            self.max_rows = new_rows;
+            p.screen_mut().set_size(new_rows, new_cols);
+        }
     }
 
     fn kill_inner(&mut self) {

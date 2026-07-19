@@ -10,7 +10,7 @@ use ratatui::{
     style::{Color, Style, Stylize},
     symbols::border,
     text::{Line, Span, Text},
-    widgets::{Block, Paragraph},
+    widgets::{Block, Paragraph, Wrap},
 };
 use std::{io, path::Path, time::Duration};
 
@@ -589,7 +589,9 @@ impl App {
         };
         self.apply_sel(&mut lines);
 
-        let widget = Paragraph::new(Text::from(lines)).block(block);
+        let widget = Paragraph::new(Text::from(lines))
+            .block(block)
+            .wrap(Wrap { trim: false });
         frame.render_widget(widget, content_area);
 
         if in_terminal_input && self.scroll_offset == 0 {
