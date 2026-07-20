@@ -14,8 +14,8 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Paragraph, Wrap},
 };
-use std::{io, time::Duration};
 use std::io::Write;
+use std::{io, time::Duration};
 
 enum Mode {
     Normal,
@@ -162,12 +162,6 @@ impl App {
         }
     }
 
-    fn clear_selection(&mut self) {
-        self.selecting = false;
-        self.select_start = None;
-        self.select_end = None;
-    }
-
     fn is_shell_tab(&self, idx: usize) -> bool {
         self.items.get(idx).map(|t| t.is_shell()).unwrap_or(false)
     }
@@ -215,11 +209,10 @@ impl App {
             self.mode = Mode::Normal;
             return;
         }
-        if let Some(item) = self.items.get_mut(self.tabs.index) {
-            if let Some(bytes) = key_to_bytes(key) {
+        if let Some(item) = self.items.get_mut(self.tabs.index)
+            && let Some(bytes) = keybinding::key_to_bytes(key) {
                 item.write(&bytes);
             }
-        }
     }
 
     fn handle_normal_key(&mut self, key: KeyEvent) {
@@ -280,8 +273,8 @@ impl App {
             }
             return;
         }
-        if let Some(item) = self.items.get_mut(self.tabs.index) {
-            if !item.is_shell() {
+        if let Some(item) = self.items.get_mut(self.tabs.index)
+            && !item.is_shell() {
                 if let Err(e) = item.restart() {
                     self.errors.push(format!("restart error: {}", e));
                 }
@@ -289,7 +282,6 @@ impl App {
                     e.stopped = false;
                 }
             }
-        }
     }
 
     fn new_terminal(&mut self) {
@@ -367,8 +359,8 @@ impl App {
             }
         }
 
-        if let Some(ref mut p) = self.proxy {
-            if let Some(entry) = self
+        if let Some(ref mut p) = self.proxy
+            && let Some(entry) = self
                 .tabs
                 .entries
                 .iter_mut()
@@ -376,7 +368,6 @@ impl App {
             {
                 entry.stopped = !p.is_running();
             }
-        }
 
         self.tabs.draw(frame, sidebar_area);
 
@@ -452,7 +443,7 @@ impl App {
         };
 
         let total = logs.len() + 3;
-        let offset = self.scroll_offset.min(total.saturating_sub(visible_height).max(0));
+        let offset = self.scroll_offset.min(total.saturating_sub(visible_height));
 
         let _start = offset.saturating_sub(3);
 
@@ -528,7 +519,7 @@ impl App {
             horizontal: 1,
             vertical: 1,
         });
-        let visible_height = inner.height as u16;
+        let visible_height = inner.height;
 
         if let Some(item) = self.items.get_mut(self.tabs.index) {
             item.resize(inner.width, visible_height);
@@ -538,24 +529,31 @@ impl App {
             Some(item) => item.get_screen(visible_height as usize, self.scroll_offset),
             None => (vec![Line::from("no tab")], 0),
         };
-        self.apply_sel(&mut lines);
+        selection::apply_sel(&mut lines, self.select_start, self.select_end, self.scroll_offset, self.current_total_lines());
+
+        if self.scroll_offset > 0 && !lines.is_empty() {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!(" ↑ scrolled up {} lines", self.scroll_offset),
+                    Style::default().dim(),
+                ),
+            ]));
+        }
 
         let widget = Paragraph::new(Text::from(lines))
             .block(block)
             .wrap(Wrap { trim: false });
         frame.render_widget(widget, content_area);
 
-        if in_terminal_input && self.scroll_offset == 0 {
-            if let Some(item) = self.items.get(self.tabs.index) {
-                if let Some((row, col)) = item.cursor_position() {
+        if in_terminal_input && self.scroll_offset == 0
+            && let Some(item) = self.items.get(self.tabs.index)
+                && let Some((row, col)) = item.cursor_position() {
                     let x = content_area.x + 1 + col;
                     let y = content_area.y + 1 + row;
                     if x < content_area.right() && y < content_area.bottom() {
                         frame.set_cursor_position(Position { x, y });
                     }
                 }
-            }
-        }
     }
 }
 
@@ -568,38 +566,37 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-fn key_to_bytes(key: KeyEvent) -> Option<Vec<u8>> {
-    match key.code {
-        KeyCode::Enter => Some(vec![b'\n']),
-        KeyCode::Backspace => Some(vec![0x7f]),
-        KeyCode::Tab => Some(vec![b'\t']),
-        KeyCode::Esc => Some(vec![0x1b]),
-        KeyCode::Up => Some(b"\x1b[A".to_vec()),
-        KeyCode::Down => Some(b"\x1b[B".to_vec()),
-        KeyCode::Right => Some(b"\x1b[C".to_vec()),
-        KeyCode::Left => Some(b"\x1b[D".to_vec()),
-        KeyCode::Home => Some(b"\x1b[H".to_vec()),
-        KeyCode::End => Some(b"\x1b[F".to_vec()),
-        KeyCode::Delete => Some(b"\x1b[3~".to_vec()),
-        KeyCode::PageUp => Some(b"\x1b[5~".to_vec()),
-        KeyCode::PageDown => Some(b"\x1b[6~".to_vec()),
-        KeyCode::Char(c) => {
-            if key.modifiers == KeyModifiers::CONTROL {
-                let byte = match c {
-                    'a'..='z' => c as u8 - b'a' + 1,
-                    'A'..='Z' => c as u8 - b'A' + 1,
-                    _ => return None,
-                };
-                Some(vec![byte])
-            } else if key.modifiers == KeyModifiers::SHIFT || key.modifiers == KeyModifiers::NONE
-            {
-                let mut s = [0u8; 4];
-                let encoded = c.encode_utf8(&mut s);
-                Some(encoded.as_bytes().to_vec())
-            } else {
-                None
-            }
-        }
-        _ => None,
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_truncate_empty() {
+        assert_eq!(truncate("", 10), "");
+    }
+
+    #[test]
+    fn test_truncate_under_max() {
+        assert_eq!(truncate("hello", 10), "hello");
+    }
+
+    #[test]
+    fn test_truncate_exact_max() {
+        assert_eq!(truncate("hello", 5), "hello");
+    }
+
+    #[test]
+    fn test_truncate_over_max() {
+        assert_eq!(truncate("hello world", 8), "hello...");
+    }
+
+    #[test]
+    fn test_truncate_multi_byte() {
+        assert_eq!(truncate("héllo wörld", 6), "hél...");
+    }
+
+    #[test]
+    fn test_truncate_max_zero() {
+        assert_eq!(truncate("hello", 0), "...");
     }
 }
