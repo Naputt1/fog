@@ -8,11 +8,11 @@ use crossterm::event::{
 };
 use ratatui::{
     DefaultTerminal, Frame,
-    layout::{Constraint, Layout, Margin, Position, Rect},
+    layout::{Alignment, Constraint, Layout, Margin, Position, Rect},
     style::{Style, Stylize},
     symbols::border,
     text::{Line, Span, Text},
-    widgets::{Block, Paragraph, Wrap},
+    widgets::{Block, Clear, Paragraph, Wrap},
 };
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -37,6 +37,7 @@ pub struct App {
     select_start: Option<(usize, usize)>,
     select_end: Option<(usize, usize)>,
     content_area: Rect,
+    show_help: bool,
     errors: Vec<String>,
 }
 
@@ -74,6 +75,7 @@ impl App {
             select_start: None,
             select_end: None,
             content_area: Rect::default(),
+            show_help: false,
             errors: Vec::new(),
         }
     }
@@ -191,6 +193,15 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent) {
+        if self.show_help {
+            match key.code {
+                KeyCode::Char('?') => self.show_help = false,
+                KeyCode::Char('q') if key.modifiers == KeyModifiers::NONE => self.exit = true,
+                _ => self.show_help = false,
+            }
+            return;
+        }
+
         if key.modifiers == KeyModifiers::CONTROL {
             match key.code {
                 KeyCode::Char('q') => {
@@ -286,6 +297,7 @@ impl App {
             KeyCode::Char('R') => self.restart_current(),
             KeyCode::Char('t') => self.new_terminal(),
             KeyCode::Char('d') => self.close_tab(),
+            KeyCode::Char('?') => self.show_help = !self.show_help,
             _ => {}
         }
     }
@@ -451,6 +463,46 @@ impl App {
             self.draw_proxy_content(frame, content_area, block);
         } else {
             self.draw_terminal_content(frame, content_area, block, in_terminal_input);
+        }
+
+        if self.show_help {
+            let help_text = vec![
+                Line::from(vec![Span::raw("  q/Ctrl+q   Quit                ")]),
+                Line::from(vec![Span::raw("  j/Right    Next tab            ")]),
+                Line::from(vec![Span::raw("  k/Left     Previous tab        ")]),
+                Line::from(vec![Span::raw("  i          Terminal input mode ")]),
+                Line::from(vec![Span::raw("  Esc        Exit input mode     ")]),
+                Line::from(vec![Span::raw("  R          Restart service     ")]),
+                Line::from(vec![Span::raw("  t/Ctrl+t   New shell tab       ")]),
+                Line::from(vec![Span::raw("  d          Close shell tab     ")]),
+                Line::from(vec![Span::raw("  g/Home     Scroll to top       ")]),
+                Line::from(vec![Span::raw("  G/End      Scroll to bottom    ")]),
+                Line::from(vec![Span::raw("  Up/Down    Scroll output       ")]),
+                Line::from(vec![Span::raw("  PgUp/Dn    Scroll by page      ")]),
+                Line::from(vec![Span::raw("  ?          Toggle help         ")]),
+            ];
+
+            let overlay_width = 40u16.min(area.width.saturating_sub(4));
+            let overlay_height = help_text.len() as u16 + 2;
+            let overlay_x = (area.width.saturating_sub(overlay_width)) / 2;
+            let overlay_y = (area.height.saturating_sub(overlay_height)) / 2;
+
+            let overlay_area = Rect {
+                x: overlay_x,
+                y: overlay_y,
+                width: overlay_width,
+                height: overlay_height,
+            };
+
+            let block = Block::bordered()
+                .title(" Help ")
+                .style(Style::default());
+            let help = Paragraph::new(Text::from(help_text))
+                .block(block)
+                .alignment(Alignment::Left);
+
+            frame.render_widget(Clear, overlay_area);
+            frame.render_widget(help, overlay_area);
         }
     }
 
