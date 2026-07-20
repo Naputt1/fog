@@ -168,7 +168,7 @@ impl Terminal {
     pub fn spawn_error(name: String, error: String) -> Self {
         let parser = Arc::new(Mutex::new(vt100::Parser::new(24, 80, MAX_SCROLLBACK)));
         {
-            let mut p = parser.lock().unwrap();
+            let mut p = parser.lock().expect("parser mutex poisoned");
             p.screen_mut().set_size(24, 80);
             p.process(error.as_bytes());
         }
@@ -208,7 +208,7 @@ impl Terminal {
 
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "bash".to_string());
         let mut cmd_builder = CommandBuilder::new(&shell);
-        cmd_builder.cwd(&path);
+        cmd_builder.cwd(path);
 
         let child = pair
             .slave
@@ -247,7 +247,7 @@ impl Terminal {
     }
 
     pub fn total_lines(&self) -> usize {
-        let mut parser = self.parser.lock().unwrap();
+        let mut parser = self.parser.lock().expect("parser mutex poisoned");
         let screen = parser.screen_mut();
         let (vis_rows, _) = screen.size();
         let sb = scrollback_len(screen);
@@ -255,7 +255,7 @@ impl Terminal {
     }
 
     pub fn get_screen(&self, n: usize, offset: usize) -> (Vec<Line<'static>>, usize) {
-        let mut parser = self.parser.lock().unwrap();
+        let mut parser = self.parser.lock().expect("parser mutex poisoned");
         let screen = parser.screen_mut();
         let (vis_rows, cols) = screen.size();
         let sb = scrollback_len(screen);
@@ -334,40 +334,36 @@ impl Terminal {
     }
 
     pub fn get_all_lines(&self) -> Vec<String> {
-        let mut parser = self.parser.lock().unwrap();
+        let mut parser = self.parser.lock().expect("parser mutex poisoned");
         let screen = parser.screen_mut();
         let (vis_rows, cols) = screen.size();
         let sb = scrollback_len(screen);
+        let vis = vis_rows as usize;
 
-        let mut result = Vec::with_capacity(sb + vis_rows as usize);
+        let mut result = Vec::with_capacity(sb + vis);
 
-        for n in (1..=sb).rev() {
-            screen.set_scrollback(n);
-            let mut line = String::with_capacity(cols as usize);
-            for c in 0..cols {
-                if let Some(cell) = screen.cell(0, c) {
-                    line.push_str(cell.contents());
-                }
+        // Read scrollback in chunks of vis_rows to avoid O(sb²) from
+        // repeated visible_rows() iterator creation. Each call to
+        // cell() or rows() goes through visible_rows().skip(sb - offset),
+        // which is O(sb) — iterating one row at a time costs O(sb²).
+        let mut remaining = sb;
+        while remaining > 0 {
+            screen.set_scrollback(remaining);
+            let chunk_size = remaining.min(vis);
+            for line in screen.rows(0, cols).take(chunk_size) {
+                result.push(line);
             }
-            result.push(line);
+            remaining -= chunk_size;
         }
 
         screen.set_scrollback(0);
-        for r in 0..vis_rows {
-            let mut line = String::with_capacity(cols as usize);
-            for c in 0..cols {
-                if let Some(cell) = screen.cell(r, c) {
-                    line.push_str(cell.contents());
-                }
-            }
-            result.push(line);
-        }
+        result.extend(screen.rows(0, cols));
 
         result
     }
 
     pub fn cursor_position(&self) -> Option<(u16, u16)> {
-        let parser = self.parser.lock().unwrap();
+        let parser = self.parser.lock().expect("parser mutex poisoned");
         let screen = parser.screen();
         if screen.hide_cursor() {
             return None;
@@ -389,7 +385,7 @@ impl Terminal {
                 pixel_height: 0,
             });
         }
-        let mut p = self.parser.lock().unwrap();
+        let mut p = self.parser.lock().expect("parser mutex poisoned");
         let (cur_rows, cur_cols) = p.screen().size();
         if cols != cur_cols || rows != cur_rows {
             p.screen_mut().set_size(rows, cols);
@@ -397,13 +393,18 @@ impl Terminal {
     }
 
     fn kill_inner(&mut self) {
-        if let Some(ref child) = self.child {
-            if let Some(pid) = child.process_id() {
+        if let Some(ref child) = self.child
+            && let Some(pid) = child.process_id() {
                 let pid = pid as libc::pid_t;
-                let _ = unsafe { libc::kill(-pid, libc::SIGKILL) };
+                unsafe { libc::kill(-pid, libc::SIGTERM) };
+                thread::sleep(std::time::Duration::from_millis(500));
+                let mut status: i32 = 0;
+                let ret = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+                if ret == 0 {
+                    unsafe { libc::kill(-pid, libc::SIGKILL) };
+                }
                 kill_descendants(pid);
             }
-        }
 
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
@@ -434,8 +435,8 @@ impl Terminal {
         if self.stopped {
             return;
         }
-        if let Some(ref child) = self.child {
-            if let Some(pid) = child.process_id() {
+        if let Some(ref child) = self.child
+            && let Some(pid) = child.process_id() {
                 let mut status: i32 = 0;
                 let ret = unsafe {
                     libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG)
@@ -444,7 +445,6 @@ impl Terminal {
                     self.stopped = true;
                 }
             }
-        }
     }
 }
 
@@ -480,13 +480,140 @@ fn kill_descendants(_pid: libc::pid_t) {}
 
 impl Drop for Terminal {
     fn drop(&mut self) {
-        if self.save_logs {
-            if let Init::Command { .. } = &self.init {
+        if self.save_logs
+            && let Init::Command { .. } = &self.init {
                 let _ = fs::create_dir_all("temp");
                 let text = self.get_all_lines().join("\n");
                 let _ = fs::write(format!("temp/{}.txt", self.name), &text);
             }
-        }
         self.kill_inner();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::style::{Color, Modifier};
+
+    #[test]
+    fn test_cell_style_default() {
+        let mut parser = vt100::Parser::new(24, 80, 100);
+        parser.process(b"X");
+        let screen = parser.screen();
+        let cell = screen.cell(0, 0).unwrap();
+        let style = cell_style(&cell);
+        assert_eq!(style, Style::default());
+    }
+
+    #[test]
+    fn test_cell_style_fg_color() {
+        let mut parser = vt100::Parser::new(24, 80, 100);
+        parser.process(b"\x1b[31mX");
+        let screen = parser.screen();
+        let cell = screen.cell(0, 0).unwrap();
+        let style = cell_style(&cell);
+        assert_eq!(style.fg, Some(Color::Indexed(1)));
+    }
+
+    #[test]
+    fn test_cell_style_bg_color() {
+        let mut parser = vt100::Parser::new(24, 80, 100);
+        parser.process(b"\x1b[42mX");
+        let screen = parser.screen();
+        let cell = screen.cell(0, 0).unwrap();
+        let style = cell_style(&cell);
+        assert_eq!(style.bg, Some(Color::Indexed(2)));
+    }
+
+    #[test]
+    fn test_cell_style_bold() {
+        let mut parser = vt100::Parser::new(24, 80, 100);
+        parser.process(b"\x1b[1mB");
+        let screen = parser.screen();
+        let cell = screen.cell(0, 0).unwrap();
+        let style = cell_style(&cell);
+        assert!(style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn test_cell_style_italic() {
+        let mut parser = vt100::Parser::new(24, 80, 100);
+        parser.process(b"\x1b[3mI");
+        let screen = parser.screen();
+        let cell = screen.cell(0, 0).unwrap();
+        let style = cell_style(&cell);
+        assert!(style.add_modifier.contains(Modifier::ITALIC));
+    }
+
+    #[test]
+    fn test_cell_style_underline() {
+        let mut parser = vt100::Parser::new(24, 80, 100);
+        parser.process(b"\x1b[4mU");
+        let screen = parser.screen();
+        let cell = screen.cell(0, 0).unwrap();
+        let style = cell_style(&cell);
+        assert!(style.add_modifier.contains(Modifier::UNDERLINED));
+    }
+
+    #[test]
+    fn test_cell_style_inverse() {
+        let mut parser = vt100::Parser::new(24, 80, 100);
+        parser.process(b"\x1b[7mV");
+        let screen = parser.screen();
+        let cell = screen.cell(0, 0).unwrap();
+        let style = cell_style(&cell);
+        assert!(style.add_modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn test_cell_style_dim() {
+        let mut parser = vt100::Parser::new(24, 80, 100);
+        parser.process(b"\x1b[2mD");
+        let screen = parser.screen();
+        let cell = screen.cell(0, 0).unwrap();
+        let style = cell_style(&cell);
+        assert!(style.add_modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn test_cell_style_rgb() {
+        let mut parser = vt100::Parser::new(24, 80, 100);
+        parser.process(b"\x1b[38;2;255;128;0mO");
+        let screen = parser.screen();
+        let cell = screen.cell(0, 0).unwrap();
+        let style = cell_style(&cell);
+        assert_eq!(style.fg, Some(Color::Rgb(255, 128, 0)));
+    }
+
+    #[test]
+    fn test_cell_style_indexed() {
+        let mut parser = vt100::Parser::new(24, 80, 100);
+        parser.process(b"\x1b[38;5;42mC");
+        let screen = parser.screen();
+        let cell = screen.cell(0, 0).unwrap();
+        let style = cell_style(&cell);
+        assert_eq!(style.fg, Some(Color::Indexed(42)));
+    }
+
+    #[test]
+    fn test_cell_style_combined() {
+        let mut parser = vt100::Parser::new(24, 80, 100);
+        parser.process(b"\x1b[1;31;43mX");
+        let screen = parser.screen();
+        let cell = screen.cell(0, 0).unwrap();
+        let style = cell_style(&cell);
+        assert_eq!(style.fg, Some(Color::Indexed(1)));
+        assert_eq!(style.bg, Some(Color::Indexed(3)));
+        assert!(style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn test_cell_style_reset() {
+        let mut parser = vt100::Parser::new(24, 80, 100);
+        parser.process(b"\x1b[31;1mX\x1b[0mY");
+        let screen = parser.screen();
+        let cell = screen.cell(0, 1).unwrap();
+        let style = cell_style(&cell);
+        assert_eq!(style, Style::default());
     }
 }
