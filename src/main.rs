@@ -1,9 +1,12 @@
+#![deny(unsafe_op_in_unsafe_fn)]
+
 use std::io::stdout;
 use std::{fs, io};
 mod app;
 mod click_tab;
 mod config;
 mod keybinding;
+mod process;
 mod proxy;
 mod selection;
 mod terminal;

@@ -1,3 +1,5 @@
+use crate::process;
+use libc::{SIGKILL, SIGTERM};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize};
 use ratatui::{
     style::{Color, Modifier, Style},
@@ -395,15 +397,12 @@ impl Terminal {
     fn kill_inner(&mut self) {
         if let Some(ref child) = self.child
             && let Some(pid) = child.process_id() {
-                let pid = pid as libc::pid_t;
-                unsafe { libc::kill(-pid, libc::SIGTERM) };
+                process::try_kill_process_group(pid, SIGTERM);
                 thread::sleep(std::time::Duration::from_millis(500));
-                let mut status: i32 = 0;
-                let ret = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
-                if ret == 0 {
-                    unsafe { libc::kill(-pid, libc::SIGKILL) };
+                if let Ok(None) = process::waitpid_nohang(pid) {
+                    process::try_kill_process_group(pid, SIGKILL);
                 }
-                kill_descendants(pid);
+                process::kill_descendants(pid);
             }
 
         if let Some(mut child) = self.child.take() {
@@ -436,47 +435,13 @@ impl Terminal {
             return;
         }
         if let Some(ref child) = self.child
-            && let Some(pid) = child.process_id() {
-                let mut status: i32 = 0;
-                let ret = unsafe {
-                    libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG)
-                };
-                if ret != 0 {
-                    self.stopped = true;
-                }
-            }
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn kill_descendants(pid: libc::pid_t) {
-    let mut queue = std::collections::VecDeque::new();
-    queue.push_back(pid);
-
-    while let Some(current_pid) = queue.pop_front() {
-        unsafe {
-            let byte_count = libc::proc_listchildpids(current_pid, std::ptr::null_mut(), 0);
-            if byte_count > 0 {
-                let pid_count = byte_count as usize / std::mem::size_of::<libc::pid_t>();
-                let mut children: Vec<libc::pid_t> = vec![0; pid_count];
-                libc::proc_listchildpids(
-                    current_pid,
-                    children.as_mut_ptr() as *mut libc::c_void,
-                    byte_count,
-                );
-                for &child_pid in &children {
-                    if child_pid > 0 {
-                        libc::kill(child_pid, libc::SIGKILL);
-                        queue.push_back(child_pid);
-                    }
-                }
-            }
+            && let Some(pid) = child.process_id()
+            && process::waitpid_nohang(pid).unwrap_or(Some(0)).is_some()
+        {
+            self.stopped = true;
         }
     }
 }
-
-#[cfg(not(target_os = "macos"))]
-fn kill_descendants(_pid: libc::pid_t) {}
 
 impl Drop for Terminal {
     fn drop(&mut self) {
