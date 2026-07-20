@@ -91,8 +91,8 @@ See [`fog.schema.json`](./fog.schema.json) for the full schema.
 | Key | Context | Action |
 |-----|---------|--------|
 | `q` / `Ctrl+q` | Any | Quit fog |
-| `j` / `l` / `Right` / `Ctrl+n` | Normal | Next tab |
-| `k` / `h` / `Left` / `Ctrl+p` | Normal | Previous tab |
+| `j` / `Right` / `Ctrl+n` | Normal | Next tab |
+| `k` / `Left` / `Ctrl+p` | Normal | Previous tab |
 | `i` | Normal (non-proxy) | Enter terminal input mode |
 | `Esc` | Terminal input | Exit to normal mode |
 | `R` | Normal | Restart current service or proxy |

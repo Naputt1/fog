@@ -205,14 +205,14 @@ impl App {
         match key.code {
             KeyCode::Char('q') => self.exit = true,
             KeyCode::Esc => {}
-            KeyCode::Char('j') | KeyCode::Char('h') | KeyCode::Right => {
+            KeyCode::Char('j') | KeyCode::Right => {
                 let prev = self.tabs.index;
                 self.tabs.index = (self.tabs.index + 1) % self.tabs.entries.len();
                 if prev != self.tabs.index {
                     self.on_tab_switch();
                 }
             }
-            KeyCode::Char('k') | KeyCode::Char('l') | KeyCode::Left => {
+            KeyCode::Char('k') | KeyCode::Left => {
                 let prev = self.tabs.index;
                 self.tabs.index =
                     (self.tabs.index + self.tabs.entries.len() - 1) % self.tabs.entries.len();
