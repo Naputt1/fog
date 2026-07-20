@@ -13,6 +13,7 @@ use ratatui::{
     widgets::{Block, Paragraph, Wrap},
 };
 use std::{io, time::Duration};
+use std::io::Write;
 
 enum Mode {
     Normal,
@@ -30,6 +31,7 @@ pub struct App {
     select_start: Option<(usize, usize)>,
     select_end: Option<(usize, usize)>,
     content_area: Rect,
+    errors: Vec<String>,
 }
 
 impl App {
@@ -59,6 +61,7 @@ impl App {
             select_start: None,
             select_end: None,
             content_area: Rect::default(),
+            errors: Vec::new(),
         }
     }
 
@@ -75,6 +78,11 @@ impl App {
             terminal.draw(|frame| self.draw(frame))?;
             if event::poll(Duration::from_millis(50))? {
                 self.handle_events()?;
+            }
+        }
+        if !self.errors.is_empty() {
+            for err in &self.errors {
+                let _ = writeln!(std::io::stderr(), "{}", err);
             }
         }
         Ok(())
@@ -262,7 +270,7 @@ impl App {
         if let Some(item) = self.items.get_mut(self.tabs.index) {
             if !item.is_shell() {
                 if let Err(e) = item.restart() {
-                    eprintln!("restart error: {}", e);
+                    self.errors.push(format!("restart error: {}", e));
                 }
                 if let Some(e) = self.tabs.entries.get_mut(self.tabs.index) {
                     e.stopped = false;
