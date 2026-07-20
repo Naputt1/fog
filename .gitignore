@@ -25,3 +25,6 @@ target
 
 /target
 temp/
+
+# Local config (user-specific paths)
+fog.json
