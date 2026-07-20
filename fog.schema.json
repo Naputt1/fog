@@ -42,5 +42,12 @@
       "type": "integer",
       "minimum": 100,
       "default": 2000
+    },
+    "sidebar": {
+      "type": "object",
+      "properties": {
+        "min_width": { "type": "integer", "minimum": 8, "maximum": 50 },
+        "max_width": { "type": "integer", "minimum": 8, "maximum": 50 }
+      }
     }
 }

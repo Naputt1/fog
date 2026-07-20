@@ -49,9 +49,12 @@ impl App {
     /// * `items` - The list of terminal instances.
     /// * `proxy` - An optional reverse proxy instance.
     /// * `sigint` - An `AtomicBool` flag set to `true` when SIGINT (Ctrl+C) is received.
-    pub fn new(items: Vec<Terminal>, proxy: Option<ProxyInstance>, sigint: Arc<AtomicBool>, scrollback: usize) -> Self {
+    /// * `scrollback` - Maximum number of scrollback lines.
+    /// * `sidebar_min` - Minimum sidebar width in columns.
+    /// * `sidebar_max` - Maximum sidebar width in columns.
+    pub fn new(items: Vec<Terminal>, proxy: Option<ProxyInstance>, sigint: Arc<AtomicBool>, scrollback: usize, sidebar_min: u16, sidebar_max: u16) -> Self {
         let names: Vec<String> = items.iter().map(|t| t.name.clone()).collect();
-        let mut tabs = ClickTab::new(names);
+        let mut tabs = ClickTab::new(names, sidebar_min, sidebar_max);
         for (i, item) in items.iter().enumerate() {
             tabs.entries[i].kind = if item.is_shell() {
                 TabKind::Terminal

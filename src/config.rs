@@ -31,6 +31,15 @@ pub struct ProxyConfig {
     pub routes: Vec<ProxyRoute>,
 }
 
+/// Sidebar width configuration.
+#[derive(Debug, Deserialize)]
+pub struct SidebarConfig {
+    /// Minimum sidebar width in columns (default: 12).
+    pub min_width: Option<u16>,
+    /// Maximum sidebar width in columns (default: 30).
+    pub max_width: Option<u16>,
+}
+
 /// Top-level application configuration loaded from `fog.json`.
 #[derive(Debug, Deserialize)]
 pub struct Config {
@@ -40,4 +49,6 @@ pub struct Config {
     pub proxy: Option<ProxyConfig>,
     /// Maximum number of scrollback lines to retain per terminal (default: 2000).
     pub max_scrollback: Option<usize>,
+    /// Optional sidebar width constraints.
+    pub sidebar: Option<SidebarConfig>,
 }

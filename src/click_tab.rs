@@ -40,7 +40,6 @@ impl TabEntry {
 
 /// A clickable tab bar rendered as a sidebar list.
 #[derive(Debug)]
-#[derive(Default)]
 pub struct ClickTab {
     /// The list of tab entries.
     pub entries: Vec<TabEntry>,
@@ -48,6 +47,10 @@ pub struct ClickTab {
     pub index: usize,
     area: Option<Rect>,
     list_state: ListState,
+    /// Minimum sidebar width in columns.
+    pub min_sidebar_width: u16,
+    /// Maximum sidebar width in columns.
+    pub max_sidebar_width: u16,
 }
 
 
@@ -58,7 +61,9 @@ impl ClickTab {
     ///
     /// # Arguments
     /// * `names` - The display names for the initial service tabs.
-    pub fn new(names: Vec<String>) -> Self {
+    /// * `min_width` - Minimum sidebar width in columns.
+    /// * `max_width` - Maximum sidebar width in columns.
+    pub fn new(names: Vec<String>, min_width: u16, max_width: u16) -> Self {
         let entries = names
             .into_iter()
             .map(|name| TabEntry {
@@ -74,6 +79,8 @@ impl ClickTab {
             index: 0,
             area: None,
             list_state,
+            min_sidebar_width: min_width,
+            max_sidebar_width: max_width,
         }
     }
 
@@ -117,7 +124,8 @@ impl ClickTab {
             .map(|e| e.display_name().len())
             .max()
             .unwrap_or(0);
-        (max_name + 5) as u16
+        let computed = (max_name + 5) as u16;
+        computed.clamp(self.min_sidebar_width, self.max_sidebar_width)
     }
 
     /// Handles a mouse click to select a tab.
@@ -192,7 +200,7 @@ mod tests {
     #[test]
     fn test_new_creates_entries() {
         let names = vec!["tab1".into(), "tab2".into(), "tab3".into()];
-        let ct = ClickTab::new(names);
+        let ct = ClickTab::new(names, 12, 30);
         assert_eq!(ct.entries.len(), 3);
         assert_eq!(ct.index, 0);
         for e in &ct.entries {
@@ -202,14 +210,14 @@ mod tests {
 
     #[test]
     fn test_new_empty() {
-        let ct = ClickTab::new(vec![]);
+        let ct = ClickTab::new(vec![], 12, 30);
         assert_eq!(ct.entries.len(), 0);
         assert_eq!(ct.index, 0);
     }
 
     #[test]
     fn test_add_entry() {
-        let mut ct = ClickTab::new(vec!["first".into()]);
+        let mut ct = ClickTab::new(vec!["first".into()], 12, 30);
         ct.add("second".into(), TabKind::Terminal);
         assert_eq!(ct.entries.len(), 2);
         assert_eq!(ct.index, 1);
@@ -219,14 +227,14 @@ mod tests {
 
     #[test]
     fn test_add_updates_index() {
-        let mut ct = ClickTab::new(vec!["a".into(), "b".into()]);
+        let mut ct = ClickTab::new(vec!["a".into(), "b".into()], 12, 30);
         ct.add("c".into(), TabKind::Proxy);
         assert_eq!(ct.index, 2);
     }
 
     #[test]
     fn test_remove_entry() {
-        let mut ct = ClickTab::new(vec!["a".into(), "b".into(), "c".into()]);
+        let mut ct = ClickTab::new(vec!["a".into(), "b".into(), "c".into()], 12, 30);
         ct.remove(0);
         assert_eq!(ct.entries.len(), 2);
         assert_eq!(ct.entries[0].name, "b");
@@ -235,7 +243,7 @@ mod tests {
 
     #[test]
     fn test_remove_adjusts_index() {
-        let mut ct = ClickTab::new(vec!["a".into(), "b".into(), "c".into()]);
+        let mut ct = ClickTab::new(vec!["a".into(), "b".into(), "c".into()], 12, 30);
         ct.index = 2;
         ct.remove(2);
         assert_eq!(ct.index, 1);
@@ -243,14 +251,14 @@ mod tests {
 
     #[test]
     fn test_remove_out_of_bounds() {
-        let mut ct = ClickTab::new(vec!["a".into()]);
+        let mut ct = ClickTab::new(vec!["a".into()], 12, 30);
         ct.remove(5);
         assert_eq!(ct.entries.len(), 1);
     }
 
     #[test]
     fn test_remove_last_adjusts_index() {
-        let mut ct = ClickTab::new(vec!["a".into(), "b".into()]);
+        let mut ct = ClickTab::new(vec!["a".into(), "b".into()], 12, 30);
         ct.index = 1;
         ct.remove(1);
         assert_eq!(ct.index, 0);
@@ -259,20 +267,20 @@ mod tests {
 
     #[test]
     fn test_min_width() {
-        let ct = ClickTab::new(vec!["short".into(), "very long name".into()]);
+        let ct = ClickTab::new(vec!["short".into(), "very long name".into()], 12, 30);
         assert_eq!(ct.min_width(), 19); // max_name (14) + 5 = 19
     }
 
     #[test]
     fn test_min_width_empty() {
-        let ct = ClickTab::new(vec![]);
-        assert_eq!(ct.min_width(), 5);
+        let ct = ClickTab::new(vec![], 12, 30);
+        assert_eq!(ct.min_width(), 12); // clamped to min
     }
 
     #[test]
     fn test_min_width_single() {
-        let ct = ClickTab::new(vec!["hi".into()]);
-        assert_eq!(ct.min_width(), 7); // 2 + 5 = 7
+        let ct = ClickTab::new(vec!["hi".into()], 12, 30);
+        assert_eq!(ct.min_width(), 12); // 2 + 5 = 7, clamped to min
     }
 
     #[test]
@@ -295,7 +303,7 @@ mod tests {
 
     #[test]
     fn test_click_hit_inside() {
-        let mut ct = ClickTab::new(vec!["a".into(), "b".into(), "c".into()]);
+        let mut ct = ClickTab::new(vec!["a".into(), "b".into(), "c".into()], 12, 30);
         ct.area = Some(Rect { x: 80, y: 0, width: 20, height: 10 });
         ct.click(80, 1);
         assert_eq!(ct.index, 1);
@@ -303,7 +311,7 @@ mod tests {
 
     #[test]
     fn test_click_miss_outside() {
-        let mut ct = ClickTab::new(vec!["a".into(), "b".into()]);
+        let mut ct = ClickTab::new(vec!["a".into(), "b".into()], 12, 30);
         ct.area = Some(Rect { x: 80, y: 0, width: 20, height: 10 });
         ct.index = 1;
         ct.click(10, 10);
@@ -312,7 +320,7 @@ mod tests {
 
     #[test]
     fn test_click_hit_different_row() {
-        let mut ct = ClickTab::new(vec!["a".into(), "b".into(), "c".into()]);
+        let mut ct = ClickTab::new(vec!["a".into(), "b".into(), "c".into()], 12, 30);
         ct.area = Some(Rect { x: 80, y: 0, width: 20, height: 10 });
         ct.click(80, 2);
         assert_eq!(ct.index, 2);
@@ -320,7 +328,7 @@ mod tests {
 
     #[test]
     fn test_click_beyond_entries() {
-        let mut ct = ClickTab::new(vec!["a".into(), "b".into()]);
+        let mut ct = ClickTab::new(vec!["a".into(), "b".into()], 12, 30);
         ct.area = Some(Rect { x: 80, y: 0, width: 20, height: 10 });
         ct.click(80, 5);
         assert_eq!(ct.index, 0);
@@ -329,7 +337,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "missing sidebar area")]
     fn test_click_without_area_set() {
-        let mut ct = ClickTab::new(vec!["a".into()]);
+        let mut ct = ClickTab::new(vec!["a".into()], 12, 30);
         ct.click(0, 0);
     }
 }
