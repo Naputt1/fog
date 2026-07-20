@@ -29,8 +29,6 @@ pub struct Terminal {
     writer: Option<Box<dyn Write + Send>>,
     child: Option<Box<dyn Child + Send + Sync>>,
     master: Option<Box<dyn MasterPty + Send>>,
-    max_cols: u16,
-    max_rows: u16,
 }
 
 impl std::fmt::Debug for Terminal {
@@ -145,8 +143,6 @@ impl Terminal {
             writer: Some(writer),
             child: Some(child),
             master: Some(pair.master),
-            max_cols: 80,
-            max_rows: 24,
         })
     }
 
@@ -164,8 +160,6 @@ impl Terminal {
             writer: None,
             child: None,
             master: None,
-            max_cols: 80,
-            max_rows: 24,
         };
         t.spawn_into(path, cmd)?;
         Ok(t)
@@ -192,8 +186,6 @@ impl Terminal {
             writer: None,
             child: None,
             master: None,
-            max_cols: 80,
-            max_rows: 24,
         }
     }
 
@@ -239,8 +231,6 @@ impl Terminal {
         self.writer = Some(writer);
         self.child = Some(child);
         self.master = Some(pair.master);
-        self.max_cols = INITIAL_COLS;
-        self.max_rows = 24;
 
         Ok(())
     }
@@ -400,12 +390,9 @@ impl Terminal {
             });
         }
         let mut p = self.parser.lock().unwrap();
-        if cols > self.max_cols || rows > self.max_rows {
-            let new_cols = cols.max(self.max_cols);
-            let new_rows = rows.max(self.max_rows);
-            self.max_cols = new_cols;
-            self.max_rows = new_rows;
-            p.screen_mut().set_size(new_rows, new_cols);
+        let (cur_rows, cur_cols) = p.screen().size();
+        if cols != cur_cols || rows != cur_rows {
+            p.screen_mut().set_size(rows, cols);
         }
     }
 
