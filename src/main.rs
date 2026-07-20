@@ -64,11 +64,13 @@ fn main() -> io::Result<()> {
         .into_iter()
         .map(|entry| {
             let service_path = config_dir.join(&entry.path);
-            let name = service_path
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .into_owned();
+            let name = entry.name.clone().unwrap_or_else(|| {
+                service_path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned()
+            });
             let service_path = service_path.to_string_lossy().into_owned();
             match Terminal::spawn_command(&service_path, &entry.cmd, name.clone()) {
                 Ok(mut t) => {

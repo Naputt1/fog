@@ -2,6 +2,7 @@ use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
 pub struct ConfigEntry {
+    pub name: Option<String>,
     pub path: String,
     pub cmd: String,
 }

@@ -8,6 +8,7 @@
         "type": "object",
         "required": ["path", "cmd"],
         "properties": {
+          "name": { "type": "string" },
           "path": { "type": "string" },
           "cmd": { "type": "string" }
         }
