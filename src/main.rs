@@ -18,7 +18,7 @@ use crate::proxy::{ProxyInstance, RouteEntry};
 use crate::terminal::Terminal;
 
 #[derive(Parser)]
-#[command(name = "fog")]
+#[command(name = "fog", version = env!("CARGO_PKG_VERSION"))]
 struct Cli {
     #[arg(short, long, default_value = "fog.json")]
     config: std::path::PathBuf,
