@@ -102,6 +102,8 @@ fn main() -> io::Result<()> {
             match Terminal::spawn_command(&service_path, &entry.cmd, name.clone(), scrollback) {
                 Ok(mut t) => {
                     t.save_logs = cli.save_logs;
+                    t.health_check = entry.health_check.clone();
+                    t.start_health_checks();
                     t
                 }
                 Err(e) => Terminal::spawn_error(name, format!("Failed to spawn: {e}"), scrollback),

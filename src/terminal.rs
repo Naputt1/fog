@@ -1,3 +1,4 @@
+use crate::config::HealthCheckConfig;
 use crate::process;
 use libc::{SIGKILL, SIGTERM};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize};
@@ -8,6 +9,7 @@ use ratatui::{
 use std::{
     fs,
     io::{self, Read, Write},
+    net::ToSocketAddrs,
     sync::{Arc, Mutex},
     thread::{self, JoinHandle},
 };
@@ -28,6 +30,14 @@ pub enum Init {
     },
 }
 
+/// Health check status for a terminal.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum HealthStatus {
+    Unknown,
+    Healthy,
+    Unhealthy,
+}
+
 /// A pseudo-terminal managing a shell or command process.
 pub struct Terminal {
     /// How this terminal was initialized.
@@ -40,7 +50,10 @@ pub struct Terminal {
     pub save_logs: bool,
     /// Number of scrollback lines in the parser.
     pub scrollback: usize,
+    /// Optional health check configuration.
+    pub health_check: Option<HealthCheckConfig>,
     parser: Arc<Mutex<vt100::Parser>>,
+    health_status: Arc<Mutex<HealthStatus>>,
     handler: Option<JoinHandle<()>>,
     writer: Option<Box<dyn Write + Send>>,
     child: Option<Box<dyn Child + Send + Sync>>,
@@ -54,6 +67,7 @@ impl std::fmt::Debug for Terminal {
             .field("name", &self.name)
             .field("stopped", &self.stopped)
             .field("scrollback", &self.scrollback)
+            .field("health_check", &self.health_check)
             .field("handler", &self.handler)
             .field("child", &self.child)
             .finish()
@@ -166,7 +180,9 @@ impl Terminal {
             stopped: false,
             save_logs: false,
             scrollback,
+            health_check: None,
             parser,
+            health_status: Arc::new(Mutex::new(HealthStatus::Unknown)),
             handler: Some(handler),
             writer: Some(writer),
             child: Some(child),
@@ -196,7 +212,9 @@ impl Terminal {
             stopped: false,
             save_logs: false,
             scrollback,
+            health_check: None,
             parser: Arc::new(Mutex::new(vt100::Parser::new(24, 80, scrollback))),
+            health_status: Arc::new(Mutex::new(HealthStatus::Unknown)),
             handler: None,
             writer: None,
             child: None,
@@ -228,7 +246,9 @@ impl Terminal {
             stopped: true,
             save_logs: false,
             scrollback,
+            health_check: None,
             parser,
+            health_status: Arc::new(Mutex::new(HealthStatus::Unhealthy)),
             handler: None,
             writer: None,
             child: None,
@@ -498,6 +518,58 @@ impl Terminal {
         self.kill_inner();
         self.stopped = false;
         self.spawn_into(&path, &cmd)
+    }
+
+    /// Returns the current health status.
+    pub fn get_health_status(&self) -> HealthStatus {
+        *self.health_status.lock().expect("health status mutex poisoned")
+    }
+
+    /// Starts a background thread that periodically runs the configured health check.
+    pub fn start_health_checks(&self) {
+        let config = match &self.health_check {
+            Some(c) => c.clone(),
+            None => return,
+        };
+        let status = self.health_status.clone();
+
+        thread::spawn(move || {
+            loop {
+                thread::sleep(std::time::Duration::from_millis(
+                    config.interval_ms.unwrap_or(5000),
+                ));
+                let target = config.target.clone();
+                let timeout = config.timeout_ms.unwrap_or(2000);
+                let healthy = match config.kind {
+                    crate::config::HealthCheckKind::Tcp
+                    | crate::config::HealthCheckKind::Http => {
+                        let addr = target
+                            .trim_start_matches("tcp://")
+                            .trim_start_matches("http://")
+                            .trim_start_matches("https://");
+                        match addr.to_socket_addrs() {
+                            Ok(mut addrs) => addrs
+                                .next()
+                                .map(|sa| {
+                                    std::net::TcpStream::connect_timeout(
+                                        &sa,
+                                        std::time::Duration::from_millis(timeout),
+                                    )
+                                    .is_ok()
+                                })
+                                .unwrap_or(false),
+                            Err(_) => false,
+                        }
+                    }
+                };
+                let mut s = status.lock().expect("health status mutex poisoned");
+                *s = if healthy {
+                    HealthStatus::Healthy
+                } else {
+                    HealthStatus::Unhealthy
+                };
+            }
+        });
     }
 
     /// Checks if the child process has exited and updates `stopped` accordingly.

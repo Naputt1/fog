@@ -1,5 +1,20 @@
 use serde::Deserialize;
 
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "snake_case")]
+pub enum HealthCheckKind {
+    Tcp,
+    Http,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct HealthCheckConfig {
+    pub kind: HealthCheckKind,
+    pub target: String,
+    pub interval_ms: Option<u64>,
+    pub timeout_ms: Option<u64>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ThemeConfig {
     pub proxy: Option<String>,
@@ -21,6 +36,8 @@ pub struct ConfigEntry {
     pub path: String,
     /// Shell command to start the service.
     pub cmd: String,
+    /// Optional health check configuration.
+    pub health_check: Option<HealthCheckConfig>,
 }
 
 /// A route definition for the reverse proxy.

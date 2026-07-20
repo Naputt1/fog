@@ -10,7 +10,17 @@
         "properties": {
           "name": { "type": "string" },
           "path": { "type": "string" },
-          "cmd": { "type": "string" }
+          "cmd": { "type": "string" },
+          "health_check": {
+            "type": "object",
+            "required": ["kind", "target"],
+            "properties": {
+              "kind": { "type": "string", "enum": ["tcp", "http"] },
+              "target": { "type": "string" },
+              "interval_ms": { "type": "integer", "minimum": 100, "default": 5000 },
+              "timeout_ms": { "type": "integer", "minimum": 100, "default": 2000 }
+            }
+          }
         }
       }
     },

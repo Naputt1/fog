@@ -1,6 +1,6 @@
 use crate::click_tab::{ClickTab, TabKind};
 use crate::keybinding;
-use crate::proxy::ProxyInstance;
+use crate::proxy::{LogEntry, ProxyInstance};
 use crate::selection;
 use crate::terminal::Terminal;
 use crate::theme::Theme;
@@ -23,6 +23,7 @@ use std::{io, time::Duration};
 enum Mode {
     Normal,
     TerminalInput,
+    ProxyFilter,
 }
 
 /// Main application state managing terminals, the proxy, tabs, and input handling.
@@ -42,6 +43,7 @@ pub struct App {
     content_area: Rect,
     show_help: bool,
     errors: Vec<String>,
+    proxy_filter: String,
 }
 
 impl App {
@@ -85,6 +87,7 @@ impl App {
             content_area: Rect::default(),
             show_help: false,
             errors: Vec::new(),
+            proxy_filter: String::new(),
         }
     }
 
@@ -185,6 +188,7 @@ impl App {
     fn on_tab_switch(&mut self) {
         self.scroll_offset = 0;
         selection::clear_selection(&mut self.selecting, &mut self.select_start, &mut self.select_end);
+        self.proxy_filter.clear();
         if self.is_proxy_tab() {
             self.mode = Mode::Normal;
         } else if let Some(item) = self.items.get(self.tabs.index) {
@@ -241,9 +245,30 @@ impl App {
             }
         }
 
+        if matches!(self.mode, Mode::ProxyFilter) {
+            match key.code {
+                KeyCode::Esc => {
+                    self.mode = Mode::Normal;
+                    self.proxy_filter.clear();
+                }
+                KeyCode::Enter => {
+                    self.mode = Mode::Normal;
+                }
+                KeyCode::Backspace => {
+                    self.proxy_filter.pop();
+                }
+                KeyCode::Char(c) if !c.is_control() => {
+                    self.proxy_filter.push(c);
+                }
+                _ => {}
+            }
+            return;
+        }
+
         match self.mode {
             Mode::TerminalInput => self.handle_terminal_key(key),
             Mode::Normal => self.handle_normal_key(key),
+            Mode::ProxyFilter => {}
         }
     }
 
@@ -305,6 +330,11 @@ impl App {
             KeyCode::Char('R') => self.restart_current(),
             KeyCode::Char('t') => self.new_terminal(),
             KeyCode::Char('d') => self.close_tab(),
+            KeyCode::Char('/') => {
+                if self.is_proxy_tab() {
+                    self.mode = Mode::ProxyFilter;
+                }
+            }
             KeyCode::Char('?') => self.show_help = !self.show_help,
             _ => {}
         }
@@ -373,8 +403,9 @@ impl App {
 
     fn current_total_lines(&self) -> usize {
         if self.is_proxy_tab() {
+            let filter_lines = if matches!(self.mode, Mode::ProxyFilter) { 1usize } else { 0 };
             match self.proxy {
-                Some(ref p) => p.get_logs().len() + 3,
+                Some(ref p) => p.get_logs().len() + 3 + filter_lines,
                 None => 1,
             }
         } else {
@@ -400,6 +431,7 @@ impl App {
             item.refresh_status();
             if let Some(entry) = self.tabs.entries.get_mut(i) {
                 entry.stopped = item.stopped;
+                entry.health_status = item.get_health_status();
             }
         }
 
@@ -438,6 +470,8 @@ impl App {
                 "quit".blue().bold(),
                 " R ".into(),
                 "restart".blue().bold(),
+                " / ".into(),
+                "filter".blue().bold(),
             ])
         } else if is_shell {
             Line::from(vec![
@@ -526,12 +560,37 @@ impl App {
             None => vec![],
         };
 
-        let total = logs.len() + 3;
+        let filtered_logs: Vec<&LogEntry> = if self.proxy_filter.is_empty() {
+            logs.iter().collect()
+        } else {
+            let filter_lower = self.proxy_filter.to_lowercase();
+            logs.iter().filter(|entry| {
+                entry.method.to_lowercase().contains(&filter_lower)
+                    || entry.path.to_lowercase().contains(&filter_lower)
+                    || entry.status.to_string().contains(&filter_lower)
+                    || entry.upstream.to_lowercase().contains(&filter_lower)
+            }).collect()
+        };
+
+        let header_lines: usize = if matches!(self.mode, Mode::ProxyFilter) { 4 } else { 3 };
+        let total = filtered_logs.len() + header_lines;
         let offset = self.scroll_offset.min(total.saturating_sub(visible_height));
 
         let _start = offset.saturating_sub(3);
 
         let mut lines: Vec<Line<'static>> = Vec::new();
+
+        if matches!(self.mode, Mode::ProxyFilter) {
+            let filter_display = if self.proxy_filter.is_empty() {
+                " Filter: (type to filter)".to_string()
+            } else {
+                format!(" Filter: {}", self.proxy_filter)
+            };
+            lines.push(Line::from(Span::styled(
+                filter_display,
+                Style::default().fg(self.theme.proxy),
+            )));
+        }
 
         let status_line = match self.proxy {
             Some(ref p) if p.is_running() => {
@@ -550,7 +609,7 @@ impl App {
             Style::default().dim(),
         )));
 
-        for entry in logs.iter().rev().skip(offset.saturating_sub(3)).take(visible_height.saturating_sub(3)) {
+        for entry in filtered_logs.iter().rev().skip(offset.saturating_sub(header_lines)).take(visible_height.saturating_sub(header_lines)) {
             let status_style = match entry.status {
                 0 => Style::default().dim(),
                 200..=299 => Style::default().fg(self.theme.status_200),

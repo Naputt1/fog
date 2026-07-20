@@ -1,8 +1,9 @@
+use crate::terminal::HealthStatus;
 use crate::theme::Theme;
 use ratatui::{
     Frame,
     layout::{Position, Rect},
-    style::Style,
+    style::{Color, Style},
     widgets::{List, ListItem, ListState},
     text::{Line, Span},
 };
@@ -27,6 +28,8 @@ pub struct TabEntry {
     pub kind: TabKind,
     /// Whether the underlying process has stopped.
     pub stopped: bool,
+    /// Health check status.
+    pub health_status: HealthStatus,
 }
 
 impl TabEntry {
@@ -71,6 +74,7 @@ impl ClickTab {
                 name,
                 kind: TabKind::Service,
                 stopped: false,
+                health_status: HealthStatus::Unknown,
             })
             .collect();
         let mut list_state = ListState::default();
@@ -95,6 +99,7 @@ impl ClickTab {
             name,
             kind,
             stopped: false,
+            health_status: HealthStatus::Unknown,
         });
         self.index = self.entries.len() - 1;
         self.list_state.select(Some(self.index));
@@ -162,8 +167,16 @@ impl ClickTab {
             .iter()
             .map(|e| {
                 let name = e.display_name();
-                let status = if e.stopped { "○" } else { "●" };
-                let line = Line::from(Span::raw(format!("{} {}", status, name)));
+                let status_span = if e.stopped {
+                    Span::styled("○", Style::default().fg(theme.stopped))
+                } else if e.health_status == HealthStatus::Healthy {
+                    Span::styled("●", Style::default().fg(Color::Green))
+                } else if e.health_status == HealthStatus::Unhealthy {
+                    Span::styled("●", Style::default().fg(Color::Red).bold())
+                } else {
+                    Span::styled("●", Style::default())
+                };
+                let line = Line::from(vec![status_span, Span::raw(format!(" {}", name))]);
                 let item = ListItem::new(line);
                 match e.kind {
                     TabKind::Terminal => item.style(Style::default().fg(theme.terminal)),
@@ -286,19 +299,19 @@ mod tests {
 
     #[test]
     fn test_display_name_service() {
-        let e = TabEntry { name: "myservice".into(), kind: TabKind::Service, stopped: false };
+        let e = TabEntry { name: "myservice".into(), kind: TabKind::Service, stopped: false, health_status: HealthStatus::Unknown };
         assert_eq!(e.display_name(), "myservice");
     }
 
     #[test]
     fn test_display_name_terminal() {
-        let e = TabEntry { name: "bash".into(), kind: TabKind::Terminal, stopped: false };
+        let e = TabEntry { name: "bash".into(), kind: TabKind::Terminal, stopped: false, health_status: HealthStatus::Unknown };
         assert_eq!(e.display_name(), "$ bash");
     }
 
     #[test]
     fn test_display_name_proxy() {
-        let e = TabEntry { name: "proxy".into(), kind: TabKind::Proxy, stopped: false };
+        let e = TabEntry { name: "proxy".into(), kind: TabKind::Proxy, stopped: false, health_status: HealthStatus::Unknown };
         assert_eq!(e.display_name(), "▶ proxy");
     }
 

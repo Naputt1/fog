@@ -19,6 +19,9 @@ hyper-util = { version = "0.1", features = ["tokio", "server-auto", "client-lega
 http-body-util = "0.1"
 tokio = { version = "1", features = ["rt", "macros", "net", "io-util", "time"] }
 url = "2"
+tokio-rustls = "0.26"
+rustls = "0.23"
+rustls-pemfile = "2"
 
 [profile.release]
 opt-level = 3
