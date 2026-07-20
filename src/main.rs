@@ -1,6 +1,8 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use std::io::stdout;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::{fs, io};
 mod app;
 mod click_tab;
@@ -60,6 +62,14 @@ fn main() -> io::Result<()> {
         .unwrap_or_else(|| std::path::Path::new("."))
         .to_path_buf();
 
+    let sigint = Arc::new(AtomicBool::new(false));
+    let sig = sigint.clone();
+    if ctrlc::set_handler(move || {
+        sig.store(true, Ordering::SeqCst);
+    }).is_err() {
+        eprintln!("warning: could not set Ctrl+C handler");
+    }
+
     enable_raw_mode()?;
     execute!(stdout(), EnterAlternateScreen, EnableMouseCapture)?;
 
@@ -102,7 +112,7 @@ fn main() -> io::Result<()> {
         p
     });
 
-    ratatui::run(|terminal| App::new(items, proxy).run(terminal))?;
+    ratatui::run(|terminal| App::new(items, proxy, sigint).run(terminal))?;
 
     disable_raw_mode()?;
     execute!(stdout(), LeaveAlternateScreen, DisableMouseCapture)?;

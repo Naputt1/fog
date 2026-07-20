@@ -15,6 +15,8 @@ use ratatui::{
     widgets::{Block, Paragraph, Wrap},
 };
 use std::io::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::{io, time::Duration};
 
 enum Mode {
@@ -25,6 +27,7 @@ enum Mode {
 pub struct App {
     items: Vec<Terminal>,
     proxy: Option<ProxyInstance>,
+    sigint: Arc<AtomicBool>,
     tabs: ClickTab,
     mode: Mode,
     scroll_offset: usize,
@@ -37,7 +40,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(items: Vec<Terminal>, proxy: Option<ProxyInstance>) -> Self {
+    pub fn new(items: Vec<Terminal>, proxy: Option<ProxyInstance>, sigint: Arc<AtomicBool>) -> Self {
         let names: Vec<String> = items.iter().map(|t| t.name.clone()).collect();
         let mut tabs = ClickTab::new(names);
         for (i, item) in items.iter().enumerate() {
@@ -55,6 +58,7 @@ impl App {
         Self {
             items,
             proxy,
+            sigint,
             tabs,
             mode: Mode::Normal,
             scroll_offset: 0,
@@ -77,6 +81,10 @@ impl App {
 
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
         while !self.exit {
+            if self.sigint.load(Ordering::SeqCst) {
+                self.exit = true;
+                break;
+            }
             terminal.draw(|frame| self.draw(frame))?;
             if event::poll(Duration::from_millis(50))? {
                 self.handle_events()?;

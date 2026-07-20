@@ -12,6 +12,7 @@ clap = { version = "4", features = ["derive"] }
 libc = "0.2"
 portable-pty = "0.8"
 base64 = "0.22"
+ctrlc = "3.4"
 vt100 = "0.16"
 hyper = { version = "1", features = ["server", "client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio", "server-auto", "client-legacy"] }
