@@ -289,7 +289,7 @@ impl App {
                 self.scroll_offset = 0;
                 self.mode = Mode::TerminalInput;
             }
-            Err(e) => eprintln!("failed to create terminal: {}", e),
+            Err(e) => self.errors.push(format!("failed to create terminal: {}", e)),
         }
     }
 
