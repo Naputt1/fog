@@ -20,6 +20,6 @@ pub struct ProxyConfig {
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
-    pub service: Vec<ConfigEntry>,
+    pub service: Option<Vec<ConfigEntry>>,
     pub proxy: Option<ProxyConfig>,
 }

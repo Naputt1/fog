@@ -1,0 +1,40 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "service": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "cmd"],
+        "properties": {
+          "path": { "type": "string" },
+          "cmd": { "type": "string" }
+        }
+      }
+    },
+    "proxy": {
+      "type": "object",
+      "required": ["port", "routes"],
+      "properties": {
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "routes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["path", "upstream"],
+            "properties": {
+              "path": { "type": "string" },
+              "upstream": { "type": "string" },
+              "ws": { "type": "boolean" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -20,12 +20,13 @@ fn main() -> io::Result<()> {
     enable_raw_mode()?;
     execute!(stdout(), EnterAlternateScreen, EnableMouseCapture)?;
 
-    let contents = fs::read_to_string("config.yml")?;
+    let contents = fs::read_to_string("config.json")?;
 
-    let config: Config = serde_yaml::from_str(&contents).unwrap();
+    let config: Config = serde_json::from_str(&contents).unwrap();
 
     let items: Vec<Terminal> = config
         .service
+        .unwrap_or_default()
         .into_iter()
         .filter_map(|entry| {
             let name = std::path::Path::new(&entry.path)
