@@ -1,4 +1,5 @@
 use crate::click_tab::{ClickTab, TabKind};
+use crate::proxy::ProxyInstance;
 use crate::terminal::Terminal;
 use crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
@@ -20,6 +21,7 @@ enum Mode {
 
 pub struct App {
     items: Vec<Terminal>,
+    proxy: Option<ProxyInstance>,
     tabs: ClickTab,
     mode: Mode,
     scroll_offset: usize,
@@ -31,7 +33,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(items: Vec<Terminal>) -> Self {
+    pub fn new(items: Vec<Terminal>, proxy: Option<ProxyInstance>) -> Self {
         let names: Vec<String> = items.iter().map(|t| t.name.clone()).collect();
         let mut tabs = ClickTab::new(names);
         for (i, item) in items.iter().enumerate() {
@@ -42,8 +44,13 @@ impl App {
             };
         }
 
+        if proxy.is_some() {
+            tabs.add("proxy".to_string(), TabKind::Proxy);
+        }
+
         Self {
             items,
+            proxy,
             tabs,
             mode: Mode::Normal,
             scroll_offset: 0,
@@ -53,6 +60,14 @@ impl App {
             select_end: None,
             content_area: Rect::default(),
         }
+    }
+
+    fn is_proxy_tab(&self) -> bool {
+        self.tabs
+            .entries
+            .get(self.tabs.index)
+            .map(|e| e.kind == TabKind::Proxy)
+            .unwrap_or(false)
     }
 
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
@@ -115,7 +130,9 @@ impl App {
     fn on_tab_switch(&mut self) {
         self.scroll_offset = 0;
         self.clear_selection();
-        if let Some(item) = self.items.get(self.tabs.index) {
+        if self.is_proxy_tab() {
+            self.mode = Mode::Normal;
+        } else if let Some(item) = self.items.get(self.tabs.index) {
             self.mode = if item.is_shell() {
                 Mode::TerminalInput
             } else {
@@ -143,7 +160,7 @@ impl App {
                 }
                 KeyCode::Char('n') => {
                     let prev = self.tabs.index;
-                    self.tabs.index = (self.tabs.index + 1) % self.items.len();
+                    self.tabs.index = (self.tabs.index + 1) % self.tabs.entries.len();
                     if prev != self.tabs.index {
                         self.on_tab_switch();
                     }
@@ -152,7 +169,7 @@ impl App {
                 KeyCode::Char('p') => {
                     let prev = self.tabs.index;
                     self.tabs.index =
-                        (self.tabs.index + self.items.len() - 1) % self.items.len();
+                        (self.tabs.index + self.tabs.entries.len() - 1) % self.tabs.entries.len();
                     if prev != self.tabs.index {
                         self.on_tab_switch();
                     }
@@ -190,7 +207,7 @@ impl App {
             KeyCode::Esc => {}
             KeyCode::Char('j') | KeyCode::Char('h') | KeyCode::Right => {
                 let prev = self.tabs.index;
-                self.tabs.index = (self.tabs.index + 1) % self.items.len();
+                self.tabs.index = (self.tabs.index + 1) % self.tabs.entries.len();
                 if prev != self.tabs.index {
                     self.on_tab_switch();
                 }
@@ -198,7 +215,7 @@ impl App {
             KeyCode::Char('k') | KeyCode::Char('l') | KeyCode::Left => {
                 let prev = self.tabs.index;
                 self.tabs.index =
-                    (self.tabs.index + self.items.len() - 1) % self.items.len();
+                    (self.tabs.index + self.tabs.entries.len() - 1) % self.tabs.entries.len();
                 if prev != self.tabs.index {
                     self.on_tab_switch();
                 }
@@ -224,7 +241,9 @@ impl App {
                 self.scroll_offset = 0;
             }
             KeyCode::Char('i') => {
-                self.mode = Mode::TerminalInput;
+                if !self.is_proxy_tab() {
+                    self.mode = Mode::TerminalInput;
+                }
             }
             KeyCode::Char('R') => self.restart_current(),
             KeyCode::Char('t') => self.new_terminal(),
@@ -234,6 +253,12 @@ impl App {
     }
 
     fn restart_current(&mut self) {
+        if self.is_proxy_tab() {
+            if let Some(ref mut p) = self.proxy {
+                p.restart();
+            }
+            return;
+        }
         if let Some(item) = self.items.get_mut(self.tabs.index) {
             if !item.is_shell() {
                 if let Err(e) = item.restart() {
@@ -290,9 +315,16 @@ impl App {
     }
 
     fn current_total_lines(&self) -> usize {
-        match self.items.get(self.tabs.index) {
-            Some(item) => item.total_lines(),
-            None => 0,
+        if self.is_proxy_tab() {
+            match self.proxy {
+                Some(ref p) => p.get_logs().len() + 3,
+                None => 1,
+            }
+        } else {
+            match self.items.get(self.tabs.index) {
+                Some(item) => item.total_lines(),
+                None => 0,
+            }
         }
     }
 
@@ -446,10 +478,22 @@ impl App {
             }
         }
 
+        if let Some(ref mut p) = self.proxy {
+            if let Some(entry) = self
+                .tabs
+                .entries
+                .iter_mut()
+                .find(|e| e.kind == TabKind::Proxy)
+            {
+                entry.stopped = !p.is_running();
+            }
+        }
+
         self.tabs.draw(frame, sidebar_area);
 
         self.content_area = content_area;
 
+        let is_proxy = self.is_proxy_tab();
         let is_shell = self
             .items
             .get(self.tabs.index)
@@ -463,6 +507,13 @@ impl App {
                 "quit".blue().bold(),
                 " Esc ".into(),
                 "scroll".blue().bold(),
+            ])
+        } else if is_proxy {
+            Line::from(vec![
+                " Q ".into(),
+                "quit".blue().bold(),
+                " R ".into(),
+                "restart".blue().bold(),
             ])
         } else if is_shell {
             Line::from(vec![
@@ -492,18 +543,110 @@ impl App {
             .title_bottom(instructions.centered())
             .border_set(border::THICK);
 
-        let inner = content_area.inner(Margin {
+        if is_proxy {
+            self.draw_proxy_content(frame, content_area, block);
+        } else {
+            self.draw_terminal_content(frame, content_area, block, in_terminal_input);
+        }
+    }
+
+    fn draw_proxy_content(&mut self, frame: &mut Frame, area: Rect, block: Block) {
+        let inner = area.inner(Margin {
             horizontal: 1,
             vertical: 1,
         });
         let visible_height = inner.height as usize;
 
+        let logs = match self.proxy {
+            Some(ref p) => p.get_logs(),
+            None => vec![],
+        };
+
+        let total = logs.len() + 3;
+        let offset = self.scroll_offset.min(total.saturating_sub(visible_height).max(0));
+
+        let _start = offset.saturating_sub(3);
+
+        let mut lines: Vec<Line<'static>> = Vec::new();
+
+        let status_line = match self.proxy {
+            Some(ref p) if p.is_running() => {
+                format!(" Proxy listening on port {} (running)", p.port)
+            }
+            Some(_) => " Proxy (stopped)".to_string(),
+            None => " Proxy (not configured)".to_string(),
+        };
+        lines.push(Line::from(Span::styled(
+            status_line,
+            Style::default().cyan().bold(),
+        )));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!(" {:<6} {:<35} {:<5} {:<8} {}", "METHOD", "PATH", "STATUS", "LATENCY", "UPSTREAM"),
+            Style::default().dim(),
+        )));
+
+        for entry in logs.iter().rev().skip(offset.saturating_sub(3)).take(visible_height.saturating_sub(3)) {
+            let status_style = match entry.status {
+                0 => Style::default().dim(),
+                200..=299 => Style::default().green(),
+                300..=399 => Style::default().yellow(),
+                400..=499 => Style::default().red(),
+                _ => Style::default().red().bold(),
+            };
+            let status_str = if entry.status == 0 {
+                "".to_string()
+            } else {
+                format!("{}", entry.status)
+            };
+            let latency_str = if entry.status == 0 {
+                String::new()
+            } else {
+                format!("{}ms", entry.latency_ms)
+            };
+            let method_span = if entry.ws {
+                Span::styled(format!(" {:<6}", "WS"), Style::default().cyan().bold())
+            } else {
+                Span::raw(format!(" {:<6}", entry.method))
+            };
+            lines.push(Line::from(vec![
+                method_span,
+                Span::raw(format!(" {:<35}", truncate(&entry.path, 35))),
+                Span::styled(format!(" {:<5}", status_str), status_style),
+                Span::raw(format!(" {:<8}", latency_str)),
+                Span::raw(format!(" {}", truncate(&entry.upstream, 30))),
+            ]));
+        }
+
+        if lines.is_empty() {
+            lines.push(Line::from(" no requests yet"));
+        }
+
+        let widget = Paragraph::new(Text::from(lines))
+            .block(block)
+            .wrap(Wrap { trim: false });
+        frame.render_widget(widget, area);
+    }
+
+    fn draw_terminal_content(
+        &mut self,
+        frame: &mut Frame,
+        content_area: Rect,
+        block: Block,
+        in_terminal_input: bool,
+    ) {
+        let inner = content_area.inner(Margin {
+            horizontal: 1,
+            vertical: 1,
+        });
+        let visible_height = inner.height as u16;
+
         if let Some(item) = self.items.get_mut(self.tabs.index) {
-            item.resize(inner.width, visible_height as u16);
+            item.resize(inner.width, visible_height);
         }
 
         let (mut lines, _total) = match self.items.get_mut(self.tabs.index) {
-            Some(item) => item.get_screen(visible_height, self.scroll_offset),
+            Some(item) => item.get_screen(visible_height as usize, self.scroll_offset),
             None => (vec![Line::from("no tab")], 0),
         };
         self.apply_sel(&mut lines);
@@ -524,6 +667,14 @@ impl App {
                 }
             }
         }
+    }
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..max.saturating_sub(3)])
     }
 }
 

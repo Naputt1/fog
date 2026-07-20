@@ -10,6 +10,7 @@ use ratatui::{
 pub enum TabKind {
     Service,
     Terminal,
+    Proxy,
 }
 
 #[derive(Debug, Clone)]
@@ -24,6 +25,7 @@ impl TabEntry {
         match self.kind {
             TabKind::Terminal => format!("$ {}", self.name),
             TabKind::Service => self.name.clone(),
+            TabKind::Proxy => format!("▶ {}", self.name),
         }
     }
 }
@@ -128,6 +130,13 @@ impl ClickTab {
                             item.style(Style::default().red().dim())
                         } else {
                             item.style(Style::default())
+                        }
+                    }
+                    TabKind::Proxy => {
+                        if e.stopped {
+                            item.style(Style::default().red().dim())
+                        } else {
+                            item.style(Style::default().cyan())
                         }
                     }
                 }

@@ -3,6 +3,7 @@ use std::{fs, io};
 mod app;
 mod click_tab;
 mod config;
+mod proxy;
 mod terminal;
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::execute;
@@ -12,6 +13,7 @@ use crossterm::terminal::{
 
 use crate::app::App;
 use crate::config::Config;
+use crate::proxy::{ProxyInstance, RouteEntry};
 use crate::terminal::Terminal;
 
 fn main() -> io::Result<()> {
@@ -41,7 +43,21 @@ fn main() -> io::Result<()> {
         })
         .collect();
 
-    ratatui::run(|terminal| App::new(items).run(terminal))?;
+    let proxy = config.proxy.map(|pc| {
+        let routes: Vec<RouteEntry> = pc
+            .routes
+            .into_iter()
+            .map(|r| RouteEntry {
+                path: r.path,
+                upstream: r.upstream,
+            })
+            .collect();
+        let mut p = ProxyInstance::new(pc.port, routes);
+        p.start();
+        p
+    });
+
+    ratatui::run(|terminal| App::new(items, proxy).run(terminal))?;
 
     disable_raw_mode()?;
     execute!(stdout(), LeaveAlternateScreen, DisableMouseCapture)?;

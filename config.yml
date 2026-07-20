@@ -3,3 +3,12 @@ service:
     cmd: "air"
   - path: "/Users/naputt/code/cinema_ticket/frontend"
     cmd: "npm run dev"
+
+proxy:
+  port: 3000
+  routes:
+    - path: /api
+      upstream: http://localhost:8080/api
+    - path: /
+      upstream: http://localhost:5173
+      ws: true

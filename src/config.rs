@@ -7,6 +7,19 @@ pub struct ConfigEntry {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct ProxyRoute {
+    pub path: String,
+    pub upstream: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ProxyConfig {
+    pub port: u16,
+    pub routes: Vec<ProxyRoute>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct Config {
     pub service: Vec<ConfigEntry>,
+    pub proxy: Option<ProxyConfig>,
 }
