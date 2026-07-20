@@ -1,5 +1,17 @@
 use serde::Deserialize;
 
+#[derive(Debug, Deserialize)]
+pub struct ThemeConfig {
+    pub proxy: Option<String>,
+    pub terminal: Option<String>,
+    pub stopped: Option<String>,
+    pub highlight: Option<String>,
+    pub status_200: Option<String>,
+    pub status_300: Option<String>,
+    pub status_400: Option<String>,
+    pub status_500: Option<String>,
+}
+
 /// A single service entry in the config file.
 #[derive(Debug, Deserialize)]
 pub struct ConfigEntry {
@@ -51,4 +63,6 @@ pub struct Config {
     pub max_scrollback: Option<usize>,
     /// Optional sidebar width constraints.
     pub sidebar: Option<SidebarConfig>,
+    /// Optional color theme overrides.
+    pub theme: Option<ThemeConfig>,
 }

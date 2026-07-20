@@ -12,6 +12,7 @@ mod process;
 mod proxy;
 mod selection;
 mod terminal;
+mod theme;
 use clap::Parser;
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::execute;
@@ -23,6 +24,7 @@ use crate::app::App;
 use crate::config::Config;
 use crate::proxy::{ProxyInstance, RouteEntry};
 use crate::terminal::Terminal;
+use crate::theme::Theme;
 
 const DEFAULT_SCROLLBACK: usize = 2000;
 
@@ -81,6 +83,7 @@ fn main() -> io::Result<()> {
     let scrollback = config.max_scrollback.unwrap_or(DEFAULT_SCROLLBACK);
     let sidebar_min = config.sidebar.as_ref().and_then(|s| s.min_width).unwrap_or(12);
     let sidebar_max = config.sidebar.as_ref().and_then(|s| s.max_width).unwrap_or(30);
+    let theme = Theme::from_config(config.theme.as_ref());
 
     let items: Vec<Terminal> = config
         .service
@@ -121,7 +124,7 @@ fn main() -> io::Result<()> {
         p
     });
 
-    ratatui::run(|terminal| App::new(items, proxy, sigint, scrollback, sidebar_min, sidebar_max).run(terminal))?;
+    ratatui::run(|terminal| App::new(items, proxy, sigint, scrollback, sidebar_min, sidebar_max, theme).run(terminal))?;
 
     disable_raw_mode()?;
     execute!(stdout(), LeaveAlternateScreen, DisableMouseCapture)?;

@@ -49,5 +49,18 @@
         "min_width": { "type": "integer", "minimum": 8, "maximum": 50 },
         "max_width": { "type": "integer", "minimum": 8, "maximum": 50 }
       }
+    },
+    "theme": {
+      "type": "object",
+      "properties": {
+        "proxy": { "type": "string" },
+        "terminal": { "type": "string" },
+        "stopped": { "type": "string" },
+        "highlight": { "type": "string" },
+        "status_200": { "type": "string" },
+        "status_300": { "type": "string" },
+        "status_400": { "type": "string" },
+        "status_500": { "type": "string" }
+      }
     }
 }

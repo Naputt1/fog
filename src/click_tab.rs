@@ -1,3 +1,4 @@
+use crate::theme::Theme;
 use ratatui::{
     Frame,
     layout::{Position, Rect},
@@ -153,7 +154,7 @@ impl ClickTab {
     /// # Arguments
     /// * `frame` - The ratatui frame to render into.
     /// * `area` - The rectangular area for the sidebar.
-    pub fn draw(&mut self, frame: &mut Frame, area: Rect) {
+    pub fn draw(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
         self.area = Some(area);
 
         let items: Vec<ListItem> = self
@@ -165,19 +166,19 @@ impl ClickTab {
                 let line = Line::from(Span::raw(format!("{} {}", status, name)));
                 let item = ListItem::new(line);
                 match e.kind {
-                    TabKind::Terminal => item.style(Style::default().green()),
+                    TabKind::Terminal => item.style(Style::default().fg(theme.terminal)),
                     TabKind::Service => {
                         if e.stopped {
-                            item.style(Style::default().red().dim())
+                            item.style(Style::default().fg(theme.stopped).dim())
                         } else {
                             item.style(Style::default())
                         }
                     }
                     TabKind::Proxy => {
                         if e.stopped {
-                            item.style(Style::default().red().dim())
+                            item.style(Style::default().fg(theme.stopped).dim())
                         } else {
-                            item.style(Style::default().cyan())
+                            item.style(Style::default().fg(theme.proxy))
                         }
                     }
                 }
@@ -185,7 +186,7 @@ impl ClickTab {
             .collect();
 
         let list = List::new(items)
-            .highlight_style(Style::default().magenta().on_black().bold())
+            .highlight_style(Style::default().fg(theme.highlight).on_black().bold())
             .highlight_symbol("▸ ");
 
         self.list_state.select(Some(self.index));

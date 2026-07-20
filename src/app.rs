@@ -3,6 +3,7 @@ use crate::keybinding;
 use crate::proxy::ProxyInstance;
 use crate::selection;
 use crate::terminal::Terminal;
+use crate::theme::Theme;
 use crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
@@ -29,6 +30,7 @@ pub struct App {
     items: Vec<Terminal>,
     proxy: Option<ProxyInstance>,
     sigint: Arc<AtomicBool>,
+    theme: Theme,
     scrollback: usize,
     tabs: ClickTab,
     mode: Mode,
@@ -52,7 +54,7 @@ impl App {
     /// * `scrollback` - Maximum number of scrollback lines.
     /// * `sidebar_min` - Minimum sidebar width in columns.
     /// * `sidebar_max` - Maximum sidebar width in columns.
-    pub fn new(items: Vec<Terminal>, proxy: Option<ProxyInstance>, sigint: Arc<AtomicBool>, scrollback: usize, sidebar_min: u16, sidebar_max: u16) -> Self {
+    pub fn new(items: Vec<Terminal>, proxy: Option<ProxyInstance>, sigint: Arc<AtomicBool>, scrollback: usize, sidebar_min: u16, sidebar_max: u16, theme: Theme) -> Self {
         let names: Vec<String> = items.iter().map(|t| t.name.clone()).collect();
         let mut tabs = ClickTab::new(names, sidebar_min, sidebar_max);
         for (i, item) in items.iter().enumerate() {
@@ -72,6 +74,7 @@ impl App {
             proxy,
             sigint,
             scrollback,
+            theme,
             tabs,
             mode: Mode::Normal,
             scroll_offset: 0,
@@ -410,7 +413,7 @@ impl App {
                 entry.stopped = !p.is_running();
             }
 
-        self.tabs.draw(frame, sidebar_area);
+        self.tabs.draw(frame, sidebar_area, &self.theme);
 
         self.content_area = content_area;
 
@@ -539,7 +542,7 @@ impl App {
         };
         lines.push(Line::from(Span::styled(
             status_line,
-            Style::default().cyan().bold(),
+            Style::default().fg(self.theme.proxy).bold(),
         )));
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
@@ -550,10 +553,10 @@ impl App {
         for entry in logs.iter().rev().skip(offset.saturating_sub(3)).take(visible_height.saturating_sub(3)) {
             let status_style = match entry.status {
                 0 => Style::default().dim(),
-                200..=299 => Style::default().green(),
-                300..=399 => Style::default().yellow(),
-                400..=499 => Style::default().red(),
-                _ => Style::default().red().bold(),
+                200..=299 => Style::default().fg(self.theme.status_200),
+                300..=399 => Style::default().fg(self.theme.status_300),
+                400..=499 => Style::default().fg(self.theme.status_400),
+                _ => Style::default().fg(self.theme.status_500).bold(),
             };
             let status_str = if entry.status == 0 {
                 "".to_string()
@@ -566,7 +569,7 @@ impl App {
                 format!("{}ms", entry.latency_ms)
             };
             let method_span = if entry.ws {
-                Span::styled(format!(" {:<6}", "WS"), Style::default().cyan().bold())
+                Span::styled(format!(" {:<6}", "WS"), Style::default().fg(self.theme.proxy).bold())
             } else {
                 Span::raw(format!(" {:<6}", entry.method))
             };
