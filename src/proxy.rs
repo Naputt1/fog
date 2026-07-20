@@ -40,6 +40,7 @@ pub struct LogEntry {
 pub struct RouteEntry {
     pub path: String,
     pub upstream: String,
+    pub ws: bool,
 }
 
 pub struct ProxyInstance {
@@ -515,7 +516,7 @@ async fn handle_request(
     });
 
     match matched {
-        Some((route, suffix)) if is_ws_upgrade(&req) => {
+        Some((route, suffix)) if route.ws || is_ws_upgrade(&req) => {
             handle_ws(req, route, &suffix, query.as_deref(), logs, method, path).await
         }
         Some((route, suffix)) => {

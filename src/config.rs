@@ -10,6 +10,7 @@ pub struct ConfigEntry {
 pub struct ProxyRoute {
     pub path: String,
     pub upstream: String,
+    pub ws: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]

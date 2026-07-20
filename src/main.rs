@@ -87,6 +87,7 @@ fn main() -> io::Result<()> {
             .map(|r| RouteEntry {
                 path: r.path,
                 upstream: r.upstream,
+                ws: r.ws.unwrap_or(false),
             })
             .collect();
         let mut p = ProxyInstance::new(pc.port, routes);
