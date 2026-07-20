@@ -22,6 +22,9 @@ use crate::terminal::Terminal;
 struct Cli {
     #[arg(short, long, default_value = "fog.json")]
     config: std::path::PathBuf,
+
+    #[arg(long, help = "Save service output to temp/<name>.txt on exit")]
+    save_logs: bool,
 }
 
 fn main() -> io::Result<()> {
@@ -44,7 +47,10 @@ fn main() -> io::Result<()> {
                 .to_string_lossy()
                 .into_owned();
             match Terminal::spawn_command(&entry.path, &entry.cmd, name) {
-                Ok(t) => Some(t),
+                Ok(mut t) => {
+                    t.save_logs = cli.save_logs;
+                    Some(t)
+                }
                 Err(e) => {
                     eprintln!("error spawning {}: {}", entry.cmd, e);
                     None

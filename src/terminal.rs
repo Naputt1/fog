@@ -23,6 +23,7 @@ pub struct Terminal {
     pub init: Init,
     pub name: String,
     pub stopped: bool,
+    pub save_logs: bool,
     parser: Arc<Mutex<vt100::Parser>>,
     handler: Option<JoinHandle<()>>,
     writer: Option<Box<dyn Write + Send>>,
@@ -138,6 +139,7 @@ impl Terminal {
             init: Init::Shell,
             name,
             stopped: false,
+            save_logs: false,
             parser,
             handler: Some(handler),
             writer: Some(writer),
@@ -156,6 +158,7 @@ impl Terminal {
             },
             name,
             stopped: false,
+            save_logs: false,
             parser: Arc::new(Mutex::new(vt100::Parser::new(24, 80, MAX_SCROLLBACK))),
             handler: None,
             writer: None,
@@ -459,10 +462,12 @@ fn kill_descendants(_pid: libc::pid_t) {}
 
 impl Drop for Terminal {
     fn drop(&mut self) {
-        if let Init::Command { .. } = &self.init {
-            let _ = fs::create_dir_all("temp");
-            let text = self.get_all_lines().join("\n");
-            let _ = fs::write(format!("temp/{}.txt", self.name), &text);
+        if self.save_logs {
+            if let Init::Command { .. } = &self.init {
+                let _ = fs::create_dir_all("temp");
+                let text = self.get_all_lines().join("\n");
+                let _ = fs::write(format!("temp/{}.txt", self.name), &text);
+            }
         }
         self.kill_inner();
     }
