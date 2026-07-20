@@ -15,16 +15,29 @@ use std::{
 const MAX_SCROLLBACK: usize = 2000;
 const INITIAL_COLS: u16 = 256;
 
+/// How a terminal was initialized.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Init {
+    /// An interactive shell session.
     Shell,
-    Command { path: String, cmd: String },
+    /// A command spawned in the terminal.
+    Command {
+        /// Working directory of the command.
+        path: String,
+        /// The command string that was executed.
+        cmd: String,
+    },
 }
 
+/// A pseudo-terminal managing a shell or command process.
 pub struct Terminal {
+    /// How this terminal was initialized.
     pub init: Init,
+    /// Display name for the terminal tab.
     pub name: String,
+    /// Whether the child process has exited.
     pub stopped: bool,
+    /// Whether to save terminal output to a file on drop.
     pub save_logs: bool,
     parser: Arc<Mutex<vt100::Parser>>,
     handler: Option<JoinHandle<()>>,
@@ -104,6 +117,16 @@ fn spawn_reader(
 }
 
 impl Terminal {
+    /// Creates a new interactive shell terminal using the user's `$SHELL` (defaults to `bash`).
+    ///
+    /// # Arguments
+    /// * `name` - The display name for the terminal tab.
+    ///
+    /// # Returns
+    /// A new [`Terminal`] connected to a shell PTY.
+    ///
+    /// # Errors
+    /// Returns an error if the PTY could not be opened or the shell could not be spawned.
     pub fn spawn_shell(name: String) -> io::Result<Self> {
         let pty_system = portable_pty::native_pty_system();
         let size = PtySize {
@@ -148,6 +171,18 @@ impl Terminal {
         })
     }
 
+    /// Spawns a command in a new terminal within the given working directory.
+    ///
+    /// # Arguments
+    /// * `path` - The working directory for the command.
+    /// * `cmd` - The shell command to execute.
+    /// * `name` - The display name for the terminal tab.
+    ///
+    /// # Returns
+    /// A new [`Terminal`] with the command running inside.
+    ///
+    /// # Errors
+    /// Returns an error if the PTY could not be opened or the shell could not be spawned.
     pub fn spawn_command(path: &str, cmd: &str, name: String) -> io::Result<Self> {
         let mut t = Self {
             init: Init::Command {
@@ -167,6 +202,11 @@ impl Terminal {
         Ok(t)
     }
 
+    /// Creates a terminal that displays an error message instead of a running process.
+    ///
+    /// # Arguments
+    /// * `name` - The display name for the terminal tab.
+    /// * `error` - The error message to display in the terminal.
     pub fn spawn_error(name: String, error: String) -> Self {
         let parser = Arc::new(Mutex::new(vt100::Parser::new(24, 80, MAX_SCROLLBACK)));
         {
@@ -237,10 +277,12 @@ impl Terminal {
         Ok(())
     }
 
+    /// Returns `true` if this terminal is an interactive shell.
     pub fn is_shell(&self) -> bool {
         matches!(self.init, Init::Shell)
     }
 
+    /// Writes raw bytes to the terminal's PTY input.
     pub fn write(&mut self, data: &[u8]) {
         if let Some(ref mut w) = self.writer {
             let _ = w.write_all(data);
@@ -248,6 +290,7 @@ impl Terminal {
         }
     }
 
+    /// Returns the total number of lines in both scrollback and visible area.
     pub fn total_lines(&self) -> usize {
         let mut parser = self.parser.lock().expect("parser mutex poisoned");
         let screen = parser.screen_mut();
@@ -256,6 +299,14 @@ impl Terminal {
         sb + vis_rows as usize
     }
 
+    /// Returns a screenful of styled lines and the total line count.
+    ///
+    /// # Arguments
+    /// * `n` - The number of visible rows to return.
+    /// * `offset` - The scroll offset from the bottom of the content.
+    ///
+    /// # Returns
+    /// A tuple of styled lines for rendering and the total number of available lines.
     pub fn get_screen(&self, n: usize, offset: usize) -> (Vec<Line<'static>>, usize) {
         let mut parser = self.parser.lock().expect("parser mutex poisoned");
         let screen = parser.screen_mut();
@@ -335,6 +386,7 @@ impl Terminal {
         (lines, total)
     }
 
+    /// Returns all lines (scrollback + visible) as plain text strings.
     pub fn get_all_lines(&self) -> Vec<String> {
         let mut parser = self.parser.lock().expect("parser mutex poisoned");
         let screen = parser.screen_mut();
@@ -364,6 +416,7 @@ impl Terminal {
         result
     }
 
+    /// Returns the cursor position `(row, col)` if the cursor is visible.
     pub fn cursor_position(&self) -> Option<(u16, u16)> {
         let parser = self.parser.lock().expect("parser mutex poisoned");
         let screen = parser.screen();
@@ -378,6 +431,11 @@ impl Terminal {
         Some((row, col))
     }
 
+    /// Resizes the PTY and internal parser screen dimensions.
+    ///
+    /// # Arguments
+    /// * `cols` - The new number of columns.
+    /// * `rows` - The new number of rows.
     pub fn resize(&mut self, cols: u16, rows: u16) {
         if let Some(ref m) = self.master {
             let _ = m.resize(PtySize {
@@ -418,6 +476,13 @@ impl Terminal {
         self.writer = None;
     }
 
+    /// Restarts the command process in this terminal.
+    ///
+    /// # Errors
+    /// Returns an error if this is a shell tab (shells cannot be restarted).
+    ///
+    /// # Panics
+    /// Panics if the PTY could not be re-opened or the command re-spawned.
     pub fn restart(&mut self) -> io::Result<()> {
         let (path, cmd) = match &self.init {
             Init::Command { path, cmd } => (path.clone(), cmd.clone()),
@@ -430,6 +495,7 @@ impl Terminal {
         self.spawn_into(&path, &cmd)
     }
 
+    /// Checks if the child process has exited and updates `stopped` accordingly.
     pub fn refresh_status(&mut self) {
         if self.stopped {
             return;

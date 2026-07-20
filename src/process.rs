@@ -1,5 +1,15 @@
 use std::io;
 
+/// Sends a signal to the entire process group of the given PID.
+///
+/// Negating the PID targets the process group, which is standard POSIX semantics.
+///
+/// # Arguments
+/// * `pid` - The process ID (group leader).
+/// * `signal` - The signal number to send (e.g. `SIGTERM`, `SIGKILL`).
+///
+/// # Errors
+/// Returns an error if the kill syscall fails.
 pub fn kill_process_group(pid: u32, signal: i32) -> io::Result<()> {
     // SAFETY: pid is a valid process id from portable_pty. Negating pid
     // targets the entire process group, which is standard POSIX semantics.
@@ -11,6 +21,15 @@ pub fn kill_process_group(pid: u32, signal: i32) -> io::Result<()> {
     }
 }
 
+/// Waits for a child process without blocking.
+///
+/// # Arguments
+/// * `pid` - The child process ID to wait for.
+///
+/// # Returns
+/// * `Ok(Some(status))` if the child has exited.
+/// * `Ok(None)` if the child is still running.
+/// * `Err(e)` if the waitpid call failed.
 pub fn waitpid_nohang(pid: u32) -> io::Result<Option<i32>> {
     let mut status: i32 = 0;
     // SAFETY:
@@ -27,10 +46,21 @@ pub fn waitpid_nohang(pid: u32) -> io::Result<Option<i32>> {
     }
 }
 
+/// Attempts to send a signal to a process group, ignoring any errors.
+///
+/// # Arguments
+/// * `pid` - The process ID (group leader).
+/// * `signal` - The signal number to send.
 pub fn try_kill_process_group(pid: u32, signal: i32) {
     let _ = kill_process_group(pid, signal);
 }
 
+/// Kills all descendant processes of the given PID recursively.
+///
+/// On macOS this uses `proc_listchildpids` to discover and kill the process tree.
+///
+/// # Arguments
+/// * `pid` - The parent process ID whose descendants should be killed.
 #[cfg(target_os = "macos")]
 pub fn kill_descendants(pid: u32) {
     use std::collections::VecDeque;
@@ -65,5 +95,11 @@ pub fn kill_descendants(pid: u32) {
     }
 }
 
+/// Kills all descendant processes of the given PID recursively.
+///
+/// This is a no-op on non-macOS platforms.
+///
+/// # Arguments
+/// * `pid` - The parent process ID (ignored on non-macOS).
 #[cfg(not(target_os = "macos"))]
 pub fn kill_descendants(_pid: u32) {}

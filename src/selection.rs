@@ -5,6 +5,21 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use std::io::Write;
 
+/// Converts screen coordinates to a content line/column position.
+///
+/// Accounts for the content area's inner padding (1-cell border) and the current
+/// scroll offset.
+///
+/// # Arguments
+/// * `x` - Screen x-coordinate.
+/// * `y` - Screen y-coordinate.
+/// * `content_area` - The content area rectangle (including border).
+/// * `scroll_offset` - Current scroll offset from the bottom.
+/// * `total_lines` - Total number of lines in the terminal.
+///
+/// # Returns
+/// `Some((line_index, column))` if the coordinates fall within the content area,
+/// or `None` if outside.
 pub(crate) fn screen_to_content(
     x: u16,
     y: u16,
@@ -34,6 +49,13 @@ pub(crate) fn screen_to_content(
     Some((line_idx, col))
 }
 
+/// Copies selected text to the system clipboard via the OSC 52 escape sequence.
+///
+/// # Arguments
+/// * `start` - The start `(line, column)` of the selection.
+/// * `end` - The end `(line, column)` of the selection.
+/// * `items` - All terminal instances.
+/// * `tab_index` - The index of the active terminal tab to copy from.
 pub(crate) fn copy_selection(
     start: (usize, usize),
     end: (usize, usize),
@@ -82,6 +104,14 @@ pub(crate) fn copy_selection(
     }
 }
 
+/// Applies visual selection highlighting (reversed style) to a slice of styled lines.
+///
+/// # Arguments
+/// * `lines` - The styled lines to modify in place.
+/// * `select_start` - The start of the selection, if any.
+/// * `select_end` - The end of the selection, if any.
+/// * `scroll_offset` - Current scroll offset from the bottom.
+/// * `total_lines` - Total number of lines in the terminal.
 pub(crate) fn apply_sel(
     lines: &mut [Line<'static>],
     select_start: Option<(usize, usize)>,
@@ -148,6 +178,12 @@ pub(crate) fn apply_sel(
     }
 }
 
+/// Resets all selection state to inactive.
+///
+/// # Arguments
+/// * `selecting` - The selecting flag to set to `false`.
+/// * `select_start` - The selection start to clear.
+/// * `select_end` - The selection end to clear.
 pub(crate) fn clear_selection(
     selecting: &mut bool,
     select_start: &mut Option<(usize, usize)>,

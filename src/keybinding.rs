@@ -1,5 +1,21 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+/// Converts a crossterm [`KeyEvent`] into a byte sequence for PTY input.
+///
+/// Mappings include:
+///  * Enter → `\n`
+///  * Backspace → `\x7f`
+///  * Tab → `\t`
+///  * Esc → `\x1b`
+///  * Arrow keys → `\x1b[A` / `\x1b[B` / `\x1b[C` / `\x1b[D`
+///  * Home → `\x1b[H`
+///  * End → `\x1b[F`
+///  * Delete → `\x1b[3~`
+///  * PageUp/PageDown → `\x1b[5~` / `\x1b[6~`
+///  * Control+letter → byte values 1–26
+///  * Regular/shift characters → UTF-8 encoded bytes
+///
+/// Returns `None` for unmapped keys, function keys, or unsupported modifier combinations.
 pub fn key_to_bytes(key: KeyEvent) -> Option<Vec<u8>> {
     match key.code {
         KeyCode::Enter => Some(vec![b'\n']),

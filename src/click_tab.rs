@@ -6,17 +6,25 @@ use ratatui::{
     text::{Line, Span},
 };
 
+/// The type of tab entry in the sidebar.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TabKind {
+    /// A service process tab.
     Service,
+    /// An interactive shell terminal tab.
     Terminal,
+    /// The reverse proxy log tab.
     Proxy,
 }
 
+/// A single tab entry in the sidebar.
 #[derive(Debug, Clone)]
 pub struct TabEntry {
+    /// Display name of the tab.
     pub name: String,
+    /// The kind of tab this entry represents.
     pub kind: TabKind,
+    /// Whether the underlying process has stopped.
     pub stopped: bool,
 }
 
@@ -30,10 +38,13 @@ impl TabEntry {
     }
 }
 
+/// A clickable tab bar rendered as a sidebar list.
 #[derive(Debug)]
 #[derive(Default)]
 pub struct ClickTab {
+    /// The list of tab entries.
     pub entries: Vec<TabEntry>,
+    /// The currently selected tab index.
     pub index: usize,
     area: Option<Rect>,
     list_state: ListState,
@@ -41,6 +52,12 @@ pub struct ClickTab {
 
 
 impl ClickTab {
+    /// Creates a new [`ClickTab`] from a list of service tab names.
+    ///
+    /// All entries start with kind [`TabKind::Service`] and index 0 is selected.
+    ///
+    /// # Arguments
+    /// * `names` - The display names for the initial service tabs.
     pub fn new(names: Vec<String>) -> Self {
         let entries = names
             .into_iter()
@@ -60,6 +77,11 @@ impl ClickTab {
         }
     }
 
+    /// Adds a new tab entry and selects it.
+    ///
+    /// # Arguments
+    /// * `name` - The display name for the new tab.
+    /// * `kind` - The kind of tab to add.
     pub fn add(&mut self, name: String, kind: TabKind) {
         self.entries.push(TabEntry {
             name,
@@ -70,6 +92,12 @@ impl ClickTab {
         self.list_state.select(Some(self.index));
     }
 
+    /// Removes the tab at the given index.
+    ///
+    /// If the currently selected tab is removed, the selection adjusts to the last tab.
+    ///
+    /// # Arguments
+    /// * `idx` - The index of the tab to remove.
     pub fn remove(&mut self, idx: usize) {
         if idx >= self.entries.len() {
             return;
@@ -81,6 +109,7 @@ impl ClickTab {
         self.list_state.select(Some(self.index));
     }
 
+    /// Returns the minimum sidebar width needed to display all tab names.
     pub fn min_width(&self) -> u16 {
         let max_name = self
             .entries
@@ -91,6 +120,14 @@ impl ClickTab {
         (max_name + 5) as u16
     }
 
+    /// Handles a mouse click to select a tab.
+    ///
+    /// # Arguments
+    /// * `x` - The screen x-coordinate of the click.
+    /// * `y` - The screen y-coordinate of the click.
+    ///
+    /// # Panics
+    /// Panics if the sidebar area has not been set by a prior call to [`draw`](Self::draw).
     pub fn click(&mut self, x: u16, y: u16) {
         let sidebar_area = self.area.expect("missing sidebar area");
         if !sidebar_area.contains(Position { x, y }) {
@@ -103,6 +140,11 @@ impl ClickTab {
         }
     }
 
+    /// Renders the tab sidebar into the given frame and area.
+    ///
+    /// # Arguments
+    /// * `frame` - The ratatui frame to render into.
+    /// * `area` - The rectangular area for the sidebar.
     pub fn draw(&mut self, frame: &mut Frame, area: Rect) {
         self.area = Some(area);
 

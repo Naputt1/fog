@@ -24,12 +24,15 @@ use crate::config::Config;
 use crate::proxy::{ProxyInstance, RouteEntry};
 use crate::terminal::Terminal;
 
+/// Command-line interface arguments parsed via clap.
 #[derive(Parser)]
 #[command(name = "fog", version = env!("CARGO_PKG_VERSION"))]
 struct Cli {
+    /// Path to the configuration file. Defaults to `fog.json`.
     #[arg(short, long, default_value = "fog.json")]
     config: std::path::PathBuf,
 
+    /// Save service output to `temp/<name>.txt` on exit.
     #[arg(long, help = "Save service output to temp/<name>.txt on exit")]
     save_logs: bool,
 }

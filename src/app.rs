@@ -24,6 +24,7 @@ enum Mode {
     TerminalInput,
 }
 
+/// Main application state managing terminals, the proxy, tabs, and input handling.
 pub struct App {
     items: Vec<Terminal>,
     proxy: Option<ProxyInstance>,
@@ -40,6 +41,12 @@ pub struct App {
 }
 
 impl App {
+    /// Creates a new [`App`] with the given terminals, optional proxy, and SIGINT flag.
+    ///
+    /// # Arguments
+    /// * `items` - The list of terminal instances.
+    /// * `proxy` - An optional reverse proxy instance.
+    /// * `sigint` - An `AtomicBool` flag set to `true` when SIGINT (Ctrl+C) is received.
     pub fn new(items: Vec<Terminal>, proxy: Option<ProxyInstance>, sigint: Arc<AtomicBool>) -> Self {
         let names: Vec<String> = items.iter().map(|t| t.name.clone()).collect();
         let mut tabs = ClickTab::new(names);
@@ -79,6 +86,15 @@ impl App {
             .unwrap_or(false)
     }
 
+    /// Runs the main event loop until exit is requested.
+    ///
+    /// Draws the UI on every tick and processes keyboard and mouse events.
+    ///
+    /// # Arguments
+    /// * `terminal` - The ratatui terminal to render to.
+    ///
+    /// # Errors
+    /// Returns an error if terminal rendering or event polling fails.
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
         while !self.exit {
             if self.sigint.load(Ordering::SeqCst) {

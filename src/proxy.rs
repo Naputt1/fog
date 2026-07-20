@@ -26,20 +26,31 @@ const HOP_BY_HOP: &[&str] = &[
     "proxy-authorization", "te", "trailers", "transfer-encoding", "upgrade",
 ];
 
+/// A single proxied request log entry.
 #[derive(Debug, Clone)]
 pub struct LogEntry {
+    /// HTTP method of the request (e.g. `GET`, `POST`).
     pub method: String,
+    /// Request path received by the proxy.
     pub path: String,
+    /// Upstream target URL the request was forwarded to.
     pub upstream: String,
+    /// HTTP response status code returned from the upstream.
     pub status: u16,
+    /// Request latency in milliseconds.
     pub latency_ms: u64,
+    /// Whether this was a WebSocket connection.
     pub ws: bool,
 }
 
+/// A configured proxy route with an upstream target.
 #[derive(Debug, Clone)]
 pub struct RouteEntry {
+    /// Incoming path prefix to match against.
     pub path: String,
+    /// Upstream URL to forward matching requests to.
     pub upstream: String,
+    /// Whether to proxy WebSocket connections for this route.
     pub ws: bool,
 }
 
@@ -54,8 +65,11 @@ struct HttpRequestContext<'a> {
     path: String,
 }
 
+/// Manages a reverse proxy server on a dedicated thread.
 pub struct ProxyInstance {
+    /// The port the proxy server listens on.
     pub port: u16,
+    /// The configured upstream routes.
     pub routes: Vec<RouteEntry>,
     logs: Arc<Mutex<VecDeque<LogEntry>>>,
     running: Arc<AtomicBool>,
@@ -64,6 +78,11 @@ pub struct ProxyInstance {
 }
 
 impl ProxyInstance {
+    /// Creates a new [`ProxyInstance`] without starting the server.
+    ///
+    /// # Arguments
+    /// * `port` - The port to bind the proxy to.
+    /// * `routes` - The route definitions for forwarding requests.
     pub fn new(port: u16, routes: Vec<RouteEntry>) -> Self {
         Self {
             port,
@@ -75,6 +94,9 @@ impl ProxyInstance {
         }
     }
 
+    /// Starts the proxy server on a new thread using a Tokio runtime.
+    ///
+    /// If the server is already running this is a no-op.
     pub fn start(&mut self) {
         if self.running.load(Ordering::SeqCst) {
             return;
@@ -165,6 +187,7 @@ impl ProxyInstance {
         self.handle = Some(handle);
     }
 
+    /// Stops the proxy server and waits for the server thread to join.
     pub fn stop(&mut self) {
         self.shutdown.store(true, Ordering::SeqCst);
         if let Some(h) = self.handle.take() {
@@ -174,20 +197,24 @@ impl ProxyInstance {
         self.shutdown.store(false, Ordering::SeqCst);
     }
 
+    /// Stops and restarts the proxy server.
     pub fn restart(&mut self) {
         self.stop();
         self.start();
     }
 
+    /// Returns `true` if the proxy server thread is currently running.
     pub fn is_running(&self) -> bool {
         self.running.load(Ordering::SeqCst)
     }
 
+    /// Returns a snapshot of all log entries.
     pub fn get_logs(&self) -> Vec<LogEntry> {
         let lk = self.logs.lock().expect("mutex poisoned");
         lk.iter().cloned().collect()
     }
 
+    /// Pushes a new log entry into the ring buffer, trimming old entries if at capacity.
     #[allow(dead_code)]
     pub fn push_log(&self, entry: LogEntry) {
         let mut lk = self.logs.lock().expect("mutex poisoned");
