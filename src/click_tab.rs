@@ -31,6 +31,7 @@ impl TabEntry {
 }
 
 #[derive(Debug)]
+#[derive(Default)]
 pub struct ClickTab {
     pub entries: Vec<TabEntry>,
     pub index: usize,
@@ -38,16 +39,6 @@ pub struct ClickTab {
     list_state: ListState,
 }
 
-impl Default for ClickTab {
-    fn default() -> Self {
-        Self {
-            entries: Vec::new(),
-            index: 0,
-            area: None,
-            list_state: ListState::default(),
-        }
-    }
-}
 
 impl ClickTab {
     pub fn new(names: Vec<String>) -> Self {
@@ -149,5 +140,154 @@ impl ClickTab {
 
         self.list_state.select(Some(self.index));
         frame.render_stateful_widget(list, area, &mut self.list_state);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_new_creates_entries() {
+        let names = vec!["tab1".into(), "tab2".into(), "tab3".into()];
+        let ct = ClickTab::new(names);
+        assert_eq!(ct.entries.len(), 3);
+        assert_eq!(ct.index, 0);
+        for e in &ct.entries {
+            assert_eq!(e.kind, TabKind::Service);
+        }
+    }
+
+    #[test]
+    fn test_new_empty() {
+        let ct = ClickTab::new(vec![]);
+        assert_eq!(ct.entries.len(), 0);
+        assert_eq!(ct.index, 0);
+    }
+
+    #[test]
+    fn test_add_entry() {
+        let mut ct = ClickTab::new(vec!["first".into()]);
+        ct.add("second".into(), TabKind::Terminal);
+        assert_eq!(ct.entries.len(), 2);
+        assert_eq!(ct.index, 1);
+        assert_eq!(ct.entries[1].kind, TabKind::Terminal);
+        assert_eq!(ct.entries[1].name, "second");
+    }
+
+    #[test]
+    fn test_add_updates_index() {
+        let mut ct = ClickTab::new(vec!["a".into(), "b".into()]);
+        ct.add("c".into(), TabKind::Proxy);
+        assert_eq!(ct.index, 2);
+    }
+
+    #[test]
+    fn test_remove_entry() {
+        let mut ct = ClickTab::new(vec!["a".into(), "b".into(), "c".into()]);
+        ct.remove(0);
+        assert_eq!(ct.entries.len(), 2);
+        assert_eq!(ct.entries[0].name, "b");
+        assert_eq!(ct.entries[1].name, "c");
+    }
+
+    #[test]
+    fn test_remove_adjusts_index() {
+        let mut ct = ClickTab::new(vec!["a".into(), "b".into(), "c".into()]);
+        ct.index = 2;
+        ct.remove(2);
+        assert_eq!(ct.index, 1);
+    }
+
+    #[test]
+    fn test_remove_out_of_bounds() {
+        let mut ct = ClickTab::new(vec!["a".into()]);
+        ct.remove(5);
+        assert_eq!(ct.entries.len(), 1);
+    }
+
+    #[test]
+    fn test_remove_last_adjusts_index() {
+        let mut ct = ClickTab::new(vec!["a".into(), "b".into()]);
+        ct.index = 1;
+        ct.remove(1);
+        assert_eq!(ct.index, 0);
+        assert_eq!(ct.entries.len(), 1);
+    }
+
+    #[test]
+    fn test_min_width() {
+        let ct = ClickTab::new(vec!["short".into(), "very long name".into()]);
+        assert_eq!(ct.min_width(), 19); // max_name (14) + 5 = 19
+    }
+
+    #[test]
+    fn test_min_width_empty() {
+        let ct = ClickTab::new(vec![]);
+        assert_eq!(ct.min_width(), 5);
+    }
+
+    #[test]
+    fn test_min_width_single() {
+        let ct = ClickTab::new(vec!["hi".into()]);
+        assert_eq!(ct.min_width(), 7); // 2 + 5 = 7
+    }
+
+    #[test]
+    fn test_display_name_service() {
+        let e = TabEntry { name: "myservice".into(), kind: TabKind::Service, stopped: false };
+        assert_eq!(e.display_name(), "myservice");
+    }
+
+    #[test]
+    fn test_display_name_terminal() {
+        let e = TabEntry { name: "bash".into(), kind: TabKind::Terminal, stopped: false };
+        assert_eq!(e.display_name(), "$ bash");
+    }
+
+    #[test]
+    fn test_display_name_proxy() {
+        let e = TabEntry { name: "proxy".into(), kind: TabKind::Proxy, stopped: false };
+        assert_eq!(e.display_name(), "▶ proxy");
+    }
+
+    #[test]
+    fn test_click_hit_inside() {
+        let mut ct = ClickTab::new(vec!["a".into(), "b".into(), "c".into()]);
+        ct.area = Some(Rect { x: 80, y: 0, width: 20, height: 10 });
+        ct.click(80, 1);
+        assert_eq!(ct.index, 1);
+    }
+
+    #[test]
+    fn test_click_miss_outside() {
+        let mut ct = ClickTab::new(vec!["a".into(), "b".into()]);
+        ct.area = Some(Rect { x: 80, y: 0, width: 20, height: 10 });
+        ct.index = 1;
+        ct.click(10, 10);
+        assert_eq!(ct.index, 1);
+    }
+
+    #[test]
+    fn test_click_hit_different_row() {
+        let mut ct = ClickTab::new(vec!["a".into(), "b".into(), "c".into()]);
+        ct.area = Some(Rect { x: 80, y: 0, width: 20, height: 10 });
+        ct.click(80, 2);
+        assert_eq!(ct.index, 2);
+    }
+
+    #[test]
+    fn test_click_beyond_entries() {
+        let mut ct = ClickTab::new(vec!["a".into(), "b".into()]);
+        ct.area = Some(Rect { x: 80, y: 0, width: 20, height: 10 });
+        ct.click(80, 5);
+        assert_eq!(ct.index, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "missing sidebar area")]
+    fn test_click_without_area_set() {
+        let mut ct = ClickTab::new(vec!["a".into()]);
+        ct.click(0, 0);
     }
 }
