@@ -94,14 +94,14 @@ impl ProxyInstance {
                 .enable_io()
                 .enable_time()
                 .build()
-                .unwrap();
+                .expect("failed to build tokio runtime");
 
             rt.block_on(async move {
                 let addr = format!("0.0.0.0:{}", port);
                 let listener = match TcpListener::bind(&addr).await {
                     Ok(l) => l,
                     Err(e) => {
-                        let mut lk = logs.lock().unwrap();
+                        let mut lk = logs.lock().expect("mutex poisoned");
                         lk.push_back(LogEntry {
                             method: "ERR".into(),
                             path: format!("Failed to bind {}: {}", addr, e),
@@ -184,13 +184,13 @@ impl ProxyInstance {
     }
 
     pub fn get_logs(&self) -> Vec<LogEntry> {
-        let lk = self.logs.lock().unwrap();
+        let lk = self.logs.lock().expect("mutex poisoned");
         lk.iter().cloned().collect()
     }
 
     #[allow(dead_code)]
     pub fn push_log(&self, entry: LogEntry) {
-        let mut lk = self.logs.lock().unwrap();
+        let mut lk = self.logs.lock().expect("mutex poisoned");
         lk.push_back(entry);
         if lk.len() > MAX_LOG_ENTRIES {
             lk.pop_front();
@@ -227,7 +227,7 @@ fn build_upstream_uri(upstream: &str, suffix: &str, query: Option<&str>) -> hype
         _ => path,
     };
     s.parse().unwrap_or_else(|_| {
-        format!("{}/", base).parse().unwrap()
+        format!("{}/", base).parse().expect("built URI should parse")
     })
 }
 
@@ -318,7 +318,7 @@ async fn proxy_ws_pipe(
             }
         }
         Err(e) => {
-            let mut lk = logs.lock().unwrap();
+            let mut lk = logs.lock().expect("mutex poisoned");
             lk.push_back(LogEntry {
                 method: log_entry.method.clone(),
                 path: log_entry.path.clone(),
@@ -335,7 +335,7 @@ async fn proxy_ws_pipe(
     }
 
     let ms = start.elapsed().as_millis() as u64;
-    let mut lk = logs.lock().unwrap();
+    let mut lk = logs.lock().expect("mutex poisoned");
     lk.push_back(LogEntry {
         method: log_entry.method,
         path: log_entry.path,
@@ -392,7 +392,7 @@ async fn handle_ws(
             Ok(Response::new(Full::new(Bytes::new())))
         }
         Err(_) => {
-            let mut lk = logs.lock().unwrap();
+            let mut lk = logs.lock().expect("mutex poisoned");
             lk.push_back(LogEntry {
                 status: 502,
                 ..log_entry
@@ -404,32 +404,25 @@ async fn handle_ws(
             Ok(Response::builder()
                 .status(StatusCode::BAD_GATEWAY)
                 .body(Full::new(Bytes::from("websocket upgrade failed")))
-                .unwrap())
+                .expect("response builder failed"))
         }
     }
 }
 
 async fn handle_http(
-    req: Request<hyper::body::Incoming>,
-    client: Client<HttpConnector, Full<Bytes>>,
-    route: &RouteEntry,
-    suffix: &str,
-    query: Option<&str>,
-    logs: Arc<Mutex<VecDeque<LogEntry>>>,
-    method: String,
-    path: String,
+    ctx: HttpRequestContext<'_>,
 ) -> Result<Response<Full<Bytes>>, std::convert::Infallible> {
     let start = Instant::now();
-    let incoming_headers = req.headers().clone();
+    let incoming_headers = ctx.req.headers().clone();
 
-    let body_bytes = match req.collect().await {
+    let body_bytes = match ctx.req.collect().await {
         Ok(collected) => collected.to_bytes(),
         Err(_) => {
             let ms = start.elapsed().as_millis() as u64;
-            let mut lk = logs.lock().unwrap();
+            let mut lk = ctx.logs.lock().expect("mutex poisoned");
             lk.push_back(LogEntry {
-                method,
-                path,
+                method: ctx.method,
+                path: ctx.path,
                 upstream: String::new(),
                 status: 400,
                 latency_ms: ms,
@@ -441,24 +434,24 @@ async fn handle_http(
             return Ok(Response::builder()
                 .status(StatusCode::BAD_REQUEST)
                 .body(Full::new(Bytes::from("bad request")))
-                .unwrap());
+                .expect("response builder failed"));
         }
     };
 
-    let upstream_str = format!("{}{}", route.upstream.trim_end_matches('/'), suffix);
-    let upstream_uri = build_upstream_uri(&route.upstream, suffix, query);
+    let upstream_str = format!("{}{}", ctx.route.upstream.trim_end_matches('/'), ctx.suffix);
+    let upstream_uri = build_upstream_uri(&ctx.route.upstream, ctx.suffix, ctx.query);
 
     let forwarded_headers = forward_headers(&incoming_headers);
 
     let mut builder = Request::builder()
-        .method(&method as &str)
+        .method(&ctx.method as &str)
         .uri(upstream_uri.clone());
     for (k, v) in &forwarded_headers {
         builder = builder.header(k, v);
     }
-    let forward_req = builder.body(Full::new(body_bytes)).unwrap();
+    let forward_req = builder.body(Full::new(body_bytes)).expect("request builder failed");
 
-    match client.request(forward_req).await {
+    match ctx.client.request(forward_req).await {
         Ok(upstream_resp) => {
             let (parts, body) = upstream_resp.into_parts();
             let resp_body = match body.collect().await {
@@ -472,12 +465,12 @@ async fn handle_http(
             for (k, v) in &parts.headers {
                 resp_builder = resp_builder.header(k, v);
             }
-            let resp = resp_builder.body(Full::new(resp_body)).unwrap();
+            let resp = resp_builder.body(Full::new(resp_body)).expect("response builder failed");
 
-            let mut lk = logs.lock().unwrap();
+            let mut lk = ctx.logs.lock().expect("mutex poisoned");
             lk.push_back(LogEntry {
-                method,
-                path,
+                method: ctx.method,
+                path: ctx.path,
                 upstream: upstream_str,
                 status,
                 latency_ms: ms,
@@ -491,10 +484,10 @@ async fn handle_http(
         }
         Err(e) => {
             let ms = start.elapsed().as_millis() as u64;
-            let mut lk = logs.lock().unwrap();
+            let mut lk = ctx.logs.lock().expect("mutex poisoned");
             lk.push_back(LogEntry {
-                method,
-                path,
+                method: ctx.method,
+                path: ctx.path,
                 upstream: upstream_str,
                 status: 502,
                 latency_ms: ms,
@@ -507,7 +500,7 @@ async fn handle_http(
             Ok(Response::builder()
                 .status(StatusCode::BAD_GATEWAY)
                 .body(Full::new(Bytes::from(format!("upstream error: {}", e))))
-                .unwrap())
+                .expect("response builder failed"))
         }
     }
 }
@@ -531,10 +524,20 @@ async fn handle_request(
             handle_ws(req, route, &suffix, query.as_deref(), logs, method, path).await
         }
         Some((route, suffix)) => {
-            handle_http(req, client, route, &suffix, query.as_deref(), logs, method, path).await
+            let ctx = HttpRequestContext {
+                req,
+                client,
+                route,
+                suffix: &suffix,
+                query: query.as_deref(),
+                logs,
+                method,
+                path,
+            };
+            handle_http(ctx).await
         }
         None => {
-            let mut lk = logs.lock().unwrap();
+            let mut lk = logs.lock().expect("mutex poisoned");
             lk.push_back(LogEntry {
                 method,
                 path,
@@ -550,7 +553,7 @@ async fn handle_request(
             Ok(Response::builder()
                 .status(StatusCode::NOT_FOUND)
                 .body(Full::new(Bytes::from("no matching route")))
-                .unwrap())
+                .expect("response builder failed"))
         }
     }
 }
@@ -561,5 +564,144 @@ impl Drop for ProxyInstance {
         if let Some(h) = self.handle.take() {
             let _ = h.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http_body_util::Full;
+    use hyper::body::Bytes;
+
+    #[test]
+    fn test_match_route_exact() {
+        assert_eq!(match_route("/api/test", "/api/test"), Some("/".to_string()));
+    }
+
+    #[test]
+    fn test_match_route_prefix() {
+        assert_eq!(match_route("/api/test/foo", "/api/test"), Some("/foo".to_string()));
+    }
+
+    #[test]
+    fn test_match_route_no_match() {
+        assert_eq!(match_route("/other", "/api/test"), None);
+    }
+
+    #[test]
+    fn test_match_route_root() {
+        assert_eq!(match_route("/", "/"), Some("/".to_string()));
+    }
+
+    #[test]
+    fn test_match_route_trailing_slash_incoming() {
+        assert_eq!(match_route("/api/test/", "/api/test"), Some("/".to_string()));
+    }
+
+    #[test]
+    fn test_match_route_trailing_slash_route() {
+        assert_eq!(match_route("/api/test", "/api/test/"), Some("/".to_string()));
+    }
+
+    #[test]
+    fn test_match_route_prefix_with_trailing_slash() {
+        assert_eq!(match_route("/api/test/foo/bar", "/api/test/"), Some("/foo/bar".to_string()));
+    }
+
+    #[test]
+    fn test_match_route_empty_prefix() {
+        assert_eq!(match_route("/anything", ""), Some("/anything".to_string()));
+    }
+
+    #[test]
+    fn test_match_route_empty_prefix_no_slash() {
+        assert_eq!(match_route("anything", ""), None);
+    }
+
+    #[test]
+    fn test_is_ws_upgrade_with_headers() {
+        let req = Request::builder()
+            .method("GET")
+            .uri("/")
+            .header(hyper::header::UPGRADE, "websocket")
+            .header(hyper::header::CONNECTION, "Upgrade")
+            .body(Full::<Bytes>::new(Bytes::new()))
+            .unwrap();
+        assert!(is_ws_upgrade(&req));
+    }
+
+    #[test]
+    fn test_is_ws_upgrade_without_headers() {
+        let req = Request::builder()
+            .method("GET")
+            .uri("/")
+            .body(Full::<Bytes>::new(Bytes::new()))
+            .unwrap();
+        assert!(!is_ws_upgrade(&req));
+    }
+
+    #[test]
+    fn test_is_ws_upgrade_regular_get() {
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/data")
+            .header("accept", "application/json")
+            .body(Full::<Bytes>::new(Bytes::new()))
+            .unwrap();
+        assert!(!is_ws_upgrade(&req));
+    }
+
+    #[test]
+    fn test_is_ws_upgrade_post() {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/")
+            .header(hyper::header::UPGRADE, "websocket")
+            .header(hyper::header::CONNECTION, "Upgrade")
+            .body(Full::<Bytes>::new(Bytes::new()))
+            .unwrap();
+        assert!(!is_ws_upgrade(&req));
+    }
+
+    #[test]
+    fn test_is_ws_upgrade_case_insensitive() {
+        let req = Request::builder()
+            .method("GET")
+            .uri("/")
+            .header(hyper::header::UPGRADE, "WebSocket")
+            .header(hyper::header::CONNECTION, "keep-alive, Upgrade")
+            .body(Full::<Bytes>::new(Bytes::new()))
+            .unwrap();
+        assert!(is_ws_upgrade(&req));
+    }
+
+    #[test]
+    fn test_build_upstream_uri_no_query() {
+        let uri = build_upstream_uri("http://localhost:8080", "/api/test", None);
+        assert_eq!(uri.to_string(), "http://localhost:8080/api/test");
+    }
+
+    #[test]
+    fn test_build_upstream_uri_with_query() {
+        let uri = build_upstream_uri("http://localhost:8080", "/api/test", Some("key=value"));
+        assert_eq!(uri.to_string(), "http://localhost:8080/api/test?key=value");
+    }
+
+    #[test]
+    fn test_build_upstream_uri_trailing_slash() {
+        let uri = build_upstream_uri("http://localhost:8080/", "/api/test", None);
+        assert_eq!(uri.to_string(), "http://localhost:8080/api/test");
+    }
+
+    #[test]
+    fn test_build_upstream_uri_empty_query() {
+        let uri = build_upstream_uri("http://localhost:8080", "/api/test", Some(""));
+        assert_eq!(uri.to_string(), "http://localhost:8080/api/test");
+    }
+
+    #[test]
+    fn test_build_upstream_uri_suffix_root() {
+        let uri = build_upstream_uri("http://localhost:8080", "/", None);
+        assert_eq!(uri.to_string(), "http://localhost:8080/");
     }
 }
