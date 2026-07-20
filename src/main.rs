@@ -46,6 +46,15 @@ fn main() -> io::Result<()> {
         }
     };
 
+    let config_path = cli
+        .config
+        .canonicalize()
+        .unwrap_or_else(|_| cli.config.clone());
+    let config_dir = config_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .to_path_buf();
+
     enable_raw_mode()?;
     execute!(stdout(), EnterAlternateScreen, EnableMouseCapture)?;
 
@@ -53,21 +62,20 @@ fn main() -> io::Result<()> {
         .service
         .unwrap_or_default()
         .into_iter()
-        .filter_map(|entry| {
-            let name = std::path::Path::new(&entry.path)
+        .map(|entry| {
+            let service_path = config_dir.join(&entry.path);
+            let name = service_path
                 .file_name()
                 .unwrap()
                 .to_string_lossy()
                 .into_owned();
-            match Terminal::spawn_command(&entry.path, &entry.cmd, name) {
+            let service_path = service_path.to_string_lossy().into_owned();
+            match Terminal::spawn_command(&service_path, &entry.cmd, name.clone()) {
                 Ok(mut t) => {
                     t.save_logs = cli.save_logs;
-                    Some(t)
+                    t
                 }
-                Err(e) => {
-                    eprintln!("error spawning {}: {}", entry.cmd, e);
-                    None
-                }
+                Err(e) => Terminal::spawn_error(name, format!("Failed to spawn: {e}")),
             }
         })
         .collect();

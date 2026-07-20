@@ -153,7 +153,7 @@ impl Terminal {
     pub fn spawn_command(path: &str, cmd: &str, name: String) -> io::Result<Self> {
         let mut t = Self {
             init: Init::Command {
-                path: path.to_string(),
+                path: String::new(),
                 cmd: cmd.to_string(),
             },
             name,
@@ -171,7 +171,38 @@ impl Terminal {
         Ok(t)
     }
 
+    pub fn spawn_error(name: String, error: String) -> Self {
+        let parser = Arc::new(Mutex::new(vt100::Parser::new(24, 80, MAX_SCROLLBACK)));
+        {
+            let mut p = parser.lock().unwrap();
+            p.screen_mut().set_size(24, 80);
+            p.process(error.as_bytes());
+        }
+
+        Self {
+            init: Init::Command {
+                path: String::new(),
+                cmd: String::new(),
+            },
+            name,
+            stopped: true,
+            save_logs: false,
+            parser,
+            handler: None,
+            writer: None,
+            child: None,
+            master: None,
+            max_cols: 80,
+            max_rows: 24,
+        }
+    }
+
     fn spawn_into(&mut self, path: &str, cmd: &str) -> io::Result<()> {
+        self.init = Init::Command {
+            path: path.to_string(),
+            cmd: cmd.to_string(),
+        };
+
         let pty_system = portable_pty::native_pty_system();
         let size = PtySize {
             rows: 24,
@@ -185,7 +216,7 @@ impl Terminal {
 
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "bash".to_string());
         let mut cmd_builder = CommandBuilder::new(&shell);
-        cmd_builder.cwd(path);
+        cmd_builder.cwd(&path);
 
         let child = pair
             .slave
