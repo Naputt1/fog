@@ -29,12 +29,25 @@ struct Cli {
 
 fn main() -> io::Result<()> {
     let cli = Cli::parse();
+
+    let contents = match fs::read_to_string(&cli.config) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: could not read config '{}': {}", cli.config.display(), e);
+            std::process::exit(1);
+        }
+    };
+
+    let config: Config = match serde_json::from_str(&contents) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: invalid config '{}': {}", cli.config.display(), e);
+            std::process::exit(1);
+        }
+    };
+
     enable_raw_mode()?;
     execute!(stdout(), EnterAlternateScreen, EnableMouseCapture)?;
-
-    let contents = fs::read_to_string(&cli.config)?;
-
-    let config: Config = serde_json::from_str(&contents).unwrap();
 
     let items: Vec<Terminal> = config
         .service
