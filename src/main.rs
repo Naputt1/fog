@@ -5,6 +5,7 @@ mod click_tab;
 mod config;
 mod proxy;
 mod terminal;
+use clap::Parser;
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -16,11 +17,19 @@ use crate::config::Config;
 use crate::proxy::{ProxyInstance, RouteEntry};
 use crate::terminal::Terminal;
 
+#[derive(Parser)]
+#[command(name = "fog")]
+struct Cli {
+    #[arg(short, long, default_value = "fog.json")]
+    config: std::path::PathBuf,
+}
+
 fn main() -> io::Result<()> {
+    let cli = Cli::parse();
     enable_raw_mode()?;
     execute!(stdout(), EnterAlternateScreen, EnableMouseCapture)?;
 
-    let contents = fs::read_to_string("config.json")?;
+    let contents = fs::read_to_string(&cli.config)?;
 
     let config: Config = serde_json::from_str(&contents).unwrap();
 

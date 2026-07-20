@@ -1,5 +1,5 @@
 {
-  "$schema": "https://raw.githubusercontent.com/Naputt1/fog/main/config.schema.json",
+  "$schema": "https://raw.githubusercontent.com/Naputt1/fog/main/fog.schema.json",
   "service": [
     {
       "path": "/Users/naputt/code/cinema_ticket/backend",
