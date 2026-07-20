@@ -43,6 +43,17 @@ pub struct RouteEntry {
     pub ws: bool,
 }
 
+struct HttpRequestContext<'a> {
+    req: Request<hyper::body::Incoming>,
+    client: Client<HttpConnector, Full<Bytes>>,
+    route: &'a RouteEntry,
+    suffix: &'a str,
+    query: Option<&'a str>,
+    logs: Arc<Mutex<VecDeque<LogEntry>>>,
+    method: String,
+    path: String,
+}
+
 pub struct ProxyInstance {
     pub port: u16,
     pub routes: Vec<RouteEntry>,
