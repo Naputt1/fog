@@ -37,5 +37,10 @@
         }
       }
     }
-  }
+  },
+    "max_scrollback": {
+      "type": "integer",
+      "minimum": 100,
+      "default": 2000
+    }
 }

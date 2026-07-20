@@ -29,6 +29,7 @@ pub struct App {
     items: Vec<Terminal>,
     proxy: Option<ProxyInstance>,
     sigint: Arc<AtomicBool>,
+    scrollback: usize,
     tabs: ClickTab,
     mode: Mode,
     scroll_offset: usize,
@@ -48,7 +49,7 @@ impl App {
     /// * `items` - The list of terminal instances.
     /// * `proxy` - An optional reverse proxy instance.
     /// * `sigint` - An `AtomicBool` flag set to `true` when SIGINT (Ctrl+C) is received.
-    pub fn new(items: Vec<Terminal>, proxy: Option<ProxyInstance>, sigint: Arc<AtomicBool>) -> Self {
+    pub fn new(items: Vec<Terminal>, proxy: Option<ProxyInstance>, sigint: Arc<AtomicBool>, scrollback: usize) -> Self {
         let names: Vec<String> = items.iter().map(|t| t.name.clone()).collect();
         let mut tabs = ClickTab::new(names);
         for (i, item) in items.iter().enumerate() {
@@ -67,6 +68,7 @@ impl App {
             items,
             proxy,
             sigint,
+            scrollback,
             tabs,
             mode: Mode::Normal,
             scroll_offset: 0,
@@ -321,7 +323,7 @@ impl App {
     }
 
     fn new_terminal(&mut self) {
-        match Terminal::spawn_shell("bash".to_string()) {
+        match Terminal::spawn_shell("bash".to_string(), self.scrollback) {
             Ok(term) => {
                 let id = self.items.len();
                 self.items.push(term);

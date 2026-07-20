@@ -12,7 +12,6 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-const MAX_SCROLLBACK: usize = 2000;
 const INITIAL_COLS: u16 = 256;
 
 /// How a terminal was initialized.
@@ -39,6 +38,8 @@ pub struct Terminal {
     pub stopped: bool,
     /// Whether to save terminal output to a file on drop.
     pub save_logs: bool,
+    /// Number of scrollback lines in the parser.
+    pub scrollback: usize,
     parser: Arc<Mutex<vt100::Parser>>,
     handler: Option<JoinHandle<()>>,
     writer: Option<Box<dyn Write + Send>>,
@@ -52,6 +53,7 @@ impl std::fmt::Debug for Terminal {
             .field("init", &self.init)
             .field("name", &self.name)
             .field("stopped", &self.stopped)
+            .field("scrollback", &self.scrollback)
             .field("handler", &self.handler)
             .field("child", &self.child)
             .finish()
@@ -127,7 +129,7 @@ impl Terminal {
     ///
     /// # Errors
     /// Returns an error if the PTY could not be opened or the shell could not be spawned.
-    pub fn spawn_shell(name: String) -> io::Result<Self> {
+    pub fn spawn_shell(name: String, scrollback: usize) -> io::Result<Self> {
         let pty_system = portable_pty::native_pty_system();
         let size = PtySize {
             rows: 24,
@@ -155,7 +157,7 @@ impl Terminal {
             .take_writer()
             .map_err(|e| io::Error::other(e.to_string()))?;
 
-        let parser = Arc::new(Mutex::new(vt100::Parser::new(24, 80, MAX_SCROLLBACK)));
+        let parser = Arc::new(Mutex::new(vt100::Parser::new(24, 80, scrollback)));
         let handler = spawn_reader(parser.clone(), reader);
 
         Ok(Self {
@@ -163,6 +165,7 @@ impl Terminal {
             name,
             stopped: false,
             save_logs: false,
+            scrollback,
             parser,
             handler: Some(handler),
             writer: Some(writer),
@@ -183,7 +186,7 @@ impl Terminal {
     ///
     /// # Errors
     /// Returns an error if the PTY could not be opened or the shell could not be spawned.
-    pub fn spawn_command(path: &str, cmd: &str, name: String) -> io::Result<Self> {
+    pub fn spawn_command(path: &str, cmd: &str, name: String, scrollback: usize) -> io::Result<Self> {
         let mut t = Self {
             init: Init::Command {
                 path: String::new(),
@@ -192,7 +195,8 @@ impl Terminal {
             name,
             stopped: false,
             save_logs: false,
-            parser: Arc::new(Mutex::new(vt100::Parser::new(24, 80, MAX_SCROLLBACK))),
+            scrollback,
+            parser: Arc::new(Mutex::new(vt100::Parser::new(24, 80, scrollback))),
             handler: None,
             writer: None,
             child: None,
@@ -207,8 +211,8 @@ impl Terminal {
     /// # Arguments
     /// * `name` - The display name for the terminal tab.
     /// * `error` - The error message to display in the terminal.
-    pub fn spawn_error(name: String, error: String) -> Self {
-        let parser = Arc::new(Mutex::new(vt100::Parser::new(24, 80, MAX_SCROLLBACK)));
+    pub fn spawn_error(name: String, error: String, scrollback: usize) -> Self {
+        let parser = Arc::new(Mutex::new(vt100::Parser::new(24, 80, scrollback)));
         {
             let mut p = parser.lock().expect("parser mutex poisoned");
             p.screen_mut().set_size(24, 80);
@@ -223,6 +227,7 @@ impl Terminal {
             name,
             stopped: true,
             save_logs: false,
+            scrollback,
             parser,
             handler: None,
             writer: None,
@@ -268,7 +273,7 @@ impl Terminal {
 
         let _ = writeln!(writer, "cd {} && {}", path, cmd);
 
-        self.parser = Arc::new(Mutex::new(vt100::Parser::new(24, INITIAL_COLS, MAX_SCROLLBACK)));
+        self.parser = Arc::new(Mutex::new(vt100::Parser::new(24, INITIAL_COLS, self.scrollback)));
         self.handler = Some(spawn_reader(self.parser.clone(), reader));
         self.writer = Some(writer);
         self.child = Some(child);

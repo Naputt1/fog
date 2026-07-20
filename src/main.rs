@@ -24,6 +24,8 @@ use crate::config::Config;
 use crate::proxy::{ProxyInstance, RouteEntry};
 use crate::terminal::Terminal;
 
+const DEFAULT_SCROLLBACK: usize = 2000;
+
 /// Command-line interface arguments parsed via clap.
 #[derive(Parser)]
 #[command(name = "fog", version = env!("CARGO_PKG_VERSION"))]
@@ -76,6 +78,8 @@ fn main() -> io::Result<()> {
     enable_raw_mode()?;
     execute!(stdout(), EnterAlternateScreen, EnableMouseCapture)?;
 
+    let scrollback = config.max_scrollback.unwrap_or(DEFAULT_SCROLLBACK);
+
     let items: Vec<Terminal> = config
         .service
         .unwrap_or_default()
@@ -90,12 +94,12 @@ fn main() -> io::Result<()> {
                     .into_owned()
             });
             let service_path = service_path.to_string_lossy().into_owned();
-            match Terminal::spawn_command(&service_path, &entry.cmd, name.clone()) {
+            match Terminal::spawn_command(&service_path, &entry.cmd, name.clone(), scrollback) {
                 Ok(mut t) => {
                     t.save_logs = cli.save_logs;
                     t
                 }
-                Err(e) => Terminal::spawn_error(name, format!("Failed to spawn: {e}")),
+                Err(e) => Terminal::spawn_error(name, format!("Failed to spawn: {e}"), scrollback),
             }
         })
         .collect();
@@ -115,7 +119,7 @@ fn main() -> io::Result<()> {
         p
     });
 
-    ratatui::run(|terminal| App::new(items, proxy, sigint).run(terminal))?;
+    ratatui::run(|terminal| App::new(items, proxy, sigint, scrollback).run(terminal))?;
 
     disable_raw_mode()?;
     execute!(stdout(), LeaveAlternateScreen, DisableMouseCapture)?;

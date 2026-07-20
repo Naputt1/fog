@@ -38,4 +38,6 @@ pub struct Config {
     pub service: Option<Vec<ConfigEntry>>,
     /// Optional reverse proxy configuration.
     pub proxy: Option<ProxyConfig>,
+    /// Maximum number of scrollback lines to retain per terminal (default: 2000).
+    pub max_scrollback: Option<usize>,
 }
