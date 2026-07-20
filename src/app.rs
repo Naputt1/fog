@@ -1,5 +1,7 @@
 use crate::click_tab::{ClickTab, TabKind};
+use crate::keybinding;
 use crate::proxy::ProxyInstance;
+use crate::selection;
 use crate::terminal::Terminal;
 use crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
@@ -99,24 +101,35 @@ impl App {
                         self.on_tab_switch();
                         return Ok(());
                     }
-                    if let Some(pos) = self.screen_to_content(mouse.column, mouse.row) {
+                    if let Some(pos) = selection::screen_to_content(
+                        mouse.column,
+                        mouse.row,
+                        self.content_area,
+                        self.scroll_offset,
+                        self.current_total_lines(),
+                    ) {
                         self.selecting = true;
                         self.select_start = Some(pos);
                         self.select_end = Some(pos);
                     }
                 }
                 MouseEventKind::Drag(MouseButton::Left) => {
-                    if self.selecting {
-                        if let Some(pos) = self.screen_to_content(mouse.column, mouse.row) {
+                    if self.selecting
+                        && let Some(pos) = selection::screen_to_content(
+                            mouse.column,
+                            mouse.row,
+                            self.content_area,
+                            self.scroll_offset,
+                            self.current_total_lines(),
+                        ) {
                             self.select_end = Some(pos);
                         }
-                    }
                 }
                 MouseEventKind::Up(MouseButton::Left) => {
                     if self.selecting {
                         self.selecting = false;
                         if let (Some(start), Some(end)) = (self.select_start, self.select_end) {
-                            self.copy_selection(start, end);
+                            selection::copy_selection(start, end, &self.items, self.tabs.index);
                         }
                         self.select_start = None;
                         self.select_end = None;
@@ -137,7 +150,7 @@ impl App {
 
     fn on_tab_switch(&mut self) {
         self.scroll_offset = 0;
-        self.clear_selection();
+        selection::clear_selection(&mut self.selecting, &mut self.select_start, &mut self.select_end);
         if self.is_proxy_tab() {
             self.mode = Mode::Normal;
         } else if let Some(item) = self.items.get(self.tabs.index) {
@@ -333,138 +346,6 @@ impl App {
                 Some(item) => item.total_lines(),
                 None => 0,
             }
-        }
-    }
-
-    fn screen_to_content(&self, x: u16, y: u16) -> Option<(usize, usize)> {
-        let inner_x = self.content_area.x.saturating_add(1);
-        let inner_y = self.content_area.y.saturating_add(1);
-        let inner_w = self.content_area.width.saturating_sub(2);
-        let inner_h = self.content_area.height.saturating_sub(2);
-        if x < inner_x || x >= inner_x.saturating_add(inner_w) {
-            return None;
-        }
-        if y < inner_y || y >= inner_y.saturating_add(inner_h) {
-            return None;
-        }
-        let col = (x - inner_x) as usize;
-        let row = (y - inner_y) as usize;
-        let total = self.current_total_lines();
-        let visible = inner_h as usize;
-        let offset = self.scroll_offset;
-        let end = total.saturating_sub(offset);
-        let start = end.saturating_sub(visible);
-        let line_idx = start.saturating_add(row);
-        if line_idx >= total {
-            return None;
-        }
-        Some((line_idx, col))
-    }
-
-    fn copy_selection(&self, start: (usize, usize), end: (usize, usize)) {
-        let (sel_start, sel_end) =
-            if start.0 < end.0 || (start.0 == end.0 && start.1 <= end.1) {
-                (start, end)
-            } else {
-                (end, start)
-            };
-        let lines: Vec<String> = match self.items.get(self.tabs.index) {
-            Some(item) => item.get_all_lines(),
-            None => return,
-        };
-        let mut selected = String::new();
-        for i in sel_start.0..=sel_end.0 {
-            let Some(text) = lines.get(i) else {
-                continue;
-            };
-            if sel_start.0 == sel_end.0 {
-                let s: String = text
-                    .chars()
-                    .skip(sel_start.1)
-                    .take(sel_end.1 - sel_start.1)
-                    .collect();
-                selected.push_str(&s);
-            } else if i == sel_start.0 {
-                let s: String = text.chars().skip(sel_start.1).collect();
-                selected.push_str(&s);
-            } else if i == sel_end.0 {
-                let s: String = text.chars().take(sel_end.1).collect();
-                selected.push_str(&s);
-            } else {
-                selected.push_str(&text);
-            }
-            if i != sel_end.0 {
-                selected.push('\n');
-            }
-        }
-        if !selected.is_empty() {
-            use base64::Engine as _;
-            let encoded = base64::engine::general_purpose::STANDARD.encode(&selected);
-            use std::io::Write;
-            let _ = write!(std::io::stdout(), "\x1b]52;c;{}\x07", encoded);
-            let _ = std::io::stdout().flush();
-        }
-    }
-
-    fn apply_sel(&self, lines: &mut [Line<'static>]) {
-        let Some(start) = self.select_start else { return };
-        let Some(end) = self.select_end else { return };
-        let (sel_start, sel_end) =
-            if start.0 < end.0 || (start.0 == end.0 && start.1 <= end.1) {
-                (start, end)
-            } else {
-                (end, start)
-            };
-        let total = self.current_total_lines();
-        let visible = lines.len();
-        let offset = self.scroll_offset;
-        let end_idx = total.saturating_sub(offset);
-        let start_idx = end_idx.saturating_sub(visible);
-        for (i, line) in lines.iter_mut().enumerate() {
-            let line_idx = start_idx + i;
-            if line_idx < sel_start.0 || line_idx > sel_end.0 {
-                continue;
-            }
-            let (sc, ec) = if sel_start.0 == sel_end.0 {
-                (sel_start.1.min(sel_end.1), sel_start.1.max(sel_end.1))
-            } else if line_idx == sel_start.0 {
-                (sel_start.1, usize::MAX)
-            } else if line_idx == sel_end.0 {
-                (0, sel_end.1)
-            } else {
-                (0, usize::MAX)
-            };
-            let spans = std::mem::take(&mut line.spans);
-            let mut new_spans = Vec::new();
-            let mut char_off = 0;
-            for span in spans {
-                let span_len = span.content.chars().count();
-                let span_start = char_off;
-                let span_end = span_start + span_len;
-                if span_end <= sc || span_start >= ec {
-                    new_spans.push(span);
-                } else {
-                    let content = span.content.into_owned();
-                    let orig_style = span.style;
-                    let chars: Vec<char> = content.chars().collect();
-                    let before_end = sc.saturating_sub(span_start).min(chars.len());
-                    let after_start = ec.saturating_sub(span_start).min(chars.len());
-                    if before_end > 0 {
-                        let before: String = chars[..before_end].iter().collect();
-                        new_spans.push(Span::styled(before, orig_style));
-                    }
-                    if before_end < after_start {
-                        let sel: String = chars[before_end..after_start].iter().collect();
-                        new_spans.push(Span::styled(sel, Style::new().reversed()));
-                    }
-                    if after_start < chars.len() {
-                        let after: String = chars[after_start..].iter().collect();
-                        new_spans.push(Span::styled(after, orig_style));
-                    }
-                }
-                char_off += span_len;
-            }
-            line.spans = new_spans;
         }
     }
 
