@@ -74,8 +74,7 @@ pub fn kill_descendants(pid: u32) {
         // Second call fills the pre-allocated buffer with child PIDs.
         // Each returned PID > 0 is a valid child process to kill.
         unsafe {
-            let byte_count =
-                libc::proc_listchildpids(current_pid, std::ptr::null_mut(), 0);
+            let byte_count = libc::proc_listchildpids(current_pid, std::ptr::null_mut(), 0);
             if byte_count > 0 {
                 let pid_count = byte_count as usize / std::mem::size_of::<libc::pid_t>();
                 let mut children: Vec<libc::pid_t> = vec![0; pid_count];

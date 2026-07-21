@@ -202,7 +202,12 @@ impl Terminal {
     ///
     /// # Errors
     /// Returns an error if the PTY could not be opened or the shell could not be spawned.
-    pub fn spawn_command(path: &str, cmd: &str, name: String, scrollback: usize) -> io::Result<Self> {
+    pub fn spawn_command(
+        path: &str,
+        cmd: &str,
+        name: String,
+        scrollback: usize,
+    ) -> io::Result<Self> {
         let mut t = Self {
             init: Init::Command {
                 path: String::new(),
@@ -293,7 +298,11 @@ impl Terminal {
 
         let _ = writeln!(writer, "cd {} && {}", path, cmd);
 
-        self.parser = Arc::new(Mutex::new(vt100::Parser::new(24, INITIAL_COLS, self.scrollback)));
+        self.parser = Arc::new(Mutex::new(vt100::Parser::new(
+            24,
+            INITIAL_COLS,
+            self.scrollback,
+        )));
         self.handler = Some(spawn_reader(self.parser.clone(), reader));
         self.writer = Some(writer);
         self.child = Some(child);
@@ -347,9 +356,7 @@ impl Terminal {
         let scroll_off = offset.min(sb);
         screen.set_scrollback(scroll_off);
 
-        let rows_to_read = n
-            .min(vis_rows as usize)
-            .min(total.saturating_sub(offset));
+        let rows_to_read = n.min(vis_rows as usize).min(total.saturating_sub(offset));
 
         if rows_to_read == 0 {
             return (vec![], total);
@@ -479,14 +486,15 @@ impl Terminal {
 
     fn kill_inner(&mut self) {
         if let Some(ref child) = self.child
-            && let Some(pid) = child.process_id() {
-                process::try_kill_process_group(pid, SIGTERM);
-                thread::sleep(std::time::Duration::from_millis(500));
-                if let Ok(None) = process::waitpid_nohang(pid) {
-                    process::try_kill_process_group(pid, SIGKILL);
-                }
-                process::kill_descendants(pid);
+            && let Some(pid) = child.process_id()
+        {
+            process::try_kill_process_group(pid, SIGTERM);
+            thread::sleep(std::time::Duration::from_millis(500));
+            if let Ok(None) = process::waitpid_nohang(pid) {
+                process::try_kill_process_group(pid, SIGKILL);
             }
+            process::kill_descendants(pid);
+        }
 
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
@@ -522,7 +530,10 @@ impl Terminal {
 
     /// Returns the current health status.
     pub fn get_health_status(&self) -> HealthStatus {
-        *self.health_status.lock().expect("health status mutex poisoned")
+        *self
+            .health_status
+            .lock()
+            .expect("health status mutex poisoned")
     }
 
     /// Starts a background thread that periodically runs the configured health check.
@@ -541,8 +552,7 @@ impl Terminal {
                 let target = config.target.clone();
                 let timeout = config.timeout_ms.unwrap_or(2000);
                 let healthy = match config.kind {
-                    crate::config::HealthCheckKind::Tcp
-                    | crate::config::HealthCheckKind::Http => {
+                    crate::config::HealthCheckKind::Tcp | crate::config::HealthCheckKind::Http => {
                         let addr = target
                             .trim_start_matches("tcp://")
                             .trim_start_matches("http://")
@@ -589,11 +599,12 @@ impl Terminal {
 impl Drop for Terminal {
     fn drop(&mut self) {
         if self.save_logs
-            && let Init::Command { .. } = &self.init {
-                let _ = fs::create_dir_all("temp");
-                let text = self.get_all_lines().join("\n");
-                let _ = fs::write(format!("temp/{}.txt", self.name), &text);
-            }
+            && let Init::Command { .. } = &self.init
+        {
+            let _ = fs::create_dir_all("temp");
+            let text = self.get_all_lines().join("\n");
+            let _ = fs::write(format!("temp/{}.txt", self.name), &text);
+        }
         self.kill_inner();
     }
 }
