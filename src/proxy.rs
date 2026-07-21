@@ -612,3 +612,144 @@ impl Drop for ProxyInstance {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http_body_util::Full;
+    use hyper::body::Bytes;
+    use hyper::Request;
+
+    #[test]
+    fn test_match_route_exact() {
+        assert_eq!(match_route("/api", "/api"), Some("/".to_string()));
+    }
+
+    #[test]
+    fn test_match_route_prefix() {
+        assert_eq!(match_route("/api/test", "/api"), Some("/test".to_string()));
+    }
+
+    #[test]
+    fn test_match_route_no_match() {
+        assert_eq!(match_route("/other", "/api"), None);
+    }
+
+    #[test]
+    fn test_match_route_root() {
+        assert_eq!(match_route("/", "/"), Some("/".to_string()));
+    }
+
+    #[test]
+    fn test_match_route_trailing_slash_incoming() {
+        assert_eq!(match_route("/api/", "/api"), Some("/".to_string()));
+    }
+
+    #[test]
+    fn test_match_route_trailing_slash_route() {
+        assert_eq!(match_route("/api", "/api/"), Some("/".to_string()));
+    }
+
+    #[test]
+    fn test_match_route_empty_prefix() {
+        let result = match_route("/anything", "");
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_match_route_empty_prefix_no_slash() {
+        let result = match_route("test", "");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_is_ws_upgrade_with_headers() {
+        let req = Request::builder()
+            .method("GET")
+            .uri("/")
+            .header(hyper::header::UPGRADE, "websocket")
+            .header(hyper::header::CONNECTION, "Upgrade")
+            .body(Full::<Bytes>::new(Bytes::new()))
+            .unwrap();
+        assert!(is_ws_upgrade(&req));
+    }
+
+    #[test]
+    fn test_is_ws_upgrade_without_headers() {
+        let req = Request::builder()
+            .method("GET")
+            .uri("/")
+            .body(Full::<Bytes>::new(Bytes::new()))
+            .unwrap();
+        assert!(!is_ws_upgrade(&req));
+    }
+
+    #[test]
+    fn test_is_ws_upgrade_regular_get() {
+        let req = Request::builder()
+            .method("GET")
+            .uri("/")
+            .body(Full::<Bytes>::new(Bytes::new()))
+            .unwrap();
+        assert!(!is_ws_upgrade(&req));
+    }
+
+    #[test]
+    fn test_is_ws_upgrade_post() {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/")
+            .header(hyper::header::UPGRADE, "websocket")
+            .header(hyper::header::CONNECTION, "Upgrade")
+            .body(Full::<Bytes>::new(Bytes::new()))
+            .unwrap();
+        assert!(!is_ws_upgrade(&req));
+    }
+
+    #[test]
+    fn test_is_ws_upgrade_case_insensitive() {
+        let req = Request::builder()
+            .method("GET")
+            .uri("/")
+            .header(hyper::header::UPGRADE, "WebSocket")
+            .header(hyper::header::CONNECTION, "keep-alive, Upgrade")
+            .body(Full::<Bytes>::new(Bytes::new()))
+            .unwrap();
+        assert!(is_ws_upgrade(&req));
+    }
+
+    #[test]
+    fn test_build_upstream_uri_no_query() {
+        let uri = build_upstream_uri("http://localhost:8080", "/api/test", None);
+        assert_eq!(uri.to_string(), "http://localhost:8080/api/test");
+    }
+
+    #[test]
+    fn test_build_upstream_uri_with_query() {
+        let uri = build_upstream_uri("http://localhost:8080", "/api/test", Some("key=value"));
+        assert_eq!(uri.to_string(), "http://localhost:8080/api/test?key=value");
+    }
+
+    #[test]
+    fn test_build_upstream_uri_trailing_slash() {
+        let uri = build_upstream_uri("http://localhost:8080/", "/api/test", None);
+        assert_eq!(uri.to_string(), "http://localhost:8080/api/test");
+    }
+
+    #[test]
+    fn test_build_upstream_uri_empty_query() {
+        let uri = build_upstream_uri("http://localhost:8080", "/api/test", Some(""));
+        assert_eq!(uri.to_string(), "http://localhost:8080/api/test");
+    }
+
+    #[test]
+    fn test_build_upstream_uri_suffix_root() {
+        let uri = build_upstream_uri("http://localhost:8080", "/", None);
+        assert_eq!(uri.to_string(), "http://localhost:8080/");
+    }
+
+    #[test]
+    fn test_match_route_prefix_with_trailing_slash() {
+        assert_eq!(match_route("/api/test/", "/api"), Some("/test/".to_string()));
+    }
+}

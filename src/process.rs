@@ -103,3 +103,25 @@ pub fn kill_descendants(pid: u32) {
 /// * `pid` - The parent process ID (ignored on non-macOS).
 #[cfg(not(target_os = "macos"))]
 pub fn kill_descendants(_pid: u32) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_try_kill_nonexistent_pid() {
+        try_kill_process_group(999_999, libc::SIGTERM);
+    }
+
+    #[test]
+    fn test_kill_process_group_nonexistent_pid() {
+        let result = kill_process_group(999_999, libc::SIGTERM);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_waitpid_nohang_nonexistent_pid() {
+        let result = waitpid_nohang(999_999);
+        assert!(result.is_err());
+    }
+}

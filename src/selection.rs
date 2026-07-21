@@ -193,3 +193,135 @@ pub(crate) fn clear_selection(
     *select_start = None;
     *select_end = None;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::layout::Rect;
+
+    #[test]
+    fn test_screen_to_content_inside() {
+        let area = Rect { x: 10, y: 5, width: 40, height: 20 };
+        let result = screen_to_content(11, 6, area, 0, 30);
+        assert_eq!(result, Some((12, 0)));
+    }
+
+    #[test]
+    fn test_screen_to_content_outside_left() {
+        let area = Rect { x: 10, y: 5, width: 40, height: 20 };
+        let result = screen_to_content(9, 6, area, 0, 30);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_screen_to_content_outside_right() {
+        let area = Rect { x: 10, y: 5, width: 40, height: 20 };
+        let result = screen_to_content(51, 6, area, 0, 30);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_screen_to_content_outside_top() {
+        let area = Rect { x: 10, y: 5, width: 40, height: 20 };
+        let result = screen_to_content(11, 4, area, 0, 30);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_screen_to_content_outside_bottom() {
+        let area = Rect { x: 10, y: 5, width: 40, height: 20 };
+        let result = screen_to_content(11, 26, area, 0, 30);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_screen_to_content_with_scroll_offset() {
+        let area = Rect { x: 0, y: 0, width: 80, height: 20 };
+        let result = screen_to_content(1, 1, area, 5, 25);
+        assert_eq!(result, Some((2, 0)));
+    }
+
+    #[test]
+    fn test_screen_to_content_beyond_total_lines() {
+        let area = Rect { x: 0, y: 0, width: 80, height: 10 };
+        let result = screen_to_content(1, 9, area, 0, 5);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_clear_selection_resets_state() {
+        let mut selecting = true;
+        let mut start = Some((1, 2));
+        let mut end = Some((3, 4));
+        clear_selection(&mut selecting, &mut start, &mut end);
+        assert!(!selecting);
+        assert_eq!(start, None);
+        assert_eq!(end, None);
+    }
+
+    #[test]
+    fn test_clear_selection_already_clear() {
+        let mut selecting = false;
+        let mut start: Option<(usize, usize)> = None;
+        let mut end: Option<(usize, usize)> = None;
+        clear_selection(&mut selecting, &mut start, &mut end);
+        assert!(!selecting);
+        assert_eq!(start, None);
+        assert_eq!(end, None);
+    }
+
+    #[test]
+    fn test_copy_selection_empty_items() {
+        copy_selection((0, 0), (1, 1), &[], 0);
+    }
+
+    #[test]
+    fn test_copy_selection_out_of_bounds_index() {
+        let items: Vec<Terminal> = vec![];
+        copy_selection((0, 0), (1, 1), &items, 5);
+    }
+
+    #[test]
+    fn test_apply_sel_no_selection() {
+        let mut lines = vec![Line::from("hello")];
+        apply_sel(&mut lines, None, None, 0, 10);
+        assert_eq!(lines.len(), 1);
+    }
+
+    #[test]
+    fn test_apply_sel_single_line() {
+        let mut lines = vec![Line::from("hello world")];
+        apply_sel(&mut lines, Some((0, 0)), Some((0, 5)), 0, 1);
+        assert!(lines[0].spans.iter().any(|s| s.style == Style::new().reversed()));
+    }
+
+    #[test]
+    fn test_apply_sel_reverse_order() {
+        let mut lines = vec![Line::from("hello world")];
+        apply_sel(&mut lines, Some((0, 5)), Some((0, 0)), 0, 1);
+        assert!(lines[0].spans.iter().any(|s| s.style == Style::new().reversed()));
+    }
+
+    #[test]
+    fn test_apply_sel_outside_visible_range() {
+        let mut lines = vec![Line::from("hello")];
+        apply_sel(&mut lines, Some((5, 0)), Some((5, 3)), 0, 10);
+    }
+
+    #[test]
+    fn test_apply_sel_multi_line() {
+        let mut lines = vec![Line::from("line1"), Line::from("line2")];
+        apply_sel(&mut lines, Some((0, 2)), Some((1, 3)), 0, 2);
+        assert!(lines[0].spans.iter().any(|s| s.style == Style::new().reversed()));
+        assert!(lines[1].spans.iter().any(|s| s.style == Style::new().reversed()));
+    }
+
+    #[test]
+    fn test_screen_to_content_boundaries() {
+        let area = Rect { x: 0, y: 0, width: 10, height: 10 };
+        assert_eq!(screen_to_content(0, 0, area, 0, 10), None);
+        assert_eq!(screen_to_content(1, 1, area, 0, 10), Some((2, 0)));
+        assert_eq!(screen_to_content(8, 8, area, 0, 10), Some((9, 7)));
+        assert_eq!(screen_to_content(9, 9, area, 0, 10), None);
+    }
+}
