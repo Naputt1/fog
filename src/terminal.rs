@@ -7,10 +7,14 @@ use ratatui::{
     text::{Line, Span},
 };
 use std::{
+    cell::RefCell,
     fs,
     io::{self, Read, Write},
     net::ToSocketAddrs,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
     thread::{self, JoinHandle},
 };
 
@@ -54,6 +58,9 @@ pub struct Terminal {
     pub health_check: Option<HealthCheckConfig>,
     parser: Arc<Mutex<vt100::Parser>>,
     health_status: Arc<Mutex<HealthStatus>>,
+    screen_generation: Arc<AtomicUsize>,
+    #[allow(clippy::type_complexity)]
+    line_cache: RefCell<Option<(usize, usize, usize, Vec<Line<'static>>)>>,
     handler: Option<JoinHandle<()>>,
     writer: Option<Box<dyn Write + Send>>,
     child: Option<Box<dyn Child + Send + Sync>>,
@@ -114,6 +121,7 @@ fn cell_style(cell: &vt100::Cell) -> Style {
 
 fn spawn_reader(
     parser: Arc<Mutex<vt100::Parser>>,
+    generation: Arc<AtomicUsize>,
     mut reader: Box<dyn Read + Send>,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
@@ -125,6 +133,7 @@ fn spawn_reader(
                     if let Ok(mut p) = parser.lock() {
                         p.process(&buf[..n]);
                     }
+                    generation.fetch_add(1, Ordering::Relaxed);
                 }
                 Err(_) => break,
             }
@@ -172,7 +181,8 @@ impl Terminal {
             .map_err(|e| io::Error::other(e.to_string()))?;
 
         let parser = Arc::new(Mutex::new(vt100::Parser::new(24, 80, scrollback)));
-        let handler = spawn_reader(parser.clone(), reader);
+        let screen_generation = Arc::new(AtomicUsize::new(0));
+        let handler = spawn_reader(parser.clone(), screen_generation.clone(), reader);
 
         Ok(Self {
             init: Init::Shell,
@@ -183,6 +193,8 @@ impl Terminal {
             health_check: None,
             parser,
             health_status: Arc::new(Mutex::new(HealthStatus::Unknown)),
+            screen_generation,
+            line_cache: RefCell::new(None),
             handler: Some(handler),
             writer: Some(writer),
             child: Some(child),
@@ -220,6 +232,8 @@ impl Terminal {
             health_check: None,
             parser: Arc::new(Mutex::new(vt100::Parser::new(24, 80, scrollback))),
             health_status: Arc::new(Mutex::new(HealthStatus::Unknown)),
+            screen_generation: Arc::new(AtomicUsize::new(0)),
+            line_cache: RefCell::new(None),
             handler: None,
             writer: None,
             child: None,
@@ -254,6 +268,8 @@ impl Terminal {
             health_check: None,
             parser,
             health_status: Arc::new(Mutex::new(HealthStatus::Unhealthy)),
+            screen_generation: Arc::new(AtomicUsize::new(0)),
+            line_cache: RefCell::new(None),
             handler: None,
             writer: None,
             child: None,
@@ -303,7 +319,13 @@ impl Terminal {
             INITIAL_COLS,
             self.scrollback,
         )));
-        self.handler = Some(spawn_reader(self.parser.clone(), reader));
+        *self.line_cache.borrow_mut() = None;
+        self.screen_generation.store(0, Ordering::Relaxed);
+        self.handler = Some(spawn_reader(
+            self.parser.clone(),
+            self.screen_generation.clone(),
+            reader,
+        ));
         self.writer = Some(writer);
         self.child = Some(child);
         self.master = Some(pair.master);
@@ -342,6 +364,15 @@ impl Terminal {
     /// # Returns
     /// A tuple of styled lines for rendering and the total number of available lines.
     pub fn get_screen(&self, n: usize, offset: usize) -> (Vec<Line<'static>>, usize) {
+        let generation = self.screen_generation.load(Ordering::Relaxed);
+
+        if let Some((cached_offset, cached_n, cached_gen, ref cached_lines)) =
+            *self.line_cache.borrow()
+            && cached_offset == offset && cached_n == n && cached_gen == generation
+        {
+            return (cached_lines.clone(), self.total_lines());
+        }
+
         let mut parser = self.parser.lock().expect("parser mutex poisoned");
         let screen = parser.screen_mut();
         let (vis_rows, cols) = screen.size();
@@ -350,7 +381,9 @@ impl Terminal {
 
         if offset >= total.saturating_sub(1) {
             screen.set_scrollback(0);
-            return (vec![Line::from("(top)")], total);
+            let lines = vec![Line::from("(top)")];
+            *self.line_cache.borrow_mut() = Some((offset, n, generation, lines.clone()));
+            return (lines, total);
         }
 
         let scroll_off = offset.min(sb);
@@ -359,6 +392,7 @@ impl Terminal {
         let rows_to_read = n.min(vis_rows as usize).min(total.saturating_sub(offset));
 
         if rows_to_read == 0 {
+            *self.line_cache.borrow_mut() = Some((offset, n, generation, vec![]));
             return (vec![], total);
         }
 
@@ -415,6 +449,7 @@ impl Terminal {
             lines.push(Line::from(spans));
         }
 
+        *self.line_cache.borrow_mut() = Some((offset, n, generation, lines.clone()));
         (lines, total)
     }
 
@@ -469,6 +504,7 @@ impl Terminal {
     /// * `cols` - The new number of columns.
     /// * `rows` - The new number of rows.
     pub fn resize(&mut self, cols: u16, rows: u16) {
+        let mut changed = false;
         if let Some(ref m) = self.master {
             let _ = m.resize(PtySize {
                 rows,
@@ -481,6 +517,11 @@ impl Terminal {
         let (cur_rows, cur_cols) = p.screen().size();
         if cols != cur_cols || rows != cur_rows {
             p.screen_mut().set_size(rows, cols);
+            changed = true;
+        }
+        drop(p);
+        if changed {
+            *self.line_cache.borrow_mut() = None;
         }
     }
 

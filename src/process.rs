@@ -11,6 +11,7 @@ use std::io;
 /// # Errors
 /// Returns an error if the kill syscall fails.
 pub fn kill_process_group(pid: u32, signal: i32) -> io::Result<()> {
+    debug_assert!(pid > 0, "kill_process_group: pid must be positive, got {}", pid);
     // SAFETY: pid is a valid process id from portable_pty. Negating pid
     // targets the entire process group, which is standard POSIX semantics.
     let ret = unsafe { libc::kill(-(pid as libc::pid_t), signal) };
@@ -31,6 +32,7 @@ pub fn kill_process_group(pid: u32, signal: i32) -> io::Result<()> {
 /// * `Ok(None)` if the child is still running.
 /// * `Err(e)` if the waitpid call failed.
 pub fn waitpid_nohang(pid: u32) -> io::Result<Option<i32>> {
+    debug_assert!(pid > 0, "waitpid_nohang: pid must be positive, got {}", pid);
     let mut status: i32 = 0;
     // SAFETY:
     // - pid is a valid child process id from portable_pty
@@ -52,6 +54,7 @@ pub fn waitpid_nohang(pid: u32) -> io::Result<Option<i32>> {
 /// * `pid` - The process ID (group leader).
 /// * `signal` - The signal number to send.
 pub fn try_kill_process_group(pid: u32, signal: i32) {
+    debug_assert!(pid > 0, "try_kill_process_group: pid must be positive, got {}", pid);
     let _ = kill_process_group(pid, signal);
 }
 
@@ -63,6 +66,7 @@ pub fn try_kill_process_group(pid: u32, signal: i32) {
 /// * `pid` - The parent process ID whose descendants should be killed.
 #[cfg(target_os = "macos")]
 pub fn kill_descendants(pid: u32) {
+    debug_assert!(pid > 0, "kill_descendants: pid must be positive, got {}", pid);
     use std::collections::VecDeque;
 
     let mut queue = VecDeque::new();

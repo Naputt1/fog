@@ -42,8 +42,6 @@ const HOP_BY_HOP: &[&str] = &[
     "upgrade",
 ];
 
-const MAX_LOG_ENTRIES: usize = 1000;
-
 trait IoBox: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
 impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> IoBox for T {}
 
@@ -97,6 +95,7 @@ struct HttpRequestContext<'a> {
     suffix: &'a str,
     query: Option<&'a str>,
     logs: Arc<Mutex<VecDeque<LogEntry>>>,
+    max_log_entries: usize,
     method: String,
     path: String,
 }
@@ -154,6 +153,7 @@ impl ProxyInstance {
         let port = self.port;
         let routes = self.routes.clone();
         let logs = self.logs.clone();
+        let max_entries = self.max_log_entries;
         let running = self.running.clone();
         let shutdown = self.shutdown.clone();
         let tls_acceptor = self.tls_acceptor.clone();
@@ -178,7 +178,7 @@ impl ProxyInstance {
                             latency_ms: 0,
                             ws: false,
                         });
-                        if lk.len() > MAX_LOG_ENTRIES {
+                        if lk.len() > max_entries {
                             lk.pop_front();
                         }
                         running.store(false, Ordering::SeqCst);
@@ -222,6 +222,7 @@ impl ProxyInstance {
                                         client.clone(),
                                         routes_for_svc.clone(),
                                         logs_for_svc.clone(),
+                                        max_entries,
                                     )
                                 });
                                 if let Err(e) =
@@ -365,6 +366,7 @@ async fn proxy_ws_pipe(
     request_bytes: Vec<u8>,
     log_entry: LogEntry,
     logs: Arc<Mutex<VecDeque<LogEntry>>>,
+    max_log_entries: usize,
 ) {
     let start = Instant::now();
     match tokio::net::TcpStream::connect(&upstream_host).await {
@@ -394,7 +396,7 @@ async fn proxy_ws_pipe(
                 latency_ms: start.elapsed().as_millis() as u64,
                 ws: true,
             });
-            if lk.len() > MAX_LOG_ENTRIES {
+            if lk.len() > max_log_entries {
                 lk.pop_front();
             }
             return;
@@ -411,17 +413,19 @@ async fn proxy_ws_pipe(
         latency_ms: ms,
         ws: true,
     });
-    if lk.len() > MAX_LOG_ENTRIES {
+    if lk.len() > max_log_entries {
         lk.pop_front();
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_ws(
     mut req: Request<hyper::body::Incoming>,
     route: &RouteEntry,
     suffix: &str,
     query: Option<&str>,
     logs: Arc<Mutex<VecDeque<LogEntry>>>,
+    max_log_entries: usize,
     method: String,
     path: String,
 ) -> Result<Response<Full<Bytes>>, std::convert::Infallible> {
@@ -453,7 +457,7 @@ async fn handle_ws(
             let uh = upstream_host.clone();
 
             tokio::spawn(async move {
-                proxy_ws_pipe(TokioIo::new(upgraded), uh, request_bytes, le, l).await;
+                proxy_ws_pipe(TokioIo::new(upgraded), uh, request_bytes, le, l, max_log_entries).await;
             });
 
             Ok(Response::new(Full::new(Bytes::new())))
@@ -464,7 +468,7 @@ async fn handle_ws(
                 status: 502,
                 ..log_entry
             });
-            if lk.len() > MAX_LOG_ENTRIES {
+            if lk.len() > max_log_entries {
                 lk.pop_front();
             }
 
@@ -495,7 +499,7 @@ async fn handle_http(
                 latency_ms: ms,
                 ws: false,
             });
-            if lk.len() > MAX_LOG_ENTRIES {
+            if lk.len() > ctx.max_log_entries {
                 lk.pop_front();
             }
             return Ok(Response::builder()
@@ -547,7 +551,7 @@ async fn handle_http(
                 latency_ms: ms,
                 ws: false,
             });
-            if lk.len() > MAX_LOG_ENTRIES {
+            if lk.len() > ctx.max_log_entries {
                 lk.pop_front();
             }
 
@@ -564,7 +568,7 @@ async fn handle_http(
                 latency_ms: ms,
                 ws: false,
             });
-            if lk.len() > MAX_LOG_ENTRIES {
+            if lk.len() > ctx.max_log_entries {
                 lk.pop_front();
             }
 
@@ -581,6 +585,7 @@ async fn handle_request(
     client: Client<HttpConnector, Full<Bytes>>,
     routes: Vec<RouteEntry>,
     logs: Arc<Mutex<VecDeque<LogEntry>>>,
+    max_log_entries: usize,
 ) -> Result<Response<Full<Bytes>>, std::convert::Infallible> {
     let method = req.method().to_string();
     let path = req.uri().path().to_string();
@@ -592,7 +597,7 @@ async fn handle_request(
 
     match matched {
         Some((route, suffix)) if route.ws || is_ws_upgrade(&req) => {
-            handle_ws(req, route, &suffix, query.as_deref(), logs, method, path).await
+            handle_ws(req, route, &suffix, query.as_deref(), logs, max_log_entries, method, path).await
         }
         Some((route, suffix)) => {
             let ctx = HttpRequestContext {
@@ -602,6 +607,7 @@ async fn handle_request(
                 suffix: &suffix,
                 query: query.as_deref(),
                 logs,
+                max_log_entries,
                 method,
                 path,
             };
@@ -617,7 +623,7 @@ async fn handle_request(
                 latency_ms: 0,
                 ws: false,
             });
-            if lk.len() > MAX_LOG_ENTRIES {
+            if lk.len() > max_log_entries {
                 lk.pop_front();
             }
 

@@ -4,6 +4,7 @@ pub mod config;
 pub mod keybinding;
 pub mod process;
 pub mod proxy;
+pub mod render;
 pub mod selection;
 pub mod terminal;
 pub mod theme;
