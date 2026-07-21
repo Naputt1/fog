@@ -1,6 +1,6 @@
 use crate::click_tab::{ClickTab, TabKind};
-use crate::keybinding;
 use crate::config::Config;
+use crate::keybinding;
 use crate::proxy::{LogEntry, ProxyInstance, RouteEntry};
 use crate::selection;
 use crate::terminal::Terminal;
@@ -17,8 +17,8 @@ use ratatui::{
     widgets::{Block, Clear, Paragraph, Wrap},
 };
 use std::io::Write;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{io, time::Duration};
 
 enum Mode {
@@ -60,7 +60,17 @@ impl App {
     /// * `sidebar_min` - Minimum sidebar width in columns.
     /// * `sidebar_max` - Maximum sidebar width in columns.
     #[allow(clippy::too_many_arguments)]
-    pub fn new(items: Vec<Terminal>, proxy: Option<ProxyInstance>, sigint: Arc<AtomicBool>, scrollback: usize, sidebar_min: u16, sidebar_max: u16, theme: Theme, config_path: std::path::PathBuf, config_rx: std::sync::mpsc::Receiver<()>) -> Self {
+    pub fn new(
+        items: Vec<Terminal>,
+        proxy: Option<ProxyInstance>,
+        sigint: Arc<AtomicBool>,
+        scrollback: usize,
+        sidebar_min: u16,
+        sidebar_max: u16,
+        theme: Theme,
+        config_path: std::path::PathBuf,
+        config_rx: std::sync::mpsc::Receiver<()>,
+    ) -> Self {
         let names: Vec<String> = items.iter().map(|t| t.name.clone()).collect();
         let mut tabs = ClickTab::new(names, sidebar_min, sidebar_max);
         for (i, item) in items.iter().enumerate() {
@@ -129,18 +139,23 @@ impl App {
         }
 
         if let Some(ref pc) = config.proxy
-            && let Some(ref mut p) = self.proxy {
-                let new_routes: Vec<RouteEntry> = pc.routes.iter().map(|r| RouteEntry {
+            && let Some(ref mut p) = self.proxy
+        {
+            let new_routes: Vec<RouteEntry> = pc
+                .routes
+                .iter()
+                .map(|r| RouteEntry {
                     path: r.path.clone(),
                     upstream: r.upstream.clone(),
                     ws: r.ws.unwrap_or(false),
-                }).collect();
-                if pc.port != p.port || new_routes != p.routes {
-                    p.port = pc.port;
-                    p.routes = new_routes;
-                    p.restart();
-                }
+                })
+                .collect();
+            if pc.port != p.port || new_routes != p.routes {
+                p.port = pc.port;
+                p.routes = new_routes;
+                p.restart();
             }
+        }
     }
 
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
@@ -196,9 +211,10 @@ impl App {
                             self.content_area,
                             self.scroll_offset,
                             self.current_total_lines(),
-                        ) {
-                            self.select_end = Some(pos);
-                        }
+                        )
+                    {
+                        self.select_end = Some(pos);
+                    }
                 }
                 MouseEventKind::Up(MouseButton::Left) => {
                     if self.selecting {
@@ -225,7 +241,11 @@ impl App {
 
     fn on_tab_switch(&mut self) {
         self.scroll_offset = 0;
-        selection::clear_selection(&mut self.selecting, &mut self.select_start, &mut self.select_end);
+        selection::clear_selection(
+            &mut self.selecting,
+            &mut self.select_start,
+            &mut self.select_end,
+        );
         self.proxy_filter.clear();
         if self.is_proxy_tab() {
             self.mode = Mode::Normal;
@@ -316,9 +336,10 @@ impl App {
             return;
         }
         if let Some(item) = self.items.get_mut(self.tabs.index)
-            && let Some(bytes) = keybinding::key_to_bytes(key) {
-                item.write(&bytes);
-            }
+            && let Some(bytes) = keybinding::key_to_bytes(key)
+        {
+            item.write(&bytes);
+        }
     }
 
     fn handle_normal_key(&mut self, key: KeyEvent) {
@@ -386,14 +407,15 @@ impl App {
             return;
         }
         if let Some(item) = self.items.get_mut(self.tabs.index)
-            && !item.is_shell() {
-                if let Err(e) = item.restart() {
-                    self.errors.push(format!("restart error: {}", e));
-                }
-                if let Some(e) = self.tabs.entries.get_mut(self.tabs.index) {
-                    e.stopped = false;
-                }
+            && !item.is_shell()
+        {
+            if let Err(e) = item.restart() {
+                self.errors.push(format!("restart error: {}", e));
             }
+            if let Some(e) = self.tabs.entries.get_mut(self.tabs.index) {
+                e.stopped = false;
+            }
+        }
     }
 
     fn new_terminal(&mut self) {
@@ -406,7 +428,9 @@ impl App {
                 self.scroll_offset = 0;
                 self.mode = Mode::TerminalInput;
             }
-            Err(e) => self.errors.push(format!("failed to create terminal: {}", e)),
+            Err(e) => self
+                .errors
+                .push(format!("failed to create terminal: {}", e)),
         }
     }
 
@@ -441,7 +465,11 @@ impl App {
 
     fn current_total_lines(&self) -> usize {
         if self.is_proxy_tab() {
-            let filter_lines = if matches!(self.mode, Mode::ProxyFilter) { 1usize } else { 0 };
+            let filter_lines = if matches!(self.mode, Mode::ProxyFilter) {
+                1usize
+            } else {
+                0
+            };
             match self.proxy {
                 Some(ref p) => p.get_logs().len() + 3 + filter_lines,
                 None => 1,
@@ -459,8 +487,7 @@ impl App {
         let sidebar_width = self.tabs.min_width();
 
         let main =
-            Layout::horizontal([Constraint::Min(1), Constraint::Length(sidebar_width)])
-                .split(area);
+            Layout::horizontal([Constraint::Min(1), Constraint::Length(sidebar_width)]).split(area);
 
         let content_area = main[0];
         let sidebar_area = main[1];
@@ -479,9 +506,9 @@ impl App {
                 .entries
                 .iter_mut()
                 .find(|e| e.kind == TabKind::Proxy)
-            {
-                entry.stopped = !p.is_running();
-            }
+        {
+            entry.stopped = !p.is_running();
+        }
 
         self.tabs.draw(frame, sidebar_area, &self.theme);
 
@@ -574,9 +601,7 @@ impl App {
                 height: overlay_height,
             };
 
-            let block = Block::bordered()
-                .title(" Help ")
-                .style(Style::default());
+            let block = Block::bordered().title(" Help ").style(Style::default());
             let help = Paragraph::new(Text::from(help_text))
                 .block(block)
                 .alignment(Alignment::Left);
@@ -602,15 +627,21 @@ impl App {
             logs.iter().collect()
         } else {
             let filter_lower = self.proxy_filter.to_lowercase();
-            logs.iter().filter(|entry| {
-                entry.method.to_lowercase().contains(&filter_lower)
-                    || entry.path.to_lowercase().contains(&filter_lower)
-                    || entry.status.to_string().contains(&filter_lower)
-                    || entry.upstream.to_lowercase().contains(&filter_lower)
-            }).collect()
+            logs.iter()
+                .filter(|entry| {
+                    entry.method.to_lowercase().contains(&filter_lower)
+                        || entry.path.to_lowercase().contains(&filter_lower)
+                        || entry.status.to_string().contains(&filter_lower)
+                        || entry.upstream.to_lowercase().contains(&filter_lower)
+                })
+                .collect()
         };
 
-        let header_lines: usize = if matches!(self.mode, Mode::ProxyFilter) { 4 } else { 3 };
+        let header_lines: usize = if matches!(self.mode, Mode::ProxyFilter) {
+            4
+        } else {
+            3
+        };
         let total = filtered_logs.len() + header_lines;
         let offset = self.scroll_offset.min(total.saturating_sub(visible_height));
 
@@ -643,11 +674,19 @@ impl App {
         )));
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            format!(" {:<6} {:<35} {:<5} {:<8} {}", "METHOD", "PATH", "STATUS", "LATENCY", "UPSTREAM"),
+            format!(
+                " {:<6} {:<35} {:<5} {:<8} {}",
+                "METHOD", "PATH", "STATUS", "LATENCY", "UPSTREAM"
+            ),
             Style::default().dim(),
         )));
 
-        for entry in filtered_logs.iter().rev().skip(offset.saturating_sub(header_lines)).take(visible_height.saturating_sub(header_lines)) {
+        for entry in filtered_logs
+            .iter()
+            .rev()
+            .skip(offset.saturating_sub(header_lines))
+            .take(visible_height.saturating_sub(header_lines))
+        {
             let status_style = match entry.status {
                 0 => Style::default().dim(),
                 200..=299 => Style::default().fg(self.theme.status_200),
@@ -666,7 +705,10 @@ impl App {
                 format!("{}ms", entry.latency_ms)
             };
             let method_span = if entry.ws {
-                Span::styled(format!(" {:<6}", "WS"), Style::default().fg(self.theme.proxy).bold())
+                Span::styled(
+                    format!(" {:<6}", "WS"),
+                    Style::default().fg(self.theme.proxy).bold(),
+                )
             } else {
                 Span::raw(format!(" {:<6}", entry.method))
             };
@@ -710,15 +752,19 @@ impl App {
             Some(item) => item.get_screen(visible_height as usize, self.scroll_offset),
             None => (vec![Line::from("no tab")], 0),
         };
-        selection::apply_sel(&mut lines, self.select_start, self.select_end, self.scroll_offset, self.current_total_lines());
+        selection::apply_sel(
+            &mut lines,
+            self.select_start,
+            self.select_end,
+            self.scroll_offset,
+            self.current_total_lines(),
+        );
 
         if self.scroll_offset > 0 && !lines.is_empty() {
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!(" ↑ scrolled up {} lines", self.scroll_offset),
-                    Style::default().dim(),
-                ),
-            ]));
+            lines.push(Line::from(vec![Span::styled(
+                format!(" ↑ scrolled up {} lines", self.scroll_offset),
+                Style::default().dim(),
+            )]));
         }
 
         let widget = Paragraph::new(Text::from(lines))
@@ -726,15 +772,17 @@ impl App {
             .wrap(Wrap { trim: false });
         frame.render_widget(widget, content_area);
 
-        if in_terminal_input && self.scroll_offset == 0
+        if in_terminal_input
+            && self.scroll_offset == 0
             && let Some(item) = self.items.get(self.tabs.index)
-                && let Some((row, col)) = item.cursor_position() {
-                    let x = content_area.x + 1 + col;
-                    let y = content_area.y + 1 + row;
-                    if x < content_area.right() && y < content_area.bottom() {
-                        frame.set_cursor_position(Position { x, y });
-                    }
-                }
+            && let Some((row, col)) = item.cursor_position()
+        {
+            let x = content_area.x + 1 + col;
+            let y = content_area.y + 1 + row;
+            if x < content_area.right() && y < content_area.bottom() {
+                frame.set_cursor_position(Position { x, y });
+            }
+        }
     }
 }
 
@@ -750,8 +798,8 @@ fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
     use std::sync::mpsc;
 
     #[test]
@@ -784,7 +832,13 @@ mod tests {
         assert_eq!(truncate("hello", 0), "...");
     }
 
-    fn make_app(items: Vec<Terminal>, proxy: Option<ProxyInstance>, tabs: ClickTab, mode: Mode, content_area: Rect) -> App {
+    fn make_app(
+        items: Vec<Terminal>,
+        proxy: Option<ProxyInstance>,
+        tabs: ClickTab,
+        mode: Mode,
+        content_area: Rect,
+    ) -> App {
         let (_tx, rx) = mpsc::channel();
         App {
             items,
@@ -819,7 +873,13 @@ mod tests {
     fn test_is_proxy_tab_true() {
         let mut tabs = ClickTab::new(vec![], 10, 30);
         tabs.add("proxy".into(), TabKind::Proxy);
-        let app = make_app(vec![], Some(ProxyInstance::new(8080, vec![], 1000, None, None)), tabs, Mode::Normal, Rect::default());
+        let app = make_app(
+            vec![],
+            Some(ProxyInstance::new(8080, vec![], 1000, None, None)),
+            tabs,
+            Mode::Normal,
+            Rect::default(),
+        );
         assert!(app.is_proxy_tab());
     }
 
@@ -828,23 +888,68 @@ mod tests {
         let mut tabs = ClickTab::new(vec!["svc".into()], 10, 30);
         tabs.add("proxy".into(), TabKind::Proxy);
         tabs.index = 0;
-        let app = make_app(vec![], Some(ProxyInstance::new(8080, vec![], 1000, None, None)), tabs, Mode::Normal, Rect::default());
+        let app = make_app(
+            vec![],
+            Some(ProxyInstance::new(8080, vec![], 1000, None, None)),
+            tabs,
+            Mode::Normal,
+            Rect::default(),
+        );
         assert!(!app.is_proxy_tab());
     }
 
     #[test]
     fn test_content_height() {
-        let app = make_app(vec![], None, ClickTab::new(vec![], 10, 30), Mode::Normal, Rect { x: 0, y: 0, width: 50, height: 20 });
+        let app = make_app(
+            vec![],
+            None,
+            ClickTab::new(vec![], 10, 30),
+            Mode::Normal,
+            Rect {
+                x: 0,
+                y: 0,
+                width: 50,
+                height: 20,
+            },
+        );
         assert_eq!(app.content_height(), 18);
-        let app = make_app(vec![], None, ClickTab::new(vec![], 10, 30), Mode::Normal, Rect { x: 0, y: 0, width: 50, height: 5 });
+        let app = make_app(
+            vec![],
+            None,
+            ClickTab::new(vec![], 10, 30),
+            Mode::Normal,
+            Rect {
+                x: 0,
+                y: 0,
+                width: 50,
+                height: 5,
+            },
+        );
         assert_eq!(app.content_height(), 3);
-        let app = make_app(vec![], None, ClickTab::new(vec![], 10, 30), Mode::Normal, Rect { x: 0, y: 0, width: 50, height: 1 });
+        let app = make_app(
+            vec![],
+            None,
+            ClickTab::new(vec![], 10, 30),
+            Mode::Normal,
+            Rect {
+                x: 0,
+                y: 0,
+                width: 50,
+                height: 1,
+            },
+        );
         assert_eq!(app.content_height(), 0);
     }
 
     #[test]
     fn test_current_total_lines_no_proxy_empty() {
-        let app = make_app(vec![], None, ClickTab::new(vec![], 10, 30), Mode::Normal, Rect::default());
+        let app = make_app(
+            vec![],
+            None,
+            ClickTab::new(vec![], 10, 30),
+            Mode::Normal,
+            Rect::default(),
+        );
         assert_eq!(app.current_total_lines(), 0);
     }
 
@@ -852,7 +957,13 @@ mod tests {
     fn test_current_total_lines_with_proxy() {
         let mut tabs = ClickTab::new(vec![], 10, 30);
         tabs.add("proxy".into(), TabKind::Proxy);
-        let app = make_app(vec![], Some(ProxyInstance::new(8080, vec![], 1000, None, None)), tabs, Mode::Normal, Rect::default());
+        let app = make_app(
+            vec![],
+            Some(ProxyInstance::new(8080, vec![], 1000, None, None)),
+            tabs,
+            Mode::Normal,
+            Rect::default(),
+        );
         assert_eq!(app.current_total_lines(), 3);
     }
 
@@ -860,7 +971,13 @@ mod tests {
     fn test_current_total_lines_with_proxy_filter_mode() {
         let mut tabs = ClickTab::new(vec![], 10, 30);
         tabs.add("proxy".into(), TabKind::Proxy);
-        let app = make_app(vec![], Some(ProxyInstance::new(8080, vec![], 1000, None, None)), tabs, Mode::ProxyFilter, Rect::default());
+        let app = make_app(
+            vec![],
+            Some(ProxyInstance::new(8080, vec![], 1000, None, None)),
+            tabs,
+            Mode::ProxyFilter,
+            Rect::default(),
+        );
         assert_eq!(app.current_total_lines(), 4);
     }
 }
