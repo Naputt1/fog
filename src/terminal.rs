@@ -251,7 +251,7 @@ impl Terminal {
     pub fn spawn_error(name: String, error: String, scrollback: usize) -> Self {
         let parser = Arc::new(Mutex::new(vt100::Parser::new(24, 80, scrollback)));
         {
-            let mut p = parser.lock().expect("parser mutex poisoned");
+            let mut p = parser.lock().unwrap_or_else(|e| e.into_inner());
             p.screen_mut().set_size(24, 80);
             p.process(error.as_bytes());
         }
@@ -348,7 +348,7 @@ impl Terminal {
 
     /// Returns the total number of lines in both scrollback and visible area.
     pub fn total_lines(&self) -> usize {
-        let mut parser = self.parser.lock().expect("parser mutex poisoned");
+        let mut parser = self.parser.lock().unwrap_or_else(|e| e.into_inner());
         let screen = parser.screen_mut();
         let (vis_rows, _) = screen.size();
         let sb = scrollback_len(screen);
@@ -375,7 +375,7 @@ impl Terminal {
             return (cached_lines.clone(), self.total_lines());
         }
 
-        let mut parser = self.parser.lock().expect("parser mutex poisoned");
+        let mut parser = self.parser.lock().unwrap_or_else(|e| e.into_inner());
         let screen = parser.screen_mut();
         let (vis_rows, cols) = screen.size();
         let sb = scrollback_len(screen);
@@ -457,7 +457,7 @@ impl Terminal {
 
     /// Returns all lines (scrollback + visible) as plain text strings.
     pub fn get_all_lines(&self) -> Vec<String> {
-        let mut parser = self.parser.lock().expect("parser mutex poisoned");
+        let mut parser = self.parser.lock().unwrap_or_else(|e| e.into_inner());
         let screen = parser.screen_mut();
         let (vis_rows, cols) = screen.size();
         let sb = scrollback_len(screen);
@@ -487,7 +487,7 @@ impl Terminal {
 
     /// Returns the cursor position `(row, col)` if the cursor is visible.
     pub fn cursor_position(&self) -> Option<(u16, u16)> {
-        let parser = self.parser.lock().expect("parser mutex poisoned");
+        let parser = self.parser.lock().unwrap_or_else(|e| e.into_inner());
         let screen = parser.screen();
         if screen.hide_cursor() {
             return None;
@@ -515,7 +515,7 @@ impl Terminal {
                 pixel_height: 0,
             });
         }
-        let mut p = self.parser.lock().expect("parser mutex poisoned");
+        let mut p = self.parser.lock().unwrap_or_else(|e| e.into_inner());
         let (cur_rows, cur_cols) = p.screen().size();
         if cols != cur_cols || rows != cur_rows {
             p.screen_mut().set_size(rows, cols);
@@ -573,10 +573,7 @@ impl Terminal {
 
     /// Returns the current health status.
     pub fn get_health_status(&self) -> HealthStatus {
-        *self
-            .health_status
-            .lock()
-            .expect("health status mutex poisoned")
+        *self.health_status.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Starts a background thread that periodically runs the configured health check.

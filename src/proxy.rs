@@ -211,7 +211,23 @@ impl ProxyInstance {
                                         Ok(tls_stream) => {
                                             TokioIo::new(Box::new(tls_stream) as Box<dyn IoBox>)
                                         }
-                                        Err(_) => return,
+                                        Err(e) => {
+                                            let mut lk = logs_for_svc
+                                                .lock()
+                                                .unwrap_or_else(|e| e.into_inner());
+                                            lk.push_back(LogEntry {
+                                                method: "ERR".into(),
+                                                path: format!("TLS accept failed: {}", e),
+                                                upstream: String::new(),
+                                                status: 0,
+                                                latency_ms: 0,
+                                                ws: false,
+                                            });
+                                            if lk.len() > max_entries {
+                                                lk.pop_front();
+                                            }
+                                            return;
+                                        }
                                     }
                                 } else {
                                     TokioIo::new(Box::new(stream) as Box<dyn IoBox>)
@@ -263,7 +279,7 @@ impl ProxyInstance {
     }
 
     pub fn get_logs(&self) -> Vec<LogEntry> {
-        let lk = self.logs.lock().expect("mutex poisoned");
+        let lk = self.logs.lock().unwrap_or_else(|e| e.into_inner());
         lk.iter().cloned().collect()
     }
 }

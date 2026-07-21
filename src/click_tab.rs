@@ -104,6 +104,26 @@ impl ClickTab {
         self.list_state.select(Some(self.index));
     }
 
+    /// Inserts a new tab entry at the given index and selects it.
+    ///
+    /// # Arguments
+    /// * `index` - The position to insert at.
+    /// * `name` - The display name for the new tab.
+    /// * `kind` - The kind of tab to add.
+    pub fn insert_at(&mut self, index: usize, name: String, kind: TabKind) {
+        self.entries.insert(
+            index,
+            TabEntry {
+                name,
+                kind,
+                stopped: false,
+                health_status: HealthStatus::Unknown,
+            },
+        );
+        self.index = index;
+        self.list_state.select(Some(self.index));
+    }
+
     /// Removes the tab at the given index.
     ///
     /// If the currently selected tab is removed, the selection adjusts to the last tab.

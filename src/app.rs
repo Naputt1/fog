@@ -48,6 +48,7 @@ pub struct App {
     proxy_filter: String,
     config_path: std::path::PathBuf,
     config_rx: std::sync::mpsc::Receiver<()>,
+    proxy_tab_index: Option<usize>,
 }
 
 impl App {
@@ -82,9 +83,13 @@ impl App {
             };
         }
 
-        if proxy.is_some() {
+        let proxy_tab_index = if proxy.is_some() {
+            let idx = items.len();
             tabs.add("proxy".to_string(), TabKind::Proxy);
-        }
+            Some(idx)
+        } else {
+            None
+        };
 
         Self {
             items,
@@ -105,6 +110,7 @@ impl App {
             proxy_filter: String::new(),
             config_path,
             config_rx,
+            proxy_tab_index,
         }
     }
 
@@ -392,10 +398,11 @@ impl App {
     fn new_terminal(&mut self) {
         match Terminal::spawn_shell("bash".to_string(), self.scrollback) {
             Ok(term) => {
-                let id = self.items.len();
-                self.items.push(term);
-                self.tabs.add("bash".to_string(), TabKind::Terminal);
-                self.tabs.index = id;
+                let insertion_idx = self.proxy_tab_index.unwrap_or(self.items.len());
+                self.items.insert(insertion_idx, term);
+                self.tabs
+                    .insert_at(insertion_idx, "bash".to_string(), TabKind::Terminal);
+                self.tabs.index = insertion_idx;
                 self.scroll_offset = 0;
                 self.mode = Mode::TerminalInput;
             }
@@ -413,6 +420,11 @@ impl App {
             return;
         }
         let idx = self.tabs.index;
+        if let Some(proxy_idx) = self.proxy_tab_index.as_mut()
+            && idx < *proxy_idx
+        {
+            *proxy_idx -= 1;
+        }
         self.items.remove(idx);
         self.tabs.remove(idx);
         self.scroll_offset = 0;
@@ -580,6 +592,7 @@ mod tests {
         mode: Mode,
         content_area: Rect,
     ) -> App {
+        let proxy_tab_index = tabs.entries.iter().position(|e| e.kind == TabKind::Proxy);
         let (_tx, rx) = mpsc::channel();
         App {
             items,
@@ -600,6 +613,7 @@ mod tests {
             proxy_filter: String::new(),
             config_path: std::path::PathBuf::new(),
             config_rx: rx,
+            proxy_tab_index,
         }
     }
 
