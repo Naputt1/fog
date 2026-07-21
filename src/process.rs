@@ -11,7 +11,11 @@ use std::io;
 /// # Errors
 /// Returns an error if the kill syscall fails.
 pub fn kill_process_group(pid: u32, signal: i32) -> io::Result<()> {
-    debug_assert!(pid > 0, "kill_process_group: pid must be positive, got {}", pid);
+    debug_assert!(
+        pid > 0,
+        "kill_process_group: pid must be positive, got {}",
+        pid
+    );
     // SAFETY: pid is a valid process id from portable_pty. Negating pid
     // targets the entire process group, which is standard POSIX semantics.
     let ret = unsafe { libc::kill(-(pid as libc::pid_t), signal) };
@@ -54,7 +58,11 @@ pub fn waitpid_nohang(pid: u32) -> io::Result<Option<i32>> {
 /// * `pid` - The process ID (group leader).
 /// * `signal` - The signal number to send.
 pub fn try_kill_process_group(pid: u32, signal: i32) {
-    debug_assert!(pid > 0, "try_kill_process_group: pid must be positive, got {}", pid);
+    debug_assert!(
+        pid > 0,
+        "try_kill_process_group: pid must be positive, got {}",
+        pid
+    );
     let _ = kill_process_group(pid, signal);
 }
 
@@ -66,7 +74,11 @@ pub fn try_kill_process_group(pid: u32, signal: i32) {
 /// * `pid` - The parent process ID whose descendants should be killed.
 #[cfg(target_os = "macos")]
 pub fn kill_descendants(pid: u32) {
-    debug_assert!(pid > 0, "kill_descendants: pid must be positive, got {}", pid);
+    debug_assert!(
+        pid > 0,
+        "kill_descendants: pid must be positive, got {}",
+        pid
+    );
     use std::collections::VecDeque;
 
     let mut queue = VecDeque::new();
@@ -106,7 +118,11 @@ pub fn kill_descendants(pid: u32) {
 /// * `pid` - The parent process ID whose descendants should be killed.
 #[cfg(target_os = "linux")]
 pub fn kill_descendants(pid: u32) {
-    debug_assert!(pid > 0, "kill_descendants: pid must be positive, got {}", pid);
+    debug_assert!(
+        pid > 0,
+        "kill_descendants: pid must be positive, got {}",
+        pid
+    );
     use std::collections::VecDeque;
     use std::fs;
     use std::io;
@@ -129,7 +145,8 @@ pub fn kill_descendants(pid: u32) {
             Err(_) => return result,
         };
 
-        let mut children_map: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
+        let mut children_map: std::collections::HashMap<u32, Vec<u32>> =
+            std::collections::HashMap::new();
 
         for entry in entries.flatten() {
             let name = entry.file_name();

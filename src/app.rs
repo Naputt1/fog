@@ -501,17 +501,28 @@ impl App {
 
         if is_proxy {
             render::draw_proxy_content(
-                frame, content_area, block,
-                &self.proxy, self.scroll_offset, &self.proxy_filter,
-                matches!(self.mode, Mode::ProxyFilter), &self.theme,
+                frame,
+                content_area,
+                block,
+                &self.proxy,
+                self.scroll_offset,
+                &self.proxy_filter,
+                matches!(self.mode, Mode::ProxyFilter),
+                &self.theme,
             );
         } else {
             let total_lines = self.current_total_lines();
             render::draw_terminal_content(
-                frame, content_area, block,
-                &mut self.items, self.tabs.index, self.scroll_offset,
-                self.select_start, self.select_end,
-                in_terminal_input, total_lines,
+                frame,
+                content_area,
+                block,
+                &mut self.items,
+                self.tabs.index,
+                self.scroll_offset,
+                self.select_start,
+                self.select_end,
+                in_terminal_input,
+                total_lines,
             );
         }
 
@@ -553,10 +564,6 @@ impl App {
             frame.render_widget(help, overlay_area);
         }
     }
-
-
-
-
 }
 
 #[cfg(test)]

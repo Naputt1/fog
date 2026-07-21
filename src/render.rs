@@ -21,7 +21,10 @@ pub(crate) fn draw_proxy_content(
     mode_filter_active: bool,
     theme: &Theme,
 ) {
-    let inner = area.inner(Margin { horizontal: 1, vertical: 1 });
+    let inner = area.inner(Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
     let visible_height = inner.height as usize;
 
     let logs = match proxy {
@@ -144,7 +147,10 @@ pub(crate) fn draw_terminal_content(
     in_terminal_input: bool,
     current_total_lines: usize,
 ) {
-    let inner = content_area.inner(Margin { horizontal: 1, vertical: 1 });
+    let inner = content_area.inner(Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
     let visible_height = inner.height;
 
     if let Some(item) = items.get_mut(tab_index) {

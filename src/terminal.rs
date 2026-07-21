@@ -12,8 +12,8 @@ use std::{
     io::{self, Read, Write},
     net::ToSocketAddrs,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
     },
     thread::{self, JoinHandle},
 };
@@ -368,7 +368,9 @@ impl Terminal {
 
         if let Some((cached_offset, cached_n, cached_gen, ref cached_lines)) =
             *self.line_cache.borrow()
-            && cached_offset == offset && cached_n == n && cached_gen == generation
+            && cached_offset == offset
+            && cached_n == n
+            && cached_gen == generation
         {
             return (cached_lines.clone(), self.total_lines());
         }

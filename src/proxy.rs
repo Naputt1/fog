@@ -457,7 +457,15 @@ async fn handle_ws(
             let uh = upstream_host.clone();
 
             tokio::spawn(async move {
-                proxy_ws_pipe(TokioIo::new(upgraded), uh, request_bytes, le, l, max_log_entries).await;
+                proxy_ws_pipe(
+                    TokioIo::new(upgraded),
+                    uh,
+                    request_bytes,
+                    le,
+                    l,
+                    max_log_entries,
+                )
+                .await;
             });
 
             Ok(Response::new(Full::new(Bytes::new())))
@@ -597,7 +605,17 @@ async fn handle_request(
 
     match matched {
         Some((route, suffix)) if route.ws || is_ws_upgrade(&req) => {
-            handle_ws(req, route, &suffix, query.as_deref(), logs, max_log_entries, method, path).await
+            handle_ws(
+                req,
+                route,
+                &suffix,
+                query.as_deref(),
+                logs,
+                max_log_entries,
+                method,
+                path,
+            )
+            .await
         }
         Some((route, suffix)) => {
             let ctx = HttpRequestContext {

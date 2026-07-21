@@ -39,11 +39,7 @@ pub fn spawn_config_watcher(config_path: PathBuf) -> mpsc::Receiver<()> {
 }
 
 /// Reloads configuration from a file and applies changes to the running app state.
-pub fn reload_config(
-    config_path: &PathBuf,
-    proxy: &mut Option<ProxyInstance>,
-    theme: &mut Theme,
-) {
+pub fn reload_config(config_path: &PathBuf, proxy: &mut Option<ProxyInstance>, theme: &mut Theme) {
     let contents = match std::fs::read_to_string(config_path) {
         Ok(c) => c,
         Err(_) => return,
