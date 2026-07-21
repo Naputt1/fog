@@ -125,8 +125,6 @@ pub fn kill_descendants(pid: u32) {
     );
     use std::collections::VecDeque;
     use std::fs;
-    use std::io;
-
     fn get_ppid(pid: u32) -> Option<u32> {
         let path = format!("/proc/{}/status", pid);
         let content = fs::read_to_string(&path).ok()?;
