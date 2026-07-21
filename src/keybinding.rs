@@ -39,8 +39,7 @@ pub fn key_to_bytes(key: KeyEvent) -> Option<Vec<u8>> {
                     _ => return None,
                 };
                 Some(vec![byte])
-            } else if key.modifiers == KeyModifiers::SHIFT || key.modifiers == KeyModifiers::NONE
-            {
+            } else if key.modifiers == KeyModifiers::SHIFT || key.modifiers == KeyModifiers::NONE {
                 let mut s = [0u8; 4];
                 let encoded = c.encode_utf8(&mut s);
                 Some(encoded.as_bytes().to_vec())
@@ -59,115 +58,225 @@ mod tests {
 
     #[test]
     fn test_key_to_enter() {
-        let key = KeyEvent { code: KeyCode::Enter, modifiers: KeyModifiers::NONE, kind: KeyEventKind::Press, state: KeyEventState::NONE };
+        let key = KeyEvent {
+            code: KeyCode::Enter,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
         assert_eq!(key_to_bytes(key), Some(vec![b'\n']));
     }
 
     #[test]
     fn test_key_to_backspace() {
-        let key = KeyEvent { code: KeyCode::Backspace, modifiers: KeyModifiers::NONE, kind: KeyEventKind::Press, state: KeyEventState::NONE };
+        let key = KeyEvent {
+            code: KeyCode::Backspace,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
         assert_eq!(key_to_bytes(key), Some(vec![0x7f]));
     }
 
     #[test]
     fn test_key_to_tab() {
-        let key = KeyEvent { code: KeyCode::Tab, modifiers: KeyModifiers::NONE, kind: KeyEventKind::Press, state: KeyEventState::NONE };
+        let key = KeyEvent {
+            code: KeyCode::Tab,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
         assert_eq!(key_to_bytes(key), Some(vec![b'\t']));
     }
 
     #[test]
     fn test_key_to_esc() {
-        let key = KeyEvent { code: KeyCode::Esc, modifiers: KeyModifiers::NONE, kind: KeyEventKind::Press, state: KeyEventState::NONE };
+        let key = KeyEvent {
+            code: KeyCode::Esc,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
         assert_eq!(key_to_bytes(key), Some(vec![0x1b]));
     }
 
     #[test]
     fn test_key_to_arrows() {
-        let up = KeyEvent { code: KeyCode::Up, modifiers: KeyModifiers::NONE, kind: KeyEventKind::Press, state: KeyEventState::NONE };
+        let up = KeyEvent {
+            code: KeyCode::Up,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
         assert_eq!(key_to_bytes(up), Some(b"\x1b[A".to_vec()));
 
-        let down = KeyEvent { code: KeyCode::Down, modifiers: KeyModifiers::NONE, kind: KeyEventKind::Press, state: KeyEventState::NONE };
+        let down = KeyEvent {
+            code: KeyCode::Down,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
         assert_eq!(key_to_bytes(down), Some(b"\x1b[B".to_vec()));
 
-        let right = KeyEvent { code: KeyCode::Right, modifiers: KeyModifiers::NONE, kind: KeyEventKind::Press, state: KeyEventState::NONE };
+        let right = KeyEvent {
+            code: KeyCode::Right,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
         assert_eq!(key_to_bytes(right), Some(b"\x1b[C".to_vec()));
 
-        let left = KeyEvent { code: KeyCode::Left, modifiers: KeyModifiers::NONE, kind: KeyEventKind::Press, state: KeyEventState::NONE };
+        let left = KeyEvent {
+            code: KeyCode::Left,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
         assert_eq!(key_to_bytes(left), Some(b"\x1b[D".to_vec()));
     }
 
     #[test]
     fn test_key_to_home_end_delete() {
-        let home = KeyEvent { code: KeyCode::Home, modifiers: KeyModifiers::NONE, kind: KeyEventKind::Press, state: KeyEventState::NONE };
+        let home = KeyEvent {
+            code: KeyCode::Home,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
         assert_eq!(key_to_bytes(home), Some(b"\x1b[H".to_vec()));
 
-        let end = KeyEvent { code: KeyCode::End, modifiers: KeyModifiers::NONE, kind: KeyEventKind::Press, state: KeyEventState::NONE };
+        let end = KeyEvent {
+            code: KeyCode::End,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
         assert_eq!(key_to_bytes(end), Some(b"\x1b[F".to_vec()));
 
-        let del = KeyEvent { code: KeyCode::Delete, modifiers: KeyModifiers::NONE, kind: KeyEventKind::Press, state: KeyEventState::NONE };
+        let del = KeyEvent {
+            code: KeyCode::Delete,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
         assert_eq!(key_to_bytes(del), Some(b"\x1b[3~".to_vec()));
     }
 
     #[test]
     fn test_key_to_page_up_down() {
-        let pu = KeyEvent { code: KeyCode::PageUp, modifiers: KeyModifiers::NONE, kind: KeyEventKind::Press, state: KeyEventState::NONE };
+        let pu = KeyEvent {
+            code: KeyCode::PageUp,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
         assert_eq!(key_to_bytes(pu), Some(b"\x1b[5~".to_vec()));
 
-        let pd = KeyEvent { code: KeyCode::PageDown, modifiers: KeyModifiers::NONE, kind: KeyEventKind::Press, state: KeyEventState::NONE };
+        let pd = KeyEvent {
+            code: KeyCode::PageDown,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
         assert_eq!(key_to_bytes(pd), Some(b"\x1b[6~".to_vec()));
     }
 
     #[test]
     fn test_key_to_ctrl_a() {
-        let key = KeyEvent { code: KeyCode::Char('a'), modifiers: KeyModifiers::CONTROL, kind: KeyEventKind::Press, state: KeyEventState::NONE };
+        let key = KeyEvent {
+            code: KeyCode::Char('a'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
         assert_eq!(key_to_bytes(key), Some(vec![1]));
     }
 
     #[test]
     fn test_key_to_ctrl_z() {
-        let key = KeyEvent { code: KeyCode::Char('z'), modifiers: KeyModifiers::CONTROL, kind: KeyEventKind::Press, state: KeyEventState::NONE };
+        let key = KeyEvent {
+            code: KeyCode::Char('z'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
         assert_eq!(key_to_bytes(key), Some(vec![26]));
     }
 
     #[test]
     fn test_key_to_ctrl_upper() {
-        let key = KeyEvent { code: KeyCode::Char('A'), modifiers: KeyModifiers::CONTROL, kind: KeyEventKind::Press, state: KeyEventState::NONE };
+        let key = KeyEvent {
+            code: KeyCode::Char('A'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
         assert_eq!(key_to_bytes(key), Some(vec![1]));
     }
 
     #[test]
     fn test_key_to_regular_char() {
-        let key = KeyEvent { code: KeyCode::Char('x'), modifiers: KeyModifiers::NONE, kind: KeyEventKind::Press, state: KeyEventState::NONE };
+        let key = KeyEvent {
+            code: KeyCode::Char('x'),
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
         assert_eq!(key_to_bytes(key), Some(vec![b'x']));
     }
 
     #[test]
     fn test_key_to_shift_char() {
-        let key = KeyEvent { code: KeyCode::Char('X'), modifiers: KeyModifiers::SHIFT, kind: KeyEventKind::Press, state: KeyEventState::NONE };
+        let key = KeyEvent {
+            code: KeyCode::Char('X'),
+            modifiers: KeyModifiers::SHIFT,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
         assert_eq!(key_to_bytes(key), Some(vec![b'X']));
     }
 
     #[test]
     fn test_key_to_unicode() {
-        let key = KeyEvent { code: KeyCode::Char('é'), modifiers: KeyModifiers::NONE, kind: KeyEventKind::Press, state: KeyEventState::NONE };
+        let key = KeyEvent {
+            code: KeyCode::Char('é'),
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
         assert_eq!(key_to_bytes(key), Some(vec![0xc3, 0xa9]));
     }
 
     #[test]
     fn test_key_to_unknown() {
-        let key = KeyEvent { code: KeyCode::F(1), modifiers: KeyModifiers::NONE, kind: KeyEventKind::Press, state: KeyEventState::NONE };
+        let key = KeyEvent {
+            code: KeyCode::F(1),
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
         assert_eq!(key_to_bytes(key), None);
     }
 
     #[test]
     fn test_key_to_ctrl_unknown() {
-        let key = KeyEvent { code: KeyCode::Char('!'), modifiers: KeyModifiers::CONTROL, kind: KeyEventKind::Press, state: KeyEventState::NONE };
+        let key = KeyEvent {
+            code: KeyCode::Char('!'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
         assert_eq!(key_to_bytes(key), None);
     }
 
     #[test]
     fn test_key_to_alt_modifier() {
-        let key = KeyEvent { code: KeyCode::Char('a'), modifiers: KeyModifiers::ALT, kind: KeyEventKind::Press, state: KeyEventState::NONE };
+        let key = KeyEvent {
+            code: KeyCode::Char('a'),
+            modifiers: KeyModifiers::ALT,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
         assert_eq!(key_to_bytes(key), None);
     }
 }
