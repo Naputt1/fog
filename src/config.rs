@@ -58,6 +58,12 @@ pub struct ProxyConfig {
     pub port: u16,
     /// The list of route definitions.
     pub routes: Vec<ProxyRoute>,
+    /// Optional path to a TLS certificate file (PEM-encoded).
+    pub tls_cert: Option<String>,
+    /// Optional path to a TLS private key file (PEM-encoded, PKCS8).
+    pub tls_key: Option<String>,
+    /// Maximum number of log entries to retain (default: 1000).
+    pub max_log_entries: Option<usize>,
 }
 
 /// Sidebar width configuration.

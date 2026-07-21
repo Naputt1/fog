@@ -1,6 +1,7 @@
 use crate::click_tab::{ClickTab, TabKind};
 use crate::keybinding;
-use crate::proxy::{LogEntry, ProxyInstance};
+use crate::config::Config;
+use crate::proxy::{LogEntry, ProxyInstance, RouteEntry};
 use crate::selection;
 use crate::terminal::Terminal;
 use crate::theme::Theme;
@@ -44,6 +45,8 @@ pub struct App {
     show_help: bool,
     errors: Vec<String>,
     proxy_filter: String,
+    config_path: std::path::PathBuf,
+    config_rx: std::sync::mpsc::Receiver<()>,
 }
 
 impl App {
@@ -56,7 +59,8 @@ impl App {
     /// * `scrollback` - Maximum number of scrollback lines.
     /// * `sidebar_min` - Minimum sidebar width in columns.
     /// * `sidebar_max` - Maximum sidebar width in columns.
-    pub fn new(items: Vec<Terminal>, proxy: Option<ProxyInstance>, sigint: Arc<AtomicBool>, scrollback: usize, sidebar_min: u16, sidebar_max: u16, theme: Theme) -> Self {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(items: Vec<Terminal>, proxy: Option<ProxyInstance>, sigint: Arc<AtomicBool>, scrollback: usize, sidebar_min: u16, sidebar_max: u16, theme: Theme, config_path: std::path::PathBuf, config_rx: std::sync::mpsc::Receiver<()>) -> Self {
         let names: Vec<String> = items.iter().map(|t| t.name.clone()).collect();
         let mut tabs = ClickTab::new(names, sidebar_min, sidebar_max);
         for (i, item) in items.iter().enumerate() {
@@ -88,6 +92,8 @@ impl App {
             show_help: false,
             errors: Vec::new(),
             proxy_filter: String::new(),
+            config_path,
+            config_rx,
         }
     }
 
@@ -108,8 +114,40 @@ impl App {
     ///
     /// # Errors
     /// Returns an error if terminal rendering or event polling fails.
+    fn reload_config(&mut self) {
+        let contents = match std::fs::read_to_string(&self.config_path) {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let config: Config = match serde_json::from_str(&contents) {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+
+        if let Some(ref tc) = config.theme {
+            self.theme = Theme::from_config(Some(tc));
+        }
+
+        if let Some(ref pc) = config.proxy
+            && let Some(ref mut p) = self.proxy {
+                let new_routes: Vec<RouteEntry> = pc.routes.iter().map(|r| RouteEntry {
+                    path: r.path.clone(),
+                    upstream: r.upstream.clone(),
+                    ws: r.ws.unwrap_or(false),
+                }).collect();
+                if pc.port != p.port || new_routes != p.routes {
+                    p.port = pc.port;
+                    p.routes = new_routes;
+                    p.restart();
+                }
+            }
+    }
+
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
         while !self.exit {
+            if self.config_rx.try_recv().is_ok() {
+                self.reload_config();
+            }
             if self.sigint.load(Ordering::SeqCst) {
                 self.exit = true;
                 break;
@@ -712,6 +750,9 @@ fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+    use std::sync::mpsc;
 
     #[test]
     fn test_truncate_empty() {
@@ -741,5 +782,85 @@ mod tests {
     #[test]
     fn test_truncate_max_zero() {
         assert_eq!(truncate("hello", 0), "...");
+    }
+
+    fn make_app(items: Vec<Terminal>, proxy: Option<ProxyInstance>, tabs: ClickTab, mode: Mode, content_area: Rect) -> App {
+        let (_tx, rx) = mpsc::channel();
+        App {
+            items,
+            proxy,
+            sigint: Arc::new(AtomicBool::new(false)),
+            theme: Theme::default(),
+            scrollback: 0,
+            tabs,
+            mode,
+            scroll_offset: 0,
+            exit: false,
+            selecting: false,
+            select_start: None,
+            select_end: None,
+            content_area,
+            show_help: false,
+            errors: vec![],
+            proxy_filter: String::new(),
+            config_path: std::path::PathBuf::new(),
+            config_rx: rx,
+        }
+    }
+
+    #[test]
+    fn test_is_proxy_tab_false() {
+        let tabs = ClickTab::new(vec!["svc".into()], 10, 30);
+        let app = make_app(vec![], None, tabs, Mode::Normal, Rect::default());
+        assert!(!app.is_proxy_tab());
+    }
+
+    #[test]
+    fn test_is_proxy_tab_true() {
+        let mut tabs = ClickTab::new(vec![], 10, 30);
+        tabs.add("proxy".into(), TabKind::Proxy);
+        let app = make_app(vec![], Some(ProxyInstance::new(8080, vec![], 1000, None, None)), tabs, Mode::Normal, Rect::default());
+        assert!(app.is_proxy_tab());
+    }
+
+    #[test]
+    fn test_is_proxy_tab_not_selected() {
+        let mut tabs = ClickTab::new(vec!["svc".into()], 10, 30);
+        tabs.add("proxy".into(), TabKind::Proxy);
+        tabs.index = 0;
+        let app = make_app(vec![], Some(ProxyInstance::new(8080, vec![], 1000, None, None)), tabs, Mode::Normal, Rect::default());
+        assert!(!app.is_proxy_tab());
+    }
+
+    #[test]
+    fn test_content_height() {
+        let app = make_app(vec![], None, ClickTab::new(vec![], 10, 30), Mode::Normal, Rect { x: 0, y: 0, width: 50, height: 20 });
+        assert_eq!(app.content_height(), 18);
+        let app = make_app(vec![], None, ClickTab::new(vec![], 10, 30), Mode::Normal, Rect { x: 0, y: 0, width: 50, height: 5 });
+        assert_eq!(app.content_height(), 3);
+        let app = make_app(vec![], None, ClickTab::new(vec![], 10, 30), Mode::Normal, Rect { x: 0, y: 0, width: 50, height: 1 });
+        assert_eq!(app.content_height(), 0);
+    }
+
+    #[test]
+    fn test_current_total_lines_no_proxy_empty() {
+        let app = make_app(vec![], None, ClickTab::new(vec![], 10, 30), Mode::Normal, Rect::default());
+        assert_eq!(app.current_total_lines(), 0);
+    }
+
+    #[test]
+    fn test_current_total_lines_with_proxy() {
+        let mut tabs = ClickTab::new(vec![], 10, 30);
+        tabs.add("proxy".into(), TabKind::Proxy);
+        let app = make_app(vec![], Some(ProxyInstance::new(8080, vec![], 1000, None, None)), tabs, Mode::Normal, Rect::default());
+        assert_eq!(app.current_total_lines(), 3);
+    }
+
+    #[test]
+    fn test_current_total_lines_with_proxy_filter_mode() {
+        let mut tabs = ClickTab::new(vec![], 10, 30);
+        tabs.add("proxy".into(), TabKind::Proxy);
+        let app = make_app(vec![], Some(ProxyInstance::new(8080, vec![], 1000, None, None)), tabs, Mode::ProxyFilter, Rect::default());
+        assert_eq!(app.current_total_lines(), 4);
     }
 }

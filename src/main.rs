@@ -4,15 +4,6 @@ use std::io::stdout;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::{fs, io};
-mod app;
-mod click_tab;
-mod config;
-mod keybinding;
-mod process;
-mod proxy;
-mod selection;
-mod terminal;
-mod theme;
 use clap::Parser;
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::execute;
@@ -20,11 +11,12 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 
-use crate::app::App;
-use crate::config::Config;
-use crate::proxy::{ProxyInstance, RouteEntry};
-use crate::terminal::Terminal;
-use crate::theme::Theme;
+use fog::app::App;
+use fog::config::Config;
+use fog::proxy::{ProxyInstance, RouteEntry};
+use fog::terminal::Terminal;
+use fog::theme::Theme;
+use std::sync::mpsc;
 
 const DEFAULT_SCROLLBACK: usize = 2000;
 
@@ -121,12 +113,38 @@ fn main() -> io::Result<()> {
                 ws: r.ws.unwrap_or(false),
             })
             .collect();
-        let mut p = ProxyInstance::new(pc.port, routes);
+        let max_log_entries = pc.max_log_entries.unwrap_or(1000);
+        let mut p = ProxyInstance::new(pc.port, routes, max_log_entries, pc.tls_cert, pc.tls_key);
         p.start();
         p
     });
 
-    ratatui::run(|terminal| App::new(items, proxy, sigint, scrollback, sidebar_min, sidebar_max, theme).run(terminal))?;
+    let (config_tx, config_rx) = mpsc::channel();
+
+    let watch_path = config_path.clone();
+    std::thread::spawn(move || {
+        use notify::{EventKind, RecursiveMode, Watcher};
+        let (tx, rx) = std::sync::mpsc::channel();
+        if let Ok(mut watcher) = notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
+            if let Ok(event) = res {
+                match event.kind {
+                    EventKind::Modify(_) | EventKind::Create(_) => {
+                        let _ = tx.send(());
+                    }
+                    _ => {}
+                }
+            }
+        }) {
+            let _ = watcher.watch(&watch_path, RecursiveMode::NonRecursive);
+            loop {
+                if rx.recv().is_ok() {
+                    let _ = config_tx.send(());
+                }
+            }
+        }
+    });
+
+    ratatui::run(|terminal| App::new(items, proxy, sigint, scrollback, sidebar_min, sidebar_max, theme, config_path, config_rx).run(terminal))?;
 
     disable_raw_mode()?;
     execute!(stdout(), LeaveAlternateScreen, DisableMouseCapture)?;

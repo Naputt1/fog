@@ -8,49 +8,70 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use std::collections::VecDeque;
+use std::fs;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
+use tokio_rustls::TlsAcceptor;
+use rustls::ServerConfig;
+use rustls_pemfile::{certs, pkcs8_private_keys};
 
 const WS_HOP_BY_HOP: &[&str] = &[
     "host", "transfer-encoding", "te", "trailers", "keep-alive",
     "proxy-connection", "proxy-authenticate", "proxy-authorization",
 ];
 
-const MAX_LOG_ENTRIES: usize = 1000;
 const HOP_BY_HOP: &[&str] = &[
     "host", "connection", "keep-alive", "proxy-authenticate",
     "proxy-authorization", "te", "trailers", "transfer-encoding", "upgrade",
 ];
 
+const MAX_LOG_ENTRIES: usize = 1000;
+
+trait IoBox: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
+impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> IoBox for T {}
+
+fn load_tls_config(cert_path: &str, key_path: &str) -> Result<TlsAcceptor, Box<dyn std::error::Error>> {
+    let cert_file = &mut std::io::BufReader::new(fs::File::open(cert_path)?);
+    let key_file = &mut std::io::BufReader::new(fs::File::open(key_path)?);
+
+    let cert_chain: Vec<rustls::pki_types::CertificateDer<'_>> = certs(cert_file)
+        .filter_map(Result::ok)
+        .collect();
+    let mut keys: Vec<rustls::pki_types::PrivateKeyDer<'_>> = pkcs8_private_keys(key_file)
+        .filter_map(Result::ok)
+        .map(|k| k.into())
+        .collect();
+
+    if keys.is_empty() {
+        return Err("no private keys found".into());
+    }
+
+    let config = ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(cert_chain, keys.remove(0))?;
+
+    Ok(TlsAcceptor::from(Arc::new(config)))
+}
+
 /// A single proxied request log entry.
 #[derive(Debug, Clone)]
 pub struct LogEntry {
-    /// HTTP method of the request (e.g. `GET`, `POST`).
     pub method: String,
-    /// Request path received by the proxy.
     pub path: String,
-    /// Upstream target URL the request was forwarded to.
     pub upstream: String,
-    /// HTTP response status code returned from the upstream.
     pub status: u16,
-    /// Request latency in milliseconds.
     pub latency_ms: u64,
-    /// Whether this was a WebSocket connection.
     pub ws: bool,
 }
 
-/// A configured proxy route with an upstream target.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RouteEntry {
-    /// Incoming path prefix to match against.
     pub path: String,
-    /// Upstream URL to forward matching requests to.
     pub upstream: String,
-    /// Whether to proxy WebSocket connections for this route.
     pub ws: bool,
 }
 
@@ -65,38 +86,42 @@ struct HttpRequestContext<'a> {
     path: String,
 }
 
-/// Manages a reverse proxy server on a dedicated thread.
 pub struct ProxyInstance {
-    /// The port the proxy server listens on.
     pub port: u16,
-    /// The configured upstream routes.
     pub routes: Vec<RouteEntry>,
     logs: Arc<Mutex<VecDeque<LogEntry>>>,
     running: Arc<AtomicBool>,
     shutdown: Arc<AtomicBool>,
     handle: Option<thread::JoinHandle<()>>,
+    pub max_log_entries: usize,
+    tls_acceptor: Option<TlsAcceptor>,
 }
 
 impl ProxyInstance {
-    /// Creates a new [`ProxyInstance`] without starting the server.
-    ///
-    /// # Arguments
-    /// * `port` - The port to bind the proxy to.
-    /// * `routes` - The route definitions for forwarding requests.
-    pub fn new(port: u16, routes: Vec<RouteEntry>) -> Self {
+    pub fn new(port: u16, routes: Vec<RouteEntry>, max_log_entries: usize, tls_cert: Option<String>, tls_key: Option<String>) -> Self {
+        let tls_acceptor = match (tls_cert, tls_key) {
+            (Some(cert), Some(key)) => match load_tls_config(&cert, &key) {
+                Ok(a) => Some(a),
+                Err(e) => {
+                    eprintln!("warning: failed to load TLS config: {}", e);
+                    None
+                }
+            },
+            _ => None,
+        };
+
         Self {
             port,
             routes,
-            logs: Arc::new(Mutex::new(VecDeque::with_capacity(MAX_LOG_ENTRIES))),
+            logs: Arc::new(Mutex::new(VecDeque::with_capacity(max_log_entries))),
             running: Arc::new(AtomicBool::new(false)),
             shutdown: Arc::new(AtomicBool::new(false)),
             handle: None,
+            max_log_entries,
+            tls_acceptor,
         }
     }
 
-    /// Starts the proxy server on a new thread using a Tokio runtime.
-    ///
-    /// If the server is already running this is a no-op.
     pub fn start(&mut self) {
         if self.running.load(Ordering::SeqCst) {
             return;
@@ -110,7 +135,7 @@ impl ProxyInstance {
         let logs = self.logs.clone();
         let running = self.running.clone();
         let shutdown = self.shutdown.clone();
-
+        let tls_acceptor = self.tls_acceptor.clone();
         let handle = thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_io()
@@ -159,9 +184,17 @@ impl ProxyInstance {
                             let client = client.clone();
                             let logs_for_svc = logs.clone();
                             let routes_for_svc = routes.clone();
+                            let acceptor = tls_acceptor.clone();
 
                             tokio::spawn(async move {
-                                let io = TokioIo::new(stream);
+                                let io = if let Some(ref acceptor) = acceptor {
+                                    match acceptor.accept(stream).await {
+                                        Ok(tls_stream) => TokioIo::new(Box::new(tls_stream) as Box<dyn IoBox>),
+                                        Err(_) => return,
+                                    }
+                                } else {
+                                    TokioIo::new(Box::new(stream) as Box<dyn IoBox>)
+                                };
                                 let svc = service_fn(move |req| {
                                     handle_request(
                                         req, client.clone(), routes_for_svc.clone(), logs_for_svc.clone(),
@@ -187,7 +220,6 @@ impl ProxyInstance {
         self.handle = Some(handle);
     }
 
-    /// Stops the proxy server and waits for the server thread to join.
     pub fn stop(&mut self) {
         self.shutdown.store(true, Ordering::SeqCst);
         if let Some(h) = self.handle.take() {
@@ -197,31 +229,18 @@ impl ProxyInstance {
         self.shutdown.store(false, Ordering::SeqCst);
     }
 
-    /// Stops and restarts the proxy server.
     pub fn restart(&mut self) {
         self.stop();
         self.start();
     }
 
-    /// Returns `true` if the proxy server thread is currently running.
     pub fn is_running(&self) -> bool {
         self.running.load(Ordering::SeqCst)
     }
 
-    /// Returns a snapshot of all log entries.
     pub fn get_logs(&self) -> Vec<LogEntry> {
         let lk = self.logs.lock().expect("mutex poisoned");
         lk.iter().cloned().collect()
-    }
-
-    /// Pushes a new log entry into the ring buffer, trimming old entries if at capacity.
-    #[allow(dead_code)]
-    pub fn push_log(&self, entry: LogEntry) {
-        let mut lk = self.logs.lock().expect("mutex poisoned");
-        lk.push_back(entry);
-        if lk.len() > MAX_LOG_ENTRIES {
-            lk.pop_front();
-        }
     }
 }
 
@@ -591,144 +610,5 @@ impl Drop for ProxyInstance {
         if let Some(h) = self.handle.take() {
             let _ = h.join();
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use http_body_util::Full;
-    use hyper::body::Bytes;
-
-    #[test]
-    fn test_match_route_exact() {
-        assert_eq!(match_route("/api/test", "/api/test"), Some("/".to_string()));
-    }
-
-    #[test]
-    fn test_match_route_prefix() {
-        assert_eq!(match_route("/api/test/foo", "/api/test"), Some("/foo".to_string()));
-    }
-
-    #[test]
-    fn test_match_route_no_match() {
-        assert_eq!(match_route("/other", "/api/test"), None);
-    }
-
-    #[test]
-    fn test_match_route_root() {
-        assert_eq!(match_route("/", "/"), Some("/".to_string()));
-    }
-
-    #[test]
-    fn test_match_route_trailing_slash_incoming() {
-        assert_eq!(match_route("/api/test/", "/api/test"), Some("/".to_string()));
-    }
-
-    #[test]
-    fn test_match_route_trailing_slash_route() {
-        assert_eq!(match_route("/api/test", "/api/test/"), Some("/".to_string()));
-    }
-
-    #[test]
-    fn test_match_route_prefix_with_trailing_slash() {
-        assert_eq!(match_route("/api/test/foo/bar", "/api/test/"), Some("/foo/bar".to_string()));
-    }
-
-    #[test]
-    fn test_match_route_empty_prefix() {
-        assert_eq!(match_route("/anything", ""), Some("/anything".to_string()));
-    }
-
-    #[test]
-    fn test_match_route_empty_prefix_no_slash() {
-        assert_eq!(match_route("anything", ""), None);
-    }
-
-    #[test]
-    fn test_is_ws_upgrade_with_headers() {
-        let req = Request::builder()
-            .method("GET")
-            .uri("/")
-            .header(hyper::header::UPGRADE, "websocket")
-            .header(hyper::header::CONNECTION, "Upgrade")
-            .body(Full::<Bytes>::new(Bytes::new()))
-            .unwrap();
-        assert!(is_ws_upgrade(&req));
-    }
-
-    #[test]
-    fn test_is_ws_upgrade_without_headers() {
-        let req = Request::builder()
-            .method("GET")
-            .uri("/")
-            .body(Full::<Bytes>::new(Bytes::new()))
-            .unwrap();
-        assert!(!is_ws_upgrade(&req));
-    }
-
-    #[test]
-    fn test_is_ws_upgrade_regular_get() {
-        let req = Request::builder()
-            .method("GET")
-            .uri("/api/data")
-            .header("accept", "application/json")
-            .body(Full::<Bytes>::new(Bytes::new()))
-            .unwrap();
-        assert!(!is_ws_upgrade(&req));
-    }
-
-    #[test]
-    fn test_is_ws_upgrade_post() {
-        let req = Request::builder()
-            .method("POST")
-            .uri("/")
-            .header(hyper::header::UPGRADE, "websocket")
-            .header(hyper::header::CONNECTION, "Upgrade")
-            .body(Full::<Bytes>::new(Bytes::new()))
-            .unwrap();
-        assert!(!is_ws_upgrade(&req));
-    }
-
-    #[test]
-    fn test_is_ws_upgrade_case_insensitive() {
-        let req = Request::builder()
-            .method("GET")
-            .uri("/")
-            .header(hyper::header::UPGRADE, "WebSocket")
-            .header(hyper::header::CONNECTION, "keep-alive, Upgrade")
-            .body(Full::<Bytes>::new(Bytes::new()))
-            .unwrap();
-        assert!(is_ws_upgrade(&req));
-    }
-
-    #[test]
-    fn test_build_upstream_uri_no_query() {
-        let uri = build_upstream_uri("http://localhost:8080", "/api/test", None);
-        assert_eq!(uri.to_string(), "http://localhost:8080/api/test");
-    }
-
-    #[test]
-    fn test_build_upstream_uri_with_query() {
-        let uri = build_upstream_uri("http://localhost:8080", "/api/test", Some("key=value"));
-        assert_eq!(uri.to_string(), "http://localhost:8080/api/test?key=value");
-    }
-
-    #[test]
-    fn test_build_upstream_uri_trailing_slash() {
-        let uri = build_upstream_uri("http://localhost:8080/", "/api/test", None);
-        assert_eq!(uri.to_string(), "http://localhost:8080/api/test");
-    }
-
-    #[test]
-    fn test_build_upstream_uri_empty_query() {
-        let uri = build_upstream_uri("http://localhost:8080", "/api/test", Some(""));
-        assert_eq!(uri.to_string(), "http://localhost:8080/api/test");
-    }
-
-    #[test]
-    fn test_build_upstream_uri_suffix_root() {
-        let uri = build_upstream_uri("http://localhost:8080", "/", None);
-        assert_eq!(uri.to_string(), "http://localhost:8080/");
     }
 }

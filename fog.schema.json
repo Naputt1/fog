@@ -44,7 +44,9 @@
               "ws": { "type": "boolean" }
             }
           }
-        }
+        },
+        "tls_cert": { "type": "string" },
+        "tls_key": { "type": "string" }
       }
     }
   },
