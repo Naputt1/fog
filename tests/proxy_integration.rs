@@ -76,7 +76,10 @@ fn test_proxy_records_logs() {
     std::thread::sleep(std::time::Duration::from_millis(100));
 
     let logs = proxy.get_logs();
-    assert!(!logs.is_empty(), "Proxy should have recorded at least one log entry");
+    assert!(
+        !logs.is_empty(),
+        "Proxy should have recorded at least one log entry"
+    );
 
     proxy.stop();
 }
