@@ -4,8 +4,8 @@ use ratatui::{
     Frame,
     layout::{Position, Rect},
     style::{Color, Style},
-    widgets::{List, ListItem, ListState},
     text::{Line, Span},
+    widgets::{List, ListItem, ListState},
 };
 
 /// The type of tab entry in the sidebar.
@@ -56,7 +56,6 @@ pub struct ClickTab {
     /// Maximum sidebar width in columns.
     pub max_sidebar_width: u16,
 }
-
 
 impl ClickTab {
     /// Creates a new [`ClickTab`] from a list of service tab names.
@@ -299,26 +298,46 @@ mod tests {
 
     #[test]
     fn test_display_name_service() {
-        let e = TabEntry { name: "myservice".into(), kind: TabKind::Service, stopped: false, health_status: HealthStatus::Unknown };
+        let e = TabEntry {
+            name: "myservice".into(),
+            kind: TabKind::Service,
+            stopped: false,
+            health_status: HealthStatus::Unknown,
+        };
         assert_eq!(e.display_name(), "myservice");
     }
 
     #[test]
     fn test_display_name_terminal() {
-        let e = TabEntry { name: "bash".into(), kind: TabKind::Terminal, stopped: false, health_status: HealthStatus::Unknown };
+        let e = TabEntry {
+            name: "bash".into(),
+            kind: TabKind::Terminal,
+            stopped: false,
+            health_status: HealthStatus::Unknown,
+        };
         assert_eq!(e.display_name(), "$ bash");
     }
 
     #[test]
     fn test_display_name_proxy() {
-        let e = TabEntry { name: "proxy".into(), kind: TabKind::Proxy, stopped: false, health_status: HealthStatus::Unknown };
+        let e = TabEntry {
+            name: "proxy".into(),
+            kind: TabKind::Proxy,
+            stopped: false,
+            health_status: HealthStatus::Unknown,
+        };
         assert_eq!(e.display_name(), "▶ proxy");
     }
 
     #[test]
     fn test_click_hit_inside() {
         let mut ct = ClickTab::new(vec!["a".into(), "b".into(), "c".into()], 12, 30);
-        ct.area = Some(Rect { x: 80, y: 0, width: 20, height: 10 });
+        ct.area = Some(Rect {
+            x: 80,
+            y: 0,
+            width: 20,
+            height: 10,
+        });
         ct.click(80, 1);
         assert_eq!(ct.index, 1);
     }
@@ -326,7 +345,12 @@ mod tests {
     #[test]
     fn test_click_miss_outside() {
         let mut ct = ClickTab::new(vec!["a".into(), "b".into()], 12, 30);
-        ct.area = Some(Rect { x: 80, y: 0, width: 20, height: 10 });
+        ct.area = Some(Rect {
+            x: 80,
+            y: 0,
+            width: 20,
+            height: 10,
+        });
         ct.index = 1;
         ct.click(10, 10);
         assert_eq!(ct.index, 1);
@@ -335,7 +359,12 @@ mod tests {
     #[test]
     fn test_click_hit_different_row() {
         let mut ct = ClickTab::new(vec!["a".into(), "b".into(), "c".into()], 12, 30);
-        ct.area = Some(Rect { x: 80, y: 0, width: 20, height: 10 });
+        ct.area = Some(Rect {
+            x: 80,
+            y: 0,
+            width: 20,
+            height: 10,
+        });
         ct.click(80, 2);
         assert_eq!(ct.index, 2);
     }
@@ -343,7 +372,12 @@ mod tests {
     #[test]
     fn test_click_beyond_entries() {
         let mut ct = ClickTab::new(vec!["a".into(), "b".into()], 12, 30);
-        ct.area = Some(Rect { x: 80, y: 0, width: 20, height: 10 });
+        ct.area = Some(Rect {
+            x: 80,
+            y: 0,
+            width: 20,
+            height: 10,
+        });
         ct.click(80, 5);
         assert_eq!(ct.index, 0);
     }

@@ -62,12 +62,11 @@ pub(crate) fn copy_selection(
     items: &[Terminal],
     tab_index: usize,
 ) {
-    let (sel_start, sel_end) =
-        if start.0 < end.0 || (start.0 == end.0 && start.1 <= end.1) {
-            (start, end)
-        } else {
-            (end, start)
-        };
+    let (sel_start, sel_end) = if start.0 < end.0 || (start.0 == end.0 && start.1 <= end.1) {
+        (start, end)
+    } else {
+        (end, start)
+    };
     let lines: Vec<String> = match items.get(tab_index) {
         Some(item) => item.get_all_lines(),
         None => return,
@@ -121,12 +120,11 @@ pub(crate) fn apply_sel(
 ) {
     let Some(start) = select_start else { return };
     let Some(end) = select_end else { return };
-    let (sel_start, sel_end) =
-        if start.0 < end.0 || (start.0 == end.0 && start.1 <= end.1) {
-            (start, end)
-        } else {
-            (end, start)
-        };
+    let (sel_start, sel_end) = if start.0 < end.0 || (start.0 == end.0 && start.1 <= end.1) {
+        (start, end)
+    } else {
+        (end, start)
+    };
     let visible = lines.len();
     let end_idx = total_lines.saturating_sub(scroll_offset);
     let start_idx = end_idx.saturating_sub(visible);
@@ -201,49 +199,84 @@ mod tests {
 
     #[test]
     fn test_screen_to_content_inside() {
-        let area = Rect { x: 10, y: 5, width: 40, height: 20 };
+        let area = Rect {
+            x: 10,
+            y: 5,
+            width: 40,
+            height: 20,
+        };
         let result = screen_to_content(11, 6, area, 0, 30);
         assert_eq!(result, Some((12, 0)));
     }
 
     #[test]
     fn test_screen_to_content_outside_left() {
-        let area = Rect { x: 10, y: 5, width: 40, height: 20 };
+        let area = Rect {
+            x: 10,
+            y: 5,
+            width: 40,
+            height: 20,
+        };
         let result = screen_to_content(9, 6, area, 0, 30);
         assert_eq!(result, None);
     }
 
     #[test]
     fn test_screen_to_content_outside_right() {
-        let area = Rect { x: 10, y: 5, width: 40, height: 20 };
+        let area = Rect {
+            x: 10,
+            y: 5,
+            width: 40,
+            height: 20,
+        };
         let result = screen_to_content(51, 6, area, 0, 30);
         assert_eq!(result, None);
     }
 
     #[test]
     fn test_screen_to_content_outside_top() {
-        let area = Rect { x: 10, y: 5, width: 40, height: 20 };
+        let area = Rect {
+            x: 10,
+            y: 5,
+            width: 40,
+            height: 20,
+        };
         let result = screen_to_content(11, 4, area, 0, 30);
         assert_eq!(result, None);
     }
 
     #[test]
     fn test_screen_to_content_outside_bottom() {
-        let area = Rect { x: 10, y: 5, width: 40, height: 20 };
+        let area = Rect {
+            x: 10,
+            y: 5,
+            width: 40,
+            height: 20,
+        };
         let result = screen_to_content(11, 26, area, 0, 30);
         assert_eq!(result, None);
     }
 
     #[test]
     fn test_screen_to_content_with_scroll_offset() {
-        let area = Rect { x: 0, y: 0, width: 80, height: 20 };
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 20,
+        };
         let result = screen_to_content(1, 1, area, 5, 25);
         assert_eq!(result, Some((2, 0)));
     }
 
     #[test]
     fn test_screen_to_content_beyond_total_lines() {
-        let area = Rect { x: 0, y: 0, width: 80, height: 10 };
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 10,
+        };
         let result = screen_to_content(1, 9, area, 0, 5);
         assert_eq!(result, None);
     }
@@ -292,14 +325,24 @@ mod tests {
     fn test_apply_sel_single_line() {
         let mut lines = vec![Line::from("hello world")];
         apply_sel(&mut lines, Some((0, 0)), Some((0, 5)), 0, 1);
-        assert!(lines[0].spans.iter().any(|s| s.style == Style::new().reversed()));
+        assert!(
+            lines[0]
+                .spans
+                .iter()
+                .any(|s| s.style == Style::new().reversed())
+        );
     }
 
     #[test]
     fn test_apply_sel_reverse_order() {
         let mut lines = vec![Line::from("hello world")];
         apply_sel(&mut lines, Some((0, 5)), Some((0, 0)), 0, 1);
-        assert!(lines[0].spans.iter().any(|s| s.style == Style::new().reversed()));
+        assert!(
+            lines[0]
+                .spans
+                .iter()
+                .any(|s| s.style == Style::new().reversed())
+        );
     }
 
     #[test]
@@ -312,13 +355,28 @@ mod tests {
     fn test_apply_sel_multi_line() {
         let mut lines = vec![Line::from("line1"), Line::from("line2")];
         apply_sel(&mut lines, Some((0, 2)), Some((1, 3)), 0, 2);
-        assert!(lines[0].spans.iter().any(|s| s.style == Style::new().reversed()));
-        assert!(lines[1].spans.iter().any(|s| s.style == Style::new().reversed()));
+        assert!(
+            lines[0]
+                .spans
+                .iter()
+                .any(|s| s.style == Style::new().reversed())
+        );
+        assert!(
+            lines[1]
+                .spans
+                .iter()
+                .any(|s| s.style == Style::new().reversed())
+        );
     }
 
     #[test]
     fn test_screen_to_content_boundaries() {
-        let area = Rect { x: 0, y: 0, width: 10, height: 10 };
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 10,
+            height: 10,
+        };
         assert_eq!(screen_to_content(0, 0, area, 0, 10), None);
         assert_eq!(screen_to_content(1, 1, area, 0, 10), Some((2, 0)));
         assert_eq!(screen_to_content(8, 8, area, 0, 10), Some((9, 7)));
