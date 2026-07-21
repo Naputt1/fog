@@ -4,9 +4,11 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::upgrade::Upgraded;
 use hyper::{Request, Response, StatusCode};
-use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
+use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::{TokioExecutor, TokioIo};
+use rustls::ServerConfig;
+use rustls_pemfile::{certs, pkcs8_private_keys};
 use std::collections::VecDeque;
 use std::fs;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,17 +18,28 @@ use std::time::Instant;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
-use rustls::ServerConfig;
-use rustls_pemfile::{certs, pkcs8_private_keys};
 
 const WS_HOP_BY_HOP: &[&str] = &[
-    "host", "transfer-encoding", "te", "trailers", "keep-alive",
-    "proxy-connection", "proxy-authenticate", "proxy-authorization",
+    "host",
+    "transfer-encoding",
+    "te",
+    "trailers",
+    "keep-alive",
+    "proxy-connection",
+    "proxy-authenticate",
+    "proxy-authorization",
 ];
 
 const HOP_BY_HOP: &[&str] = &[
-    "host", "connection", "keep-alive", "proxy-authenticate",
-    "proxy-authorization", "te", "trailers", "transfer-encoding", "upgrade",
+    "host",
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailers",
+    "transfer-encoding",
+    "upgrade",
 ];
 
 const MAX_LOG_ENTRIES: usize = 1000;
@@ -34,13 +47,15 @@ const MAX_LOG_ENTRIES: usize = 1000;
 trait IoBox: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
 impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> IoBox for T {}
 
-fn load_tls_config(cert_path: &str, key_path: &str) -> Result<TlsAcceptor, Box<dyn std::error::Error>> {
+fn load_tls_config(
+    cert_path: &str,
+    key_path: &str,
+) -> Result<TlsAcceptor, Box<dyn std::error::Error>> {
     let cert_file = &mut std::io::BufReader::new(fs::File::open(cert_path)?);
     let key_file = &mut std::io::BufReader::new(fs::File::open(key_path)?);
 
-    let cert_chain: Vec<rustls::pki_types::CertificateDer<'_>> = certs(cert_file)
-        .filter_map(Result::ok)
-        .collect();
+    let cert_chain: Vec<rustls::pki_types::CertificateDer<'_>> =
+        certs(cert_file).filter_map(Result::ok).collect();
     let mut keys: Vec<rustls::pki_types::PrivateKeyDer<'_>> = pkcs8_private_keys(key_file)
         .filter_map(Result::ok)
         .map(|k| k.into())
@@ -98,7 +113,13 @@ pub struct ProxyInstance {
 }
 
 impl ProxyInstance {
-    pub fn new(port: u16, routes: Vec<RouteEntry>, max_log_entries: usize, tls_cert: Option<String>, tls_key: Option<String>) -> Self {
+    pub fn new(
+        port: u16,
+        routes: Vec<RouteEntry>,
+        max_log_entries: usize,
+        tls_cert: Option<String>,
+        tls_key: Option<String>,
+    ) -> Self {
         let tls_acceptor = match (tls_cert, tls_key) {
             (Some(cert), Some(key)) => match load_tls_config(&cert, &key) {
                 Ok(a) => Some(a),
@@ -173,11 +194,9 @@ impl ProxyInstance {
                         break;
                     }
 
-                    let accept = tokio::time::timeout(
-                        std::time::Duration::from_secs(1),
-                        listener.accept(),
-                    )
-                    .await;
+                    let accept =
+                        tokio::time::timeout(std::time::Duration::from_secs(1), listener.accept())
+                            .await;
 
                     match accept {
                         Ok(Ok((stream, _))) => {
@@ -189,7 +208,9 @@ impl ProxyInstance {
                             tokio::spawn(async move {
                                 let io = if let Some(ref acceptor) = acceptor {
                                     match acceptor.accept(stream).await {
-                                        Ok(tls_stream) => TokioIo::new(Box::new(tls_stream) as Box<dyn IoBox>),
+                                        Ok(tls_stream) => {
+                                            TokioIo::new(Box::new(tls_stream) as Box<dyn IoBox>)
+                                        }
                                         Err(_) => return,
                                     }
                                 } else {
@@ -197,12 +218,14 @@ impl ProxyInstance {
                                 };
                                 let svc = service_fn(move |req| {
                                     handle_request(
-                                        req, client.clone(), routes_for_svc.clone(), logs_for_svc.clone(),
+                                        req,
+                                        client.clone(),
+                                        routes_for_svc.clone(),
+                                        logs_for_svc.clone(),
                                     )
                                 });
-                                if let Err(e) = http1::Builder::new()
-                                    .serve_connection(io, svc)
-                                    .await
+                                if let Err(e) =
+                                    http1::Builder::new().serve_connection(io, svc).await
                                 {
                                     let _ = e;
                                 }
@@ -249,9 +272,7 @@ fn match_route(incoming: &str, route: &str) -> Option<String> {
     if incoming == route || incoming == prefix {
         return Some("/".to_string());
     }
-    if incoming.starts_with(prefix)
-        && incoming.as_bytes().get(prefix.len()) == Some(&b'/')
-    {
+    if incoming.starts_with(prefix) && incoming.as_bytes().get(prefix.len()) == Some(&b'/') {
         let suffix = &incoming[prefix.len()..];
         return Some(if suffix.is_empty() {
             "/".to_string()
@@ -273,13 +294,13 @@ fn build_upstream_uri(upstream: &str, suffix: &str, query: Option<&str>) -> hype
         _ => path,
     };
     s.parse().unwrap_or_else(|_| {
-        format!("{}/", base).parse().expect("built URI should parse")
+        format!("{}/", base)
+            .parse()
+            .expect("built URI should parse")
     })
 }
 
-fn forward_headers(
-    incoming: &hyper::HeaderMap,
-) -> hyper::HeaderMap {
+fn forward_headers(incoming: &hyper::HeaderMap) -> hyper::HeaderMap {
     let mut out = hyper::HeaderMap::new();
     for (key, value) in incoming.iter() {
         let k = key.as_str().to_lowercase();
@@ -495,7 +516,9 @@ async fn handle_http(
     for (k, v) in &forwarded_headers {
         builder = builder.header(k, v);
     }
-    let forward_req = builder.body(Full::new(body_bytes)).expect("request builder failed");
+    let forward_req = builder
+        .body(Full::new(body_bytes))
+        .expect("request builder failed");
 
     match ctx.client.request(forward_req).await {
         Ok(upstream_resp) => {
@@ -511,7 +534,9 @@ async fn handle_http(
             for (k, v) in &parts.headers {
                 resp_builder = resp_builder.header(k, v);
             }
-            let resp = resp_builder.body(Full::new(resp_body)).expect("response builder failed");
+            let resp = resp_builder
+                .body(Full::new(resp_body))
+                .expect("response builder failed");
 
             let mut lk = ctx.logs.lock().expect("mutex poisoned");
             lk.push_back(LogEntry {
@@ -561,9 +586,9 @@ async fn handle_request(
     let path = req.uri().path().to_string();
     let query = req.uri().query().map(|q| q.to_string());
 
-    let matched = routes.iter().find_map(|r| {
-        match_route(&path, &r.path).map(|suffix| (r, suffix.clone()))
-    });
+    let matched = routes
+        .iter()
+        .find_map(|r| match_route(&path, &r.path).map(|suffix| (r, suffix.clone())));
 
     match matched {
         Some((route, suffix)) if route.ws || is_ws_upgrade(&req) => {
@@ -617,8 +642,8 @@ impl Drop for ProxyInstance {
 mod tests {
     use super::*;
     use http_body_util::Full;
-    use hyper::body::Bytes;
     use hyper::Request;
+    use hyper::body::Bytes;
 
     #[test]
     fn test_match_route_exact() {
@@ -750,6 +775,9 @@ mod tests {
 
     #[test]
     fn test_match_route_prefix_with_trailing_slash() {
-        assert_eq!(match_route("/api/test/", "/api"), Some("/test/".to_string()));
+        assert_eq!(
+            match_route("/api/test/", "/api"),
+            Some("/test/".to_string())
+        );
     }
 }
