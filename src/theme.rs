@@ -65,14 +65,30 @@ impl Theme {
     pub fn from_config(config: Option<&crate::config::ThemeConfig>) -> Self {
         let mut theme = Self::default();
         if let Some(c) = config {
-            if let Some(ref v) = c.proxy { theme.proxy = parse_color(v); }
-            if let Some(ref v) = c.terminal { theme.terminal = parse_color(v); }
-            if let Some(ref v) = c.stopped { theme.stopped = parse_color(v); }
-            if let Some(ref v) = c.highlight { theme.highlight = parse_color(v); }
-            if let Some(ref v) = c.status_200 { theme.status_200 = parse_color(v); }
-            if let Some(ref v) = c.status_300 { theme.status_300 = parse_color(v); }
-            if let Some(ref v) = c.status_400 { theme.status_400 = parse_color(v); }
-            if let Some(ref v) = c.status_500 { theme.status_500 = parse_color(v); }
+            if let Some(ref v) = c.proxy {
+                theme.proxy = parse_color(v);
+            }
+            if let Some(ref v) = c.terminal {
+                theme.terminal = parse_color(v);
+            }
+            if let Some(ref v) = c.stopped {
+                theme.stopped = parse_color(v);
+            }
+            if let Some(ref v) = c.highlight {
+                theme.highlight = parse_color(v);
+            }
+            if let Some(ref v) = c.status_200 {
+                theme.status_200 = parse_color(v);
+            }
+            if let Some(ref v) = c.status_300 {
+                theme.status_300 = parse_color(v);
+            }
+            if let Some(ref v) = c.status_400 {
+                theme.status_400 = parse_color(v);
+            }
+            if let Some(ref v) = c.status_500 {
+                theme.status_500 = parse_color(v);
+            }
         }
         theme
     }
