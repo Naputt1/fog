@@ -701,7 +701,7 @@ mod tests {
             .header(hyper::header::UPGRADE, "websocket")
             .header(hyper::header::CONNECTION, "Upgrade")
             .body(Full::<Bytes>::new(Bytes::new()))
-            .unwrap();
+            .expect("request builder should succeed");
         assert!(is_ws_upgrade(&req));
     }
 
@@ -711,7 +711,7 @@ mod tests {
             .method("GET")
             .uri("/")
             .body(Full::<Bytes>::new(Bytes::new()))
-            .unwrap();
+            .expect("request builder should succeed");
         assert!(!is_ws_upgrade(&req));
     }
 
@@ -721,7 +721,7 @@ mod tests {
             .method("GET")
             .uri("/")
             .body(Full::<Bytes>::new(Bytes::new()))
-            .unwrap();
+            .expect("request builder should succeed");
         assert!(!is_ws_upgrade(&req));
     }
 
@@ -733,7 +733,7 @@ mod tests {
             .header(hyper::header::UPGRADE, "websocket")
             .header(hyper::header::CONNECTION, "Upgrade")
             .body(Full::<Bytes>::new(Bytes::new()))
-            .unwrap();
+            .expect("request builder should succeed");
         assert!(!is_ws_upgrade(&req));
     }
 
@@ -745,7 +745,7 @@ mod tests {
             .header(hyper::header::UPGRADE, "WebSocket")
             .header(hyper::header::CONNECTION, "keep-alive, Upgrade")
             .body(Full::<Bytes>::new(Bytes::new()))
-            .unwrap();
+            .expect("request builder should succeed");
         assert!(is_ws_upgrade(&req));
     }
 

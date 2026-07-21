@@ -1,10 +1,20 @@
 [package]
 name = "fog"
 version = "0.1.0"
+description = "Terminal-based service orchestrator & reverse-proxy dashboard"
+repository = "https://github.com/Naputt1/fog"
+license = "MIT"
+keywords = ["tui", "proxy", "orchestrator", "terminal", "ratatui"]
+categories = ["command-line-utilities", "development-tools"]
 edition = "2024"
 
 [dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
 reqwest = { version = "0.12", features = ["blocking"] }
+
+[[bench]]
+name = "terminal_bench"
+harness = false
 
 [dependencies]
 crossterm = "0.29.0"

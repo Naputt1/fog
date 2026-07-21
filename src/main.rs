@@ -13,10 +13,10 @@ use std::{fs, io};
 
 use fog::app::App;
 use fog::config::Config;
+use fog::config_watcher;
 use fog::proxy::{ProxyInstance, RouteEntry};
 use fog::terminal::Terminal;
 use fog::theme::Theme;
-use std::sync::mpsc;
 
 const DEFAULT_SCROLLBACK: usize = 2000;
 
@@ -133,32 +133,7 @@ fn main() -> io::Result<()> {
         p
     });
 
-    let (config_tx, config_rx) = mpsc::channel();
-
-    let watch_path = config_path.clone();
-    std::thread::spawn(move || {
-        use notify::{EventKind, RecursiveMode, Watcher};
-        let (tx, rx) = std::sync::mpsc::channel();
-        if let Ok(mut watcher) =
-            notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
-                if let Ok(event) = res {
-                    match event.kind {
-                        EventKind::Modify(_) | EventKind::Create(_) => {
-                            let _ = tx.send(());
-                        }
-                        _ => {}
-                    }
-                }
-            })
-        {
-            let _ = watcher.watch(&watch_path, RecursiveMode::NonRecursive);
-            loop {
-                if rx.recv().is_ok() {
-                    let _ = config_tx.send(());
-                }
-            }
-        }
-    });
+    let config_rx = config_watcher::spawn_config_watcher(config_path.clone());
 
     ratatui::run(|terminal| {
         App::new(

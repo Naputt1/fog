@@ -1,7 +1,7 @@
 use crate::click_tab::{ClickTab, TabKind};
-use crate::config::Config;
+use crate::config_watcher;
 use crate::keybinding;
-use crate::proxy::{ProxyInstance, RouteEntry};
+use crate::proxy::ProxyInstance;
 use crate::render;
 use crate::selection;
 use crate::terminal::Terminal;
@@ -126,37 +126,7 @@ impl App {
     /// # Errors
     /// Returns an error if terminal rendering or event polling fails.
     fn reload_config(&mut self) {
-        let contents = match std::fs::read_to_string(&self.config_path) {
-            Ok(c) => c,
-            Err(_) => return,
-        };
-        let config: Config = match serde_json::from_str(&contents) {
-            Ok(c) => c,
-            Err(_) => return,
-        };
-
-        if let Some(ref tc) = config.theme {
-            self.theme = Theme::from_config(Some(tc));
-        }
-
-        if let Some(ref pc) = config.proxy
-            && let Some(ref mut p) = self.proxy
-        {
-            let new_routes: Vec<RouteEntry> = pc
-                .routes
-                .iter()
-                .map(|r| RouteEntry {
-                    path: r.path.clone(),
-                    upstream: r.upstream.clone(),
-                    ws: r.ws.unwrap_or(false),
-                })
-                .collect();
-            if pc.port != p.port || new_routes != p.routes {
-                p.port = pc.port;
-                p.routes = new_routes;
-                p.restart();
-            }
-        }
+        config_watcher::reload_config(&self.config_path, &mut self.proxy, &mut self.theme);
     }
 
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {

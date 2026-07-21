@@ -100,11 +100,77 @@ pub fn kill_descendants(pid: u32) {
 
 /// Kills all descendant processes of the given PID recursively.
 ///
-/// This is a no-op on non-macOS platforms.
+/// On Linux this uses `/proc` filesystem enumeration to discover and kill the process tree.
 ///
 /// # Arguments
-/// * `pid` - The parent process ID (ignored on non-macOS).
-#[cfg(not(target_os = "macos"))]
+/// * `pid` - The parent process ID whose descendants should be killed.
+#[cfg(target_os = "linux")]
+pub fn kill_descendants(pid: u32) {
+    debug_assert!(pid > 0, "kill_descendants: pid must be positive, got {}", pid);
+    use std::collections::VecDeque;
+    use std::fs;
+    use std::io;
+
+    fn get_ppid(pid: u32) -> Option<u32> {
+        let path = format!("/proc/{}/status", pid);
+        let content = fs::read_to_string(&path).ok()?;
+        for line in content.lines() {
+            if let Some(ppid_str) = line.strip_prefix("PPid:\t") {
+                return ppid_str.trim().parse().ok();
+            }
+        }
+        None
+    }
+
+    fn collect_descendants(root_pid: u32) -> Vec<u32> {
+        let mut result = Vec::new();
+        let entries = match fs::read_dir("/proc") {
+            Ok(e) => e,
+            Err(_) => return result,
+        };
+
+        let mut children_map: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
+
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            let child_pid: u32 = match name_str.parse() {
+                Ok(pid) => pid,
+                Err(_) => continue,
+            };
+            if let Some(ppid) = get_ppid(child_pid) {
+                children_map.entry(ppid).or_default().push(child_pid);
+            }
+        }
+
+        let mut queue = VecDeque::new();
+        queue.push_back(root_pid);
+
+        while let Some(current) = queue.pop_front() {
+            if let Some(children) = children_map.get(&current) {
+                for &child in children {
+                    result.push(child);
+                    queue.push_back(child);
+                }
+            }
+        }
+
+        result
+    }
+
+    let descendants = collect_descendants(pid);
+    for &child_pid in &descendants {
+        let _ = unsafe { libc::kill(child_pid as libc::pid_t, libc::SIGKILL) };
+    }
+}
+
+/// Kills all descendant processes of the given PID recursively.
+///
+/// This is a no-op on platforms other than macOS and Linux.
+///
+/// # Arguments
+/// * `pid` - The parent process ID (ignored on non-macOS, non-Linux).
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub fn kill_descendants(_pid: u32) {}
 
 #[cfg(test)]

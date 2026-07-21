@@ -660,7 +660,7 @@ mod tests {
         let mut parser = vt100::Parser::new(24, 80, 100);
         parser.process(b"X");
         let screen = parser.screen();
-        let cell = screen.cell(0, 0).unwrap();
+        let cell = screen.cell(0, 0).expect("cell should exist at (0,0)");
         let style = cell_style(&cell);
         assert_eq!(style, Style::default());
     }
@@ -670,7 +670,7 @@ mod tests {
         let mut parser = vt100::Parser::new(24, 80, 100);
         parser.process(b"\x1b[31mX");
         let screen = parser.screen();
-        let cell = screen.cell(0, 0).unwrap();
+        let cell = screen.cell(0, 0).expect("cell should exist at (0,0)");
         let style = cell_style(&cell);
         assert_eq!(style.fg, Some(Color::Indexed(1)));
     }
@@ -680,7 +680,7 @@ mod tests {
         let mut parser = vt100::Parser::new(24, 80, 100);
         parser.process(b"\x1b[42mX");
         let screen = parser.screen();
-        let cell = screen.cell(0, 0).unwrap();
+        let cell = screen.cell(0, 0).expect("cell should exist at (0,0)");
         let style = cell_style(&cell);
         assert_eq!(style.bg, Some(Color::Indexed(2)));
     }
@@ -690,7 +690,7 @@ mod tests {
         let mut parser = vt100::Parser::new(24, 80, 100);
         parser.process(b"\x1b[1mB");
         let screen = parser.screen();
-        let cell = screen.cell(0, 0).unwrap();
+        let cell = screen.cell(0, 0).expect("cell should exist at (0,0)");
         let style = cell_style(&cell);
         assert!(style.add_modifier.contains(Modifier::BOLD));
     }
@@ -700,7 +700,7 @@ mod tests {
         let mut parser = vt100::Parser::new(24, 80, 100);
         parser.process(b"\x1b[3mI");
         let screen = parser.screen();
-        let cell = screen.cell(0, 0).unwrap();
+        let cell = screen.cell(0, 0).expect("cell should exist at (0,0)");
         let style = cell_style(&cell);
         assert!(style.add_modifier.contains(Modifier::ITALIC));
     }
@@ -710,7 +710,7 @@ mod tests {
         let mut parser = vt100::Parser::new(24, 80, 100);
         parser.process(b"\x1b[4mU");
         let screen = parser.screen();
-        let cell = screen.cell(0, 0).unwrap();
+        let cell = screen.cell(0, 0).expect("cell should exist at (0,0)");
         let style = cell_style(&cell);
         assert!(style.add_modifier.contains(Modifier::UNDERLINED));
     }
@@ -720,7 +720,7 @@ mod tests {
         let mut parser = vt100::Parser::new(24, 80, 100);
         parser.process(b"\x1b[7mV");
         let screen = parser.screen();
-        let cell = screen.cell(0, 0).unwrap();
+        let cell = screen.cell(0, 0).expect("cell should exist at (0,0)");
         let style = cell_style(&cell);
         assert!(style.add_modifier.contains(Modifier::REVERSED));
     }
@@ -730,7 +730,7 @@ mod tests {
         let mut parser = vt100::Parser::new(24, 80, 100);
         parser.process(b"\x1b[2mD");
         let screen = parser.screen();
-        let cell = screen.cell(0, 0).unwrap();
+        let cell = screen.cell(0, 0).expect("cell should exist at (0,0)");
         let style = cell_style(&cell);
         assert!(style.add_modifier.contains(Modifier::DIM));
     }
@@ -740,7 +740,7 @@ mod tests {
         let mut parser = vt100::Parser::new(24, 80, 100);
         parser.process(b"\x1b[38;2;255;128;0mO");
         let screen = parser.screen();
-        let cell = screen.cell(0, 0).unwrap();
+        let cell = screen.cell(0, 0).expect("cell should exist at (0,0)");
         let style = cell_style(&cell);
         assert_eq!(style.fg, Some(Color::Rgb(255, 128, 0)));
     }
@@ -750,7 +750,7 @@ mod tests {
         let mut parser = vt100::Parser::new(24, 80, 100);
         parser.process(b"\x1b[38;5;42mC");
         let screen = parser.screen();
-        let cell = screen.cell(0, 0).unwrap();
+        let cell = screen.cell(0, 0).expect("cell should exist at (0,0)");
         let style = cell_style(&cell);
         assert_eq!(style.fg, Some(Color::Indexed(42)));
     }
@@ -760,7 +760,7 @@ mod tests {
         let mut parser = vt100::Parser::new(24, 80, 100);
         parser.process(b"\x1b[1;31;43mX");
         let screen = parser.screen();
-        let cell = screen.cell(0, 0).unwrap();
+        let cell = screen.cell(0, 0).expect("cell should exist at (0,0)");
         let style = cell_style(&cell);
         assert_eq!(style.fg, Some(Color::Indexed(1)));
         assert_eq!(style.bg, Some(Color::Indexed(3)));
@@ -772,7 +772,7 @@ mod tests {
         let mut parser = vt100::Parser::new(24, 80, 100);
         parser.process(b"\x1b[31;1mX\x1b[0mY");
         let screen = parser.screen();
-        let cell = screen.cell(0, 1).unwrap();
+        let cell = screen.cell(0, 1).expect("cell should exist at (0,1)");
         let style = cell_style(&cell);
         assert_eq!(style, Style::default());
     }
