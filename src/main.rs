@@ -1,15 +1,15 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
-use std::io::stdout;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::{fs, io};
 use clap::Parser;
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
+use std::io::stdout;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::{fs, io};
 
 use fog::app::App;
 use fog::config::Config;
@@ -39,7 +39,11 @@ fn main() -> io::Result<()> {
     let contents = match fs::read_to_string(&cli.config) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("error: could not read config '{}': {}", cli.config.display(), e);
+            eprintln!(
+                "error: could not read config '{}': {}",
+                cli.config.display(),
+                e
+            );
             std::process::exit(1);
         }
     };
@@ -65,7 +69,9 @@ fn main() -> io::Result<()> {
     let sig = sigint.clone();
     if ctrlc::set_handler(move || {
         sig.store(true, Ordering::SeqCst);
-    }).is_err() {
+    })
+    .is_err()
+    {
         eprintln!("warning: could not set Ctrl+C handler");
     }
 
@@ -73,8 +79,16 @@ fn main() -> io::Result<()> {
     execute!(stdout(), EnterAlternateScreen, EnableMouseCapture)?;
 
     let scrollback = config.max_scrollback.unwrap_or(DEFAULT_SCROLLBACK);
-    let sidebar_min = config.sidebar.as_ref().and_then(|s| s.min_width).unwrap_or(12);
-    let sidebar_max = config.sidebar.as_ref().and_then(|s| s.max_width).unwrap_or(30);
+    let sidebar_min = config
+        .sidebar
+        .as_ref()
+        .and_then(|s| s.min_width)
+        .unwrap_or(12);
+    let sidebar_max = config
+        .sidebar
+        .as_ref()
+        .and_then(|s| s.max_width)
+        .unwrap_or(30);
     let theme = Theme::from_config(config.theme.as_ref());
 
     let items: Vec<Terminal> = config
@@ -125,16 +139,18 @@ fn main() -> io::Result<()> {
     std::thread::spawn(move || {
         use notify::{EventKind, RecursiveMode, Watcher};
         let (tx, rx) = std::sync::mpsc::channel();
-        if let Ok(mut watcher) = notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
-            if let Ok(event) = res {
-                match event.kind {
-                    EventKind::Modify(_) | EventKind::Create(_) => {
-                        let _ = tx.send(());
+        if let Ok(mut watcher) =
+            notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
+                if let Ok(event) = res {
+                    match event.kind {
+                        EventKind::Modify(_) | EventKind::Create(_) => {
+                            let _ = tx.send(());
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
-            }
-        }) {
+            })
+        {
             let _ = watcher.watch(&watch_path, RecursiveMode::NonRecursive);
             loop {
                 if rx.recv().is_ok() {
@@ -144,7 +160,20 @@ fn main() -> io::Result<()> {
         }
     });
 
-    ratatui::run(|terminal| App::new(items, proxy, sigint, scrollback, sidebar_min, sidebar_max, theme, config_path, config_rx).run(terminal))?;
+    ratatui::run(|terminal| {
+        App::new(
+            items,
+            proxy,
+            sigint,
+            scrollback,
+            sidebar_min,
+            sidebar_max,
+            theme,
+            config_path,
+            config_rx,
+        )
+        .run(terminal)
+    })?;
 
     disable_raw_mode()?;
     execute!(stdout(), LeaveAlternateScreen, DisableMouseCapture)?;
