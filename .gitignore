@@ -28,3 +28,9 @@ temp/
 
 # Local config (user-specific paths)
 fog.json
+
+# VitePress build output
+docs/.vitepress/dist
+
+# Node.js dependencies
+docs/node_modules/
