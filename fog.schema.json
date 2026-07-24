@@ -43,6 +43,7 @@
             "required": ["path", "upstream"],
             "properties": {
               "path": { "type": "string" },
+              "host": { "type": "string" },
               "upstream": { "type": "string" },
               "ws": { "type": "boolean" }
             }

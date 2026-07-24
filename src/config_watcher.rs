@@ -61,6 +61,7 @@ pub fn reload_config(config_path: &PathBuf, proxy: &mut Option<ProxyInstance>, t
             .iter()
             .map(|r| RouteEntry {
                 path: r.path.clone(),
+                host: r.host.clone(),
                 upstream: r.upstream.clone(),
                 ws: r.ws.unwrap_or(false),
             })

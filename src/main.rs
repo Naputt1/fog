@@ -123,6 +123,7 @@ fn main() -> io::Result<()> {
             .into_iter()
             .map(|r| RouteEntry {
                 path: r.path,
+                host: r.host,
                 upstream: r.upstream,
                 ws: r.ws.unwrap_or(false),
             })

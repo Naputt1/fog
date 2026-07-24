@@ -84,6 +84,7 @@ pub struct LogEntry {
 #[derive(Debug, Clone, PartialEq)]
 pub struct RouteEntry {
     pub path: String,
+    pub host: Option<String>,
     pub upstream: String,
     pub ws: bool,
 }
@@ -288,7 +289,56 @@ impl ProxyInstance {
     }
 }
 
+fn wildcard_match(pattern: &str, input: &str) -> bool {
+    let p = pattern.as_bytes();
+    let i = input.as_bytes();
+    let mut pi = 0;
+    let mut ii = 0;
+    let mut star_idx: Option<usize> = None;
+    let mut match_idx: usize = 0;
+
+    while ii < i.len() {
+        if pi < p.len() && p[pi] == b'*' {
+            star_idx = Some(pi);
+            match_idx = ii;
+            pi += 1;
+        } else if pi < p.len() && p[pi] == i[ii] {
+            pi += 1;
+            ii += 1;
+        } else if let Some(si) = star_idx {
+            pi = si + 1;
+            match_idx += 1;
+            ii = match_idx;
+        } else {
+            return false;
+        }
+    }
+
+    while pi < p.len() && p[pi] == b'*' {
+        pi += 1;
+    }
+
+    pi == p.len()
+}
+
 fn match_route(incoming: &str, route: &str) -> Option<String> {
+    if route.contains('*') {
+        let pat_segs: Vec<&str> = route.split('/').collect();
+        let inc_segs: Vec<&str> = incoming.split('/').collect();
+
+        if pat_segs.len() != inc_segs.len() {
+            return None;
+        }
+
+        for (p_seg, i_seg) in pat_segs.iter().zip(inc_segs.iter()) {
+            if !wildcard_match(p_seg, i_seg) {
+                return None;
+            }
+        }
+
+        return Some(incoming.to_string());
+    }
+
     let prefix = route.trim_end_matches('/');
     if incoming == route || incoming == prefix {
         return Some("/".to_string());
@@ -305,6 +355,19 @@ fn match_route(incoming: &str, route: &str) -> Option<String> {
         return Some(incoming.to_string());
     }
     None
+}
+
+fn match_host(incoming_host: Option<&str>, route_host: &Option<String>) -> bool {
+    match route_host {
+        Some(pattern) => match incoming_host {
+            Some(host) => {
+                let host = host.split(':').next().unwrap_or(host);
+                wildcard_match(pattern, host)
+            }
+            None => false,
+        },
+        None => true,
+    }
 }
 
 fn build_upstream_uri(upstream: &str, suffix: &str, query: Option<&str>) -> hyper::Uri {
@@ -618,9 +681,14 @@ async fn handle_request(
     let method = req.method().to_string();
     let path = req.uri().path().to_string();
     let query = req.uri().query().map(|q| q.to_string());
+    let host = req
+        .headers()
+        .get(hyper::header::HOST)
+        .and_then(|v| v.to_str().ok());
 
     let matched = routes
         .iter()
+        .filter(|r| match_host(host, &r.host))
         .find_map(|r| match_route(&path, &r.path).map(|suffix| (r, suffix.clone())));
 
     match matched {
@@ -689,6 +757,55 @@ mod tests {
     use hyper::Request;
     use hyper::body::Bytes;
 
+    // --- wildcard_match ---
+
+    #[test]
+    fn test_wildcard_match_exact() {
+        assert!(wildcard_match("hello", "hello"));
+    }
+
+    #[test]
+    fn test_wildcard_match_star() {
+        assert!(wildcard_match("he*lo", "hello"));
+    }
+
+    #[test]
+    fn test_wildcard_match_star_prefix() {
+        assert!(wildcard_match("*lo", "hello"));
+    }
+
+    #[test]
+    fn test_wildcard_match_star_suffix() {
+        assert!(wildcard_match("he*", "hello"));
+    }
+
+    #[test]
+    fn test_wildcard_match_star_all() {
+        assert!(wildcard_match("*", "anything"));
+    }
+
+    #[test]
+    fn test_wildcard_match_no_match() {
+        assert!(!wildcard_match("hello", "world"));
+    }
+
+    #[test]
+    fn test_wildcard_match_empty() {
+        assert!(wildcard_match("", ""));
+    }
+
+    #[test]
+    fn test_wildcard_match_star_empty() {
+        assert!(wildcard_match("*", ""));
+    }
+
+    #[test]
+    fn test_wildcard_match_multi_star() {
+        assert!(wildcard_match("a*b*c", "axbyc"));
+    }
+
+    // --- match_route (prefix) ---
+
     #[test]
     fn test_match_route_exact() {
         assert_eq!(match_route("/api", "/api"), Some("/".to_string()));
@@ -730,6 +847,97 @@ mod tests {
         let result = match_route("test", "");
         assert_eq!(result, None);
     }
+
+    #[test]
+    fn test_match_route_prefix_with_trailing_slash() {
+        assert_eq!(
+            match_route("/api/test/", "/api"),
+            Some("/test/".to_string())
+        );
+    }
+
+    // --- match_route (wildcard) ---
+
+    #[test]
+    fn test_match_route_wildcard_single_segment() {
+        assert_eq!(
+            match_route("/api/foo", "/api/*"),
+            Some("/api/foo".to_string())
+        );
+    }
+
+    #[test]
+    fn test_match_route_wildcard_mid_segment() {
+        assert_eq!(
+            match_route("/api/foo/bar", "/api/*/bar"),
+            Some("/api/foo/bar".to_string())
+        );
+    }
+
+    #[test]
+    fn test_match_route_wildcard_no_match_length() {
+        assert_eq!(match_route("/api/foo/bar", "/api/*"), None);
+    }
+
+    #[test]
+    fn test_match_route_wildcard_no_match_segment() {
+        assert_eq!(match_route("/api/foo", "/api/bar"), None);
+    }
+
+    #[test]
+    fn test_match_route_wildcard_partial_segment() {
+        assert_eq!(
+            match_route("/api/v2/users", "/api/v*/users"),
+            Some("/api/v2/users".to_string())
+        );
+    }
+
+    #[test]
+    fn test_match_route_wildcard_segment_star() {
+        assert_eq!(
+            match_route("/static/js/main.js", "/*/js/main.js"),
+            Some("/static/js/main.js".to_string())
+        );
+    }
+
+    // --- match_host ---
+
+    #[test]
+    fn test_match_host_none_route_no_host() {
+        assert!(match_host(None, &None));
+    }
+
+    #[test]
+    fn test_match_host_with_host_matches() {
+        assert!(match_host(Some("custom.com"), &Some("custom.*".to_string())));
+    }
+
+    #[test]
+    fn test_match_host_with_host_no_match() {
+        assert!(!match_host(Some("other.com"), &Some("custom.*".to_string())));
+    }
+
+    #[test]
+    fn test_match_host_with_host_and_port() {
+        assert!(match_host(Some("custom.com:8080"), &Some("custom.*".to_string())));
+    }
+
+    #[test]
+    fn test_match_host_no_incoming_with_pattern() {
+        assert!(!match_host(None, &Some("custom.*".to_string())));
+    }
+
+    #[test]
+    fn test_match_host_subdomain_wildcard() {
+        assert!(match_host(Some("api.example.com"), &Some("*.example.com".to_string())));
+    }
+
+    #[test]
+    fn test_match_host_subdomain_no_match() {
+        assert!(!match_host(Some("other.com"), &Some("*.example.com".to_string())));
+    }
+
+    // --- is_ws_upgrade ---
 
     #[test]
     fn test_is_ws_upgrade_with_headers() {
@@ -787,6 +995,8 @@ mod tests {
         assert!(is_ws_upgrade(&req));
     }
 
+    // --- build_upstream_uri ---
+
     #[test]
     fn test_build_upstream_uri_no_query() {
         let uri = build_upstream_uri("http://localhost:8080", "/api/test", None);
@@ -815,13 +1025,5 @@ mod tests {
     fn test_build_upstream_uri_suffix_root() {
         let uri = build_upstream_uri("http://localhost:8080", "/", None);
         assert_eq!(uri.to_string(), "http://localhost:8080/");
-    }
-
-    #[test]
-    fn test_match_route_prefix_with_trailing_slash() {
-        assert_eq!(
-            match_route("/api/test/", "/api"),
-            Some("/test/".to_string())
-        );
     }
 }

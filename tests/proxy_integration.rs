@@ -4,6 +4,7 @@ use fog::proxy::{ProxyInstance, RouteEntry};
 fn test_proxy_starts_and_stops() {
     let routes = vec![RouteEntry {
         path: "/api".into(),
+        host: None,
         upstream: "http://127.0.0.1:19999/api".into(),
         ws: false,
     }];
@@ -18,6 +19,7 @@ fn test_proxy_starts_and_stops() {
 fn test_proxy_returns_404_for_unmatched_route() {
     let routes = vec![RouteEntry {
         path: "/api".into(),
+        host: None,
         upstream: "http://127.0.0.1:19999".into(),
         ws: false,
     }];
@@ -38,6 +40,7 @@ fn test_proxy_returns_404_for_unmatched_route() {
 fn test_proxy_returns_502_for_unreachable_upstream() {
     let routes = vec![RouteEntry {
         path: "/".into(),
+        host: None,
         upstream: "http://127.0.0.1:1".into(),
         ws: false,
     }];
@@ -61,6 +64,7 @@ fn test_proxy_returns_502_for_unreachable_upstream() {
 fn test_proxy_records_logs() {
     let routes = vec![RouteEntry {
         path: "/other".into(),
+        host: None,
         upstream: "http://127.0.0.1:19999".into(),
         ws: false,
     }];
@@ -88,6 +92,7 @@ fn test_proxy_records_logs() {
 fn test_proxy_restart() {
     let routes = vec![RouteEntry {
         path: "/api".into(),
+        host: None,
         upstream: "http://127.0.0.1:19999/api".into(),
         ws: false,
     }];

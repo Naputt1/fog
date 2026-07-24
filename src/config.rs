@@ -44,7 +44,12 @@ pub struct ConfigEntry {
 #[derive(Debug, Deserialize)]
 pub struct ProxyRoute {
     /// The incoming path prefix to match against.
+    /// Supports `*` wildcards (e.g. `/api/*` matches `/api/foo`).
     pub path: String,
+    /// Optional host pattern to match against the `Host` header.
+    /// Supports `*` wildcards (e.g. `custom.*` matches `custom.com`).
+    /// If omitted, matches any host.
+    pub host: Option<String>,
     /// The upstream URL to forward matching requests to.
     pub upstream: String,
     /// Whether this route should use WebSocket proxying.
