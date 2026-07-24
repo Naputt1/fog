@@ -909,17 +909,26 @@ mod tests {
 
     #[test]
     fn test_match_host_with_host_matches() {
-        assert!(match_host(Some("custom.com"), &Some("custom.*".to_string())));
+        assert!(match_host(
+            Some("custom.com"),
+            &Some("custom.*".to_string())
+        ));
     }
 
     #[test]
     fn test_match_host_with_host_no_match() {
-        assert!(!match_host(Some("other.com"), &Some("custom.*".to_string())));
+        assert!(!match_host(
+            Some("other.com"),
+            &Some("custom.*".to_string())
+        ));
     }
 
     #[test]
     fn test_match_host_with_host_and_port() {
-        assert!(match_host(Some("custom.com:8080"), &Some("custom.*".to_string())));
+        assert!(match_host(
+            Some("custom.com:8080"),
+            &Some("custom.*".to_string())
+        ));
     }
 
     #[test]
@@ -929,12 +938,18 @@ mod tests {
 
     #[test]
     fn test_match_host_subdomain_wildcard() {
-        assert!(match_host(Some("api.example.com"), &Some("*.example.com".to_string())));
+        assert!(match_host(
+            Some("api.example.com"),
+            &Some("*.example.com".to_string())
+        ));
     }
 
     #[test]
     fn test_match_host_subdomain_no_match() {
-        assert!(!match_host(Some("other.com"), &Some("*.example.com".to_string())));
+        assert!(!match_host(
+            Some("other.com"),
+            &Some("*.example.com".to_string())
+        ));
     }
 
     // --- is_ws_upgrade ---
