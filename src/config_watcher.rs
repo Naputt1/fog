@@ -65,8 +65,10 @@ pub fn reload_config(config_path: &PathBuf, proxy: &mut Option<ProxyInstance>, t
                 ws: r.ws.unwrap_or(false),
             })
             .collect();
-        if pc.port != p.port || new_routes != p.routes {
+        let new_host = pc.host.clone().unwrap_or_else(|| "0.0.0.0".to_string());
+        if pc.port != p.port || new_host != p.host || new_routes != p.routes {
             p.port = pc.port;
+            p.host = new_host;
             p.routes = new_routes;
             p.restart();
         }

@@ -7,7 +7,7 @@ fn test_proxy_starts_and_stops() {
         upstream: "http://127.0.0.1:19999/api".into(),
         ws: false,
     }];
-    let mut proxy = ProxyInstance::new(19998, routes, 1000, None, None);
+    let mut proxy = ProxyInstance::new(19998, None, routes, 1000, None, None);
     proxy.start();
     assert!(proxy.is_running());
     proxy.stop();
@@ -21,7 +21,7 @@ fn test_proxy_returns_404_for_unmatched_route() {
         upstream: "http://127.0.0.1:19999".into(),
         ws: false,
     }];
-    let mut proxy = ProxyInstance::new(19997, routes, 1000, None, None);
+    let mut proxy = ProxyInstance::new(19997, None, routes, 1000, None, None);
     proxy.start();
 
     let client = reqwest::blocking::Client::builder()
@@ -41,7 +41,7 @@ fn test_proxy_returns_502_for_unreachable_upstream() {
         upstream: "http://127.0.0.1:1".into(),
         ws: false,
     }];
-    let mut proxy = ProxyInstance::new(19996, routes, 1000, None, None);
+    let mut proxy = ProxyInstance::new(19996, None, routes, 1000, None, None);
     proxy.start();
 
     let client = reqwest::blocking::Client::builder()
@@ -64,7 +64,7 @@ fn test_proxy_records_logs() {
         upstream: "http://127.0.0.1:19999".into(),
         ws: false,
     }];
-    let mut proxy = ProxyInstance::new(19995, routes, 1000, None, None);
+    let mut proxy = ProxyInstance::new(19995, None, routes, 1000, None, None);
     proxy.start();
 
     let client = reqwest::blocking::Client::builder()
@@ -91,7 +91,7 @@ fn test_proxy_restart() {
         upstream: "http://127.0.0.1:19999/api".into(),
         ws: false,
     }];
-    let mut proxy = ProxyInstance::new(19994, routes, 1000, None, None);
+    let mut proxy = ProxyInstance::new(19994, None, routes, 1000, None, None);
     proxy.start();
     assert!(proxy.is_running());
 

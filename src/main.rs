@@ -128,7 +128,7 @@ fn main() -> io::Result<()> {
             })
             .collect();
         let max_log_entries = pc.max_log_entries.unwrap_or(1000);
-        let mut p = ProxyInstance::new(pc.port, routes, max_log_entries, pc.tls_cert, pc.tls_key);
+        let mut p = ProxyInstance::new(pc.port, pc.host, routes, max_log_entries, pc.tls_cert, pc.tls_key);
         p.start();
         p
     });

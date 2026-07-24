@@ -33,6 +33,9 @@
           "minimum": 1,
           "maximum": 65535
         },
+        "host": {
+          "type": "string"
+        },
         "routes": {
           "type": "array",
           "items": {

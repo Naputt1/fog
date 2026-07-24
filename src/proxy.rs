@@ -102,6 +102,7 @@ struct HttpRequestContext<'a> {
 
 pub struct ProxyInstance {
     pub port: u16,
+    pub host: String,
     pub routes: Vec<RouteEntry>,
     logs: Arc<Mutex<VecDeque<LogEntry>>>,
     running: Arc<AtomicBool>,
@@ -114,6 +115,7 @@ pub struct ProxyInstance {
 impl ProxyInstance {
     pub fn new(
         port: u16,
+        host: Option<String>,
         routes: Vec<RouteEntry>,
         max_log_entries: usize,
         tls_cert: Option<String>,
@@ -132,6 +134,7 @@ impl ProxyInstance {
 
         Self {
             port,
+            host: host.unwrap_or_else(|| "0.0.0.0".to_string()),
             routes,
             logs: Arc::new(Mutex::new(VecDeque::with_capacity(max_log_entries))),
             running: Arc::new(AtomicBool::new(false)),
@@ -151,6 +154,7 @@ impl ProxyInstance {
         self.shutdown.store(false, Ordering::SeqCst);
 
         let port = self.port;
+        let host = self.host.clone();
         let routes = self.routes.clone();
         let logs = self.logs.clone();
         let max_entries = self.max_log_entries;
@@ -165,7 +169,7 @@ impl ProxyInstance {
                 .expect("failed to build tokio runtime");
 
             rt.block_on(async move {
-                let addr = format!("0.0.0.0:{}", port);
+                let addr = format!("{}:{}", host, port);
                 let listener = match TcpListener::bind(&addr).await {
                     Ok(l) => l,
                     Err(e) => {

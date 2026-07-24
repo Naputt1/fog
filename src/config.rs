@@ -56,6 +56,8 @@ pub struct ProxyRoute {
 pub struct ProxyConfig {
     /// The port the reverse proxy listens on.
     pub port: u16,
+    /// Optional host address to bind to (default: 0.0.0.0).
+    pub host: Option<String>,
     /// The list of route definitions.
     pub routes: Vec<ProxyRoute>,
     /// Optional path to a TLS certificate file (PEM-encoded).

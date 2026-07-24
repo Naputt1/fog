@@ -630,7 +630,7 @@ mod tests {
         tabs.add("proxy".into(), TabKind::Proxy);
         let app = make_app(
             vec![],
-            Some(ProxyInstance::new(8080, vec![], 1000, None, None)),
+            Some(ProxyInstance::new(8080, None, vec![], 1000, None, None)),
             tabs,
             Mode::Normal,
             Rect::default(),
@@ -645,7 +645,7 @@ mod tests {
         tabs.index = 0;
         let app = make_app(
             vec![],
-            Some(ProxyInstance::new(8080, vec![], 1000, None, None)),
+            Some(ProxyInstance::new(8080, None, vec![], 1000, None, None)),
             tabs,
             Mode::Normal,
             Rect::default(),
@@ -714,7 +714,7 @@ mod tests {
         tabs.add("proxy".into(), TabKind::Proxy);
         let app = make_app(
             vec![],
-            Some(ProxyInstance::new(8080, vec![], 1000, None, None)),
+            Some(ProxyInstance::new(8080, None, vec![], 1000, None, None)),
             tabs,
             Mode::Normal,
             Rect::default(),
@@ -728,7 +728,7 @@ mod tests {
         tabs.add("proxy".into(), TabKind::Proxy);
         let app = make_app(
             vec![],
-            Some(ProxyInstance::new(8080, vec![], 1000, None, None)),
+            Some(ProxyInstance::new(8080, None, vec![], 1000, None, None)),
             tabs,
             Mode::ProxyFilter,
             Rect::default(),
