@@ -52,6 +52,8 @@ pub struct App {
     config_rx: std::sync::mpsc::Receiver<()>,
     proxy_tab_index: Option<usize>,
     scrollbar_dragging: bool,
+    auto_scrolling: Option<bool>,
+    auto_scroll_col: u16,
 }
 
 impl App {
@@ -115,6 +117,8 @@ impl App {
             config_rx,
             proxy_tab_index,
             scrollbar_dragging: false,
+            auto_scrolling: None,
+            auto_scroll_col: 0,
         }
     }
 
@@ -152,6 +156,7 @@ impl App {
             if event::poll(Duration::from_millis(50))? {
                 self.handle_events()?;
             }
+            self.handle_auto_scroll();
         }
         let _ = execute!(std::io::stdout(), DisableMouseCapture);
         let _ = event::poll(Duration::from_millis(20));
@@ -196,19 +201,33 @@ impl App {
                 MouseEventKind::Drag(MouseButton::Left) => {
                     if self.scrollbar_dragging {
                         self.handle_scrollbar_drag(mouse.row);
-                    } else if self.selecting
-                        && let Some(pos) = selection::screen_to_content(
-                            mouse.column,
-                            mouse.row,
-                            self.content_area,
-                            self.scroll_offset,
-                            self.current_total_lines(),
-                        )
-                    {
-                        self.select_end = Some(pos);
+                    } else if self.selecting {
+                        let inner_y = self.content_area.y.saturating_add(1);
+                        let inner_h = self.content_area.height.saturating_sub(2);
+                        if mouse.row < inner_y {
+                            self.auto_scrolling = Some(true);
+                            self.auto_scroll_col = mouse.column;
+                            self.step_auto_scroll();
+                        } else if mouse.row >= inner_y.saturating_add(inner_h) {
+                            self.auto_scrolling = Some(false);
+                            self.auto_scroll_col = mouse.column;
+                            self.step_auto_scroll();
+                        } else {
+                            self.auto_scrolling = None;
+                            if let Some(pos) = selection::screen_to_content(
+                                mouse.column,
+                                mouse.row,
+                                self.content_area,
+                                self.scroll_offset,
+                                self.current_total_lines(),
+                            ) {
+                                self.select_end = Some(pos);
+                            }
+                        }
                     }
                 }
                 MouseEventKind::Up(MouseButton::Left) => {
+                    self.auto_scrolling = None;
                     if self.scrollbar_dragging {
                         self.scrollbar_dragging = false;
                     }
@@ -237,6 +256,7 @@ impl App {
     fn on_tab_switch(&mut self) {
         self.scroll_offset = 0;
         self.scrollbar_dragging = false;
+        self.auto_scrolling = None;
         selection::clear_selection(
             &mut self.selecting,
             &mut self.select_start,
@@ -482,6 +502,47 @@ impl App {
         }
     }
 
+    fn edge_content_pos(&self, col: u16, top: bool) -> Option<(usize, usize)> {
+        let inner_x = self.content_area.x.saturating_add(1);
+        let inner_w = self.content_area.width.saturating_sub(2);
+        if col < inner_x || col >= inner_x.saturating_add(inner_w) {
+            return None;
+        }
+        let col_idx = (col - inner_x) as usize;
+        let total = self.current_total_lines();
+        let visible = self.content_height() as usize;
+        let end = total.saturating_sub(self.scroll_offset);
+        let start = end.saturating_sub(visible);
+        let line = if top { start } else { end.saturating_sub(1) };
+        if line >= total {
+            None
+        } else {
+            Some((line, col_idx))
+        }
+    }
+
+    fn step_auto_scroll(&mut self) {
+        let Some(scrolling_up) = self.auto_scrolling else { return };
+        let col = self.auto_scroll_col;
+        if scrolling_up {
+            self.scroll_to(self.scroll_offset.saturating_add(3));
+            if let Some(pos) = self.edge_content_pos(col, true) {
+                self.select_end = Some(pos);
+            }
+        } else {
+            self.scroll_to(self.scroll_offset.saturating_sub(3));
+            if let Some(pos) = self.edge_content_pos(col, false) {
+                self.select_end = Some(pos);
+            }
+        }
+    }
+
+    fn handle_auto_scroll(&mut self) {
+        if self.auto_scrolling.is_some() {
+            self.step_auto_scroll();
+        }
+    }
+
     fn scrollbar_row_to_offset(&self, row: u16) -> Option<usize> {
         let scrollbar_y = self.content_area.y + 1;
         let scrollbar_h = self.content_area.height.saturating_sub(2);
@@ -677,6 +738,8 @@ mod tests {
             config_rx: rx,
             proxy_tab_index,
             scrollbar_dragging: false,
+            auto_scrolling: None,
+            auto_scroll_col: 0,
         }
     }
 
