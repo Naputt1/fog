@@ -7,8 +7,10 @@ use crate::selection;
 use crate::terminal::Terminal;
 use crate::theme::Theme;
 use crossterm::event::{
-    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
+    self, DisableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton,
+    MouseEventKind,
 };
+use crossterm::execute;
 use ratatui::{
     DefaultTerminal, Frame,
     layout::{Alignment, Constraint, Layout, Rect},
@@ -150,6 +152,11 @@ impl App {
             if event::poll(Duration::from_millis(50))? {
                 self.handle_events()?;
             }
+        }
+        let _ = execute!(std::io::stdout(), DisableMouseCapture);
+        let _ = event::poll(Duration::from_millis(20));
+        while event::poll(Duration::from_millis(0)).unwrap_or(false) {
+            let _ = event::read();
         }
         if !self.errors.is_empty() {
             for err in &self.errors {

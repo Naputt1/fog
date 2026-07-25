@@ -1,11 +1,9 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use clap::Parser;
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+use crossterm::event::EnableMouseCapture;
 use crossterm::execute;
-use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
-};
+use crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
 use std::io::stdout;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -157,9 +155,6 @@ fn main() -> io::Result<()> {
         )
         .run(terminal)
     })?;
-
-    disable_raw_mode()?;
-    execute!(stdout(), LeaveAlternateScreen, DisableMouseCapture)?;
 
     Ok(())
 }
