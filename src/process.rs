@@ -66,6 +66,45 @@ pub fn try_kill_process_group(pid: u32, signal: i32) {
     let _ = kill_process_group(pid, signal);
 }
 
+/// Returns `true` if the given process has any child processes.
+///
+/// On macOS this uses `proc_listchildpids`.
+///
+/// # Arguments
+/// * `pid` - The parent process ID to check.
+#[cfg(target_os = "macos")]
+pub fn has_child_processes(pid: u32) -> bool {
+    unsafe {
+        let byte_count = libc::proc_listchildpids(pid as libc::pid_t, std::ptr::null_mut(), 0);
+        byte_count > 0
+    }
+}
+
+/// Returns `true` if the given process has any child processes.
+///
+/// On Linux this reads `/proc/<pid>/task/<pid>/children`.
+///
+/// # Arguments
+/// * `pid` - The parent process ID to check.
+#[cfg(target_os = "linux")]
+pub fn has_child_processes(pid: u32) -> bool {
+    let path = format!("/proc/{pid}/task/{pid}/children");
+    std::fs::read_to_string(&path)
+        .ok()
+        .is_some_and(|s| !s.trim().is_empty())
+}
+
+/// Returns `true` if the given process has any child processes.
+///
+/// This is a no-op returning `false` on platforms other than macOS and Linux.
+///
+/// # Arguments
+/// * `pid` - The parent process ID (ignored on non-macOS, non-Linux).
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub fn has_child_processes(_pid: u32) -> bool {
+    false
+}
+
 /// Kills all descendant processes of the given PID recursively.
 ///
 /// On macOS this uses `proc_listchildpids` to discover and kill the process tree.

@@ -28,6 +28,8 @@ pub struct TabEntry {
     pub kind: TabKind,
     /// Whether the underlying process has stopped.
     pub stopped: bool,
+    /// Whether a command/process is actively running in this terminal.
+    pub process_running: bool,
     /// Health check status.
     pub health_status: HealthStatus,
 }
@@ -73,6 +75,7 @@ impl ClickTab {
                 name,
                 kind: TabKind::Service,
                 stopped: false,
+                process_running: false,
                 health_status: HealthStatus::Unknown,
             })
             .collect();
@@ -98,6 +101,7 @@ impl ClickTab {
             name,
             kind,
             stopped: false,
+            process_running: false,
             health_status: HealthStatus::Unknown,
         });
         self.index = self.entries.len() - 1;
@@ -117,6 +121,7 @@ impl ClickTab {
                 name,
                 kind,
                 stopped: false,
+                process_running: false,
                 health_status: HealthStatus::Unknown,
             },
         );
@@ -188,12 +193,12 @@ impl ClickTab {
                 let name = e.display_name();
                 let status_span = if e.stopped {
                     Span::styled("○", Style::default().fg(theme.stopped))
-                } else if e.health_status == HealthStatus::Healthy {
-                    Span::styled("●", Style::default().fg(Color::Green))
                 } else if e.health_status == HealthStatus::Unhealthy {
                     Span::styled("●", Style::default().fg(Color::Red).bold())
+                } else if e.process_running {
+                    Span::styled("●", Style::default().fg(Color::Green))
                 } else {
-                    Span::styled("●", Style::default())
+                    Span::styled("●", Style::default().fg(Color::DarkGray))
                 };
                 let line = Line::from(vec![status_span, Span::raw(format!(" {}", name))]);
                 let item = ListItem::new(line);
@@ -322,6 +327,7 @@ mod tests {
             name: "myservice".into(),
             kind: TabKind::Service,
             stopped: false,
+            process_running: false,
             health_status: HealthStatus::Unknown,
         };
         assert_eq!(e.display_name(), "myservice");
@@ -333,6 +339,7 @@ mod tests {
             name: "bash".into(),
             kind: TabKind::Terminal,
             stopped: false,
+            process_running: false,
             health_status: HealthStatus::Unknown,
         };
         assert_eq!(e.display_name(), "$ bash");
@@ -344,6 +351,7 @@ mod tests {
             name: "proxy".into(),
             kind: TabKind::Proxy,
             stopped: false,
+            process_running: false,
             health_status: HealthStatus::Unknown,
         };
         assert_eq!(e.display_name(), "▶ proxy");

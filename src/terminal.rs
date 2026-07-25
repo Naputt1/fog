@@ -50,6 +50,8 @@ pub struct Terminal {
     pub name: String,
     /// Whether the child process has exited.
     pub stopped: bool,
+    /// Whether a command/process is actively running in this terminal.
+    pub process_running: bool,
     /// Whether to save terminal output to a file on drop.
     pub save_logs: bool,
     /// Number of scrollback lines in the parser.
@@ -73,6 +75,7 @@ impl std::fmt::Debug for Terminal {
             .field("init", &self.init)
             .field("name", &self.name)
             .field("stopped", &self.stopped)
+            .field("process_running", &self.process_running)
             .field("scrollback", &self.scrollback)
             .field("health_check", &self.health_check)
             .field("handler", &self.handler)
@@ -188,6 +191,7 @@ impl Terminal {
             init: Init::Shell,
             name,
             stopped: false,
+            process_running: false,
             save_logs: false,
             scrollback,
             health_check: None,
@@ -227,6 +231,7 @@ impl Terminal {
             },
             name,
             stopped: false,
+            process_running: true,
             save_logs: false,
             scrollback,
             health_check: None,
@@ -263,6 +268,7 @@ impl Terminal {
             },
             name,
             stopped: true,
+            process_running: false,
             save_logs: false,
             scrollback,
             health_check: None,
@@ -329,6 +335,7 @@ impl Terminal {
         self.writer = Some(writer);
         self.child = Some(child);
         self.master = Some(pair.master);
+        self.process_running = true;
 
         Ok(())
     }
@@ -550,6 +557,7 @@ impl Terminal {
 
         self.master = None;
         self.writer = None;
+        self.process_running = false;
     }
 
     /// Restarts the command process in this terminal.
@@ -622,9 +630,21 @@ impl Terminal {
         });
     }
 
+    /// Returns `true` if the child process is still running.
+    pub fn is_running(&self) -> bool {
+        !self.stopped
+    }
+
     /// Checks if the child process has exited and updates `stopped` accordingly.
     pub fn refresh_status(&mut self) {
         if self.stopped {
+            return;
+        }
+        if let Some(ref handler) = self.handler
+            && handler.is_finished()
+        {
+            self.stopped = true;
+            self.process_running = false;
             return;
         }
         if let Some(ref child) = self.child
@@ -632,7 +652,40 @@ impl Terminal {
             && process::waitpid_nohang(pid).unwrap_or(Some(0)).is_some()
         {
             self.stopped = true;
+            self.process_running = false;
+            return;
         }
+        self.update_process_running();
+    }
+
+    #[cfg(unix)]
+    fn update_process_running(&mut self) {
+        if let (Some(master), Some(child)) = (self.master.as_ref(), self.child.as_ref())
+            && let Some(fg_pgid) = master.process_group_leader()
+            && let Some(shell_pid) = child.process_id()
+        {
+            self.process_running = fg_pgid != shell_pid as libc::pid_t;
+            return;
+        }
+        // Fallback: check if shell has child processes
+        if let Some(ref child) = self.child
+            && let Some(pid) = child.process_id()
+        {
+            self.process_running = process::has_child_processes(pid);
+            return;
+        }
+        self.process_running = false;
+    }
+
+    #[cfg(not(unix))]
+    fn update_process_running(&mut self) {
+        if let Some(ref child) = self.child
+            && let Some(pid) = child.process_id()
+        {
+            self.process_running = process::has_child_processes(pid);
+            return;
+        }
+        self.process_running = !self.stopped;
     }
 }
 

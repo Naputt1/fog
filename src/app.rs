@@ -539,6 +539,7 @@ impl App {
             item.refresh_status();
             if let Some(entry) = self.tabs.entries.get_mut(i) {
                 entry.stopped = item.stopped;
+                entry.process_running = item.process_running;
                 entry.health_status = item.get_health_status();
             }
         }
