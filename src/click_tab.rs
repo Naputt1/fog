@@ -189,8 +189,11 @@ impl ClickTab {
         let items: Vec<ListItem> = self
             .entries
             .iter()
-            .map(|e| {
+            .enumerate()
+            .map(|(i, e)| {
                 let name = e.display_name();
+                let is_selected = i == self.index;
+
                 let status_span = if e.stopped {
                     Span::styled("○", Style::default().fg(theme.stopped))
                 } else if e.health_status == HealthStatus::Unhealthy {
@@ -200,31 +203,35 @@ impl ClickTab {
                 } else {
                     Span::styled("●", Style::default().fg(Color::DarkGray))
                 };
-                let line = Line::from(vec![status_span, Span::raw(format!(" {}", name))]);
-                let item = ListItem::new(line);
-                match e.kind {
-                    TabKind::Terminal => item.style(Style::default().fg(theme.terminal)),
-                    TabKind::Service => {
-                        if e.stopped {
-                            item.style(Style::default().fg(theme.stopped).dim())
-                        } else {
-                            item.style(Style::default())
-                        }
+
+                let name_style = if is_selected {
+                    Style::default().fg(theme.highlight).on_black().bold()
+                } else {
+                    match e.kind {
+                        TabKind::Terminal => Style::default().fg(theme.terminal),
+                        TabKind::Service if e.stopped => Style::default().fg(theme.stopped).dim(),
+                        TabKind::Proxy if e.stopped => Style::default().fg(theme.stopped).dim(),
+                        TabKind::Proxy => Style::default().fg(theme.proxy),
+                        _ => Style::default(),
                     }
-                    TabKind::Proxy => {
-                        if e.stopped {
-                            item.style(Style::default().fg(theme.stopped).dim())
-                        } else {
-                            item.style(Style::default().fg(theme.proxy))
-                        }
-                    }
-                }
+                };
+
+                let prefix_style = if is_selected {
+                    Style::default().fg(theme.highlight).on_black().bold()
+                } else {
+                    Style::default()
+                };
+
+                let prefix = if is_selected { "▸ " } else { "  " };
+                let prefix_span = Span::styled(prefix, prefix_style);
+                let name_span = Span::styled(format!(" {}", name), name_style);
+
+                let line = Line::from(vec![prefix_span, status_span, name_span]);
+                ListItem::new(line)
             })
             .collect();
 
-        let list = List::new(items)
-            .highlight_style(Style::default().fg(theme.highlight).on_black().bold())
-            .highlight_symbol("▸ ");
+        let list = List::new(items);
 
         self.list_state.select(Some(self.index));
         frame.render_stateful_widget(list, area, &mut self.list_state);
