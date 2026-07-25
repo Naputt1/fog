@@ -25,6 +25,7 @@ pub struct ThemeConfig {
     pub status_300: Option<String>,
     pub status_400: Option<String>,
     pub status_500: Option<String>,
+    pub scrollbar: Option<String>,
 }
 
 /// A single service entry in the config file.

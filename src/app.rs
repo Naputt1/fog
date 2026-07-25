@@ -29,7 +29,7 @@ enum Mode {
 }
 
 /// Main application state managing terminals, the proxy, tabs, and input handling.
-pub struct App {
+    pub struct App {
     items: Vec<Terminal>,
     proxy: Option<ProxyInstance>,
     sigint: Arc<AtomicBool>,
@@ -49,6 +49,7 @@ pub struct App {
     config_path: std::path::PathBuf,
     config_rx: std::sync::mpsc::Receiver<()>,
     proxy_tab_index: Option<usize>,
+    scrollbar_dragging: bool,
 }
 
 impl App {
@@ -111,6 +112,7 @@ impl App {
             config_path,
             config_rx,
             proxy_tab_index,
+            scrollbar_dragging: false,
         }
     }
 
@@ -168,6 +170,10 @@ impl App {
                         self.on_tab_switch();
                         return Ok(());
                     }
+                    if self.handle_scrollbar_click(mouse.column, mouse.row) {
+                        self.scrollbar_dragging = true;
+                        return Ok(());
+                    }
                     if let Some(pos) = selection::screen_to_content(
                         mouse.column,
                         mouse.row,
@@ -181,7 +187,9 @@ impl App {
                     }
                 }
                 MouseEventKind::Drag(MouseButton::Left) => {
-                    if self.selecting
+                    if self.scrollbar_dragging {
+                        self.handle_scrollbar_drag(mouse.row);
+                    } else if self.selecting
                         && let Some(pos) = selection::screen_to_content(
                             mouse.column,
                             mouse.row,
@@ -194,6 +202,9 @@ impl App {
                     }
                 }
                 MouseEventKind::Up(MouseButton::Left) => {
+                    if self.scrollbar_dragging {
+                        self.scrollbar_dragging = false;
+                    }
                     if self.selecting {
                         self.selecting = false;
                         if let (Some(start), Some(end)) = (self.select_start, self.select_end) {
@@ -218,6 +229,7 @@ impl App {
 
     fn on_tab_switch(&mut self) {
         self.scroll_offset = 0;
+        self.scrollbar_dragging = false;
         selection::clear_selection(
             &mut self.selecting,
             &mut self.select_start,
@@ -442,6 +454,47 @@ impl App {
         self.scroll_offset = target.min(max);
     }
 
+    fn handle_scrollbar_click(&mut self, col: u16, row: u16) -> bool {
+        let scrollbar_x = self.content_area.right().saturating_sub(2);
+        let scrollbar_y = self.content_area.y + 1;
+        let scrollbar_h = self.content_area.height.saturating_sub(2);
+
+        if col != scrollbar_x || row < scrollbar_y || row >= scrollbar_y + scrollbar_h {
+            return false;
+        }
+
+        if let Some(offset) = self.scrollbar_row_to_offset(row) {
+            self.scroll_to(offset);
+        }
+        true
+    }
+
+    fn handle_scrollbar_drag(&mut self, row: u16) {
+        if let Some(offset) = self.scrollbar_row_to_offset(row) {
+            self.scroll_to(offset);
+        }
+    }
+
+    fn scrollbar_row_to_offset(&self, row: u16) -> Option<usize> {
+        let scrollbar_y = self.content_area.y + 1;
+        let scrollbar_h = self.content_area.height.saturating_sub(2);
+        if scrollbar_h == 0 {
+            return None;
+        }
+
+        let total = self.current_total_lines();
+        let visible = self.content_height() as usize;
+        let max_scroll = total.saturating_sub(visible);
+        if max_scroll == 0 {
+            return None;
+        }
+
+        let row_clamped = row.clamp(scrollbar_y, scrollbar_y + scrollbar_h - 1);
+        let relative_y = (row_clamped - scrollbar_y) as usize;
+        let target_position = relative_y.saturating_mul(max_scroll) / scrollbar_h as usize;
+        Some(max_scroll.saturating_sub(target_position))
+    }
+
     fn content_height(&self) -> u16 {
         self.content_area.height.saturating_sub(2)
     }
@@ -535,6 +588,7 @@ impl App {
                 self.select_end,
                 in_terminal_input,
                 total_lines,
+                &self.theme,
             );
         }
 
@@ -614,6 +668,7 @@ mod tests {
             config_path: std::path::PathBuf::new(),
             config_rx: rx,
             proxy_tab_index,
+            scrollbar_dragging: false,
         }
     }
 

@@ -76,7 +76,8 @@
         "status_200": { "type": "string" },
         "status_300": { "type": "string" },
         "status_400": { "type": "string" },
-        "status_500": { "type": "string" }
+        "status_500": { "type": "string" },
+        "scrollbar": { "type": "string" }
       }
     }
 }

@@ -10,6 +10,7 @@ pub struct Theme {
     pub status_300: Color,
     pub status_400: Color,
     pub status_500: Color,
+    pub scrollbar: Color,
 }
 
 impl Default for Theme {
@@ -23,6 +24,7 @@ impl Default for Theme {
             status_300: Color::Yellow,
             status_400: Color::Red,
             status_500: Color::Red,
+            scrollbar: Color::DarkGray,
         }
     }
 }
@@ -88,6 +90,9 @@ impl Theme {
             }
             if let Some(ref v) = c.status_500 {
                 theme.status_500 = parse_color(v);
+            }
+            if let Some(ref v) = c.scrollbar {
+                theme.scrollbar = parse_color(v);
             }
         }
         theme
@@ -159,6 +164,7 @@ mod tests {
         assert_eq!(t.status_300, Color::Yellow);
         assert_eq!(t.status_400, Color::Red);
         assert_eq!(t.status_500, Color::Red);
+        assert_eq!(t.scrollbar, Color::DarkGray);
     }
 
     #[test]
@@ -178,6 +184,7 @@ mod tests {
             status_300: None,
             status_400: None,
             status_500: None,
+            scrollbar: None,
         };
         let t = Theme::from_config(Some(&config));
         assert_eq!(t.proxy, Color::Yellow);
@@ -195,6 +202,7 @@ mod tests {
             status_300: Some("yellow".into()),
             status_400: Some("magenta".into()),
             status_500: Some("light_red".into()),
+            scrollbar: Some("gray".into()),
         };
         let t = Theme::from_config(Some(&config));
         assert_eq!(t.proxy, Color::Red);
@@ -205,5 +213,6 @@ mod tests {
         assert_eq!(t.status_300, Color::Yellow);
         assert_eq!(t.status_400, Color::Magenta);
         assert_eq!(t.status_500, Color::LightRed);
+        assert_eq!(t.scrollbar, Color::Gray);
     }
 }

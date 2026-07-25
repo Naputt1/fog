@@ -4,10 +4,10 @@ use crate::terminal::Terminal;
 use crate::theme::Theme;
 use ratatui::{
     Frame,
-    layout::{Margin, Position, Rect},
+    layout::{Constraint, Layout, Margin, Position, Rect},
     style::{Style, Stylize},
     text::{Line, Span, Text},
-    widgets::{Block, Paragraph, Wrap},
+    widgets::{Block, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -49,6 +49,14 @@ pub(crate) fn draw_proxy_content(
     let header_lines: usize = if mode_filter_active { 4 } else { 3 };
     let total = filtered_logs.len() + header_lines;
     let offset = scroll_offset.min(total.saturating_sub(visible_height));
+
+    let scrollbar_shown = inner.width > 2 && total > visible_height;
+    let (text_area, scrollbar_area) = if scrollbar_shown {
+        let chunks = Layout::horizontal([Constraint::Min(1), Constraint::Length(1)]).split(inner);
+        (chunks[0], chunks[1])
+    } else {
+        (inner, Rect::default())
+    };
 
     let mut lines: Vec<Line<'static>> = Vec::new();
 
@@ -128,10 +136,13 @@ pub(crate) fn draw_proxy_content(
         lines.push(Line::from(" no requests yet"));
     }
 
-    let widget = Paragraph::new(Text::from(lines))
-        .block(block)
-        .wrap(Wrap { trim: false });
-    frame.render_widget(widget, area);
+    frame.render_widget(block, area);
+    let widget = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
+    frame.render_widget(widget, text_area);
+
+    if scrollbar_shown {
+        render_scrollbar(frame, scrollbar_area, total, visible_height, scroll_offset, theme);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -146,6 +157,7 @@ pub(crate) fn draw_terminal_content(
     select_end: Option<(usize, usize)>,
     in_terminal_input: bool,
     current_total_lines: usize,
+    theme: &Theme,
 ) {
     let inner = content_area.inner(Margin {
         horizontal: 1,
@@ -153,8 +165,16 @@ pub(crate) fn draw_terminal_content(
     });
     let visible_height = inner.height;
 
+    let scrollbar_shown = inner.width > 2 && current_total_lines > visible_height as usize;
+    let (text_area, scrollbar_area) = if scrollbar_shown {
+        let chunks = Layout::horizontal([Constraint::Min(1), Constraint::Length(1)]).split(inner);
+        (chunks[0], chunks[1])
+    } else {
+        (inner, Rect::default())
+    };
+
     if let Some(item) = items.get_mut(tab_index) {
-        item.resize(inner.width, visible_height);
+        item.resize(text_area.width, visible_height);
     }
 
     let (mut lines, _total) = match items.get_mut(tab_index) {
@@ -169,17 +189,13 @@ pub(crate) fn draw_terminal_content(
         current_total_lines,
     );
 
-    if scroll_offset > 0 && !lines.is_empty() {
-        lines.push(Line::from(vec![Span::styled(
-            format!(" ↑ scrolled up {} lines", scroll_offset),
-            Style::default().dim(),
-        )]));
-    }
+    frame.render_widget(block, content_area);
+    let widget = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
+    frame.render_widget(widget, text_area);
 
-    let widget = Paragraph::new(Text::from(lines))
-        .block(block)
-        .wrap(Wrap { trim: false });
-    frame.render_widget(widget, content_area);
+    if scrollbar_shown {
+        render_scrollbar(frame, scrollbar_area, current_total_lines, visible_height as usize, scroll_offset, theme);
+    }
 
     if in_terminal_input
         && scroll_offset == 0
@@ -238,6 +254,28 @@ pub(crate) fn draw_instructions(
             "new-term".blue().bold(),
         ])
     }
+}
+
+fn render_scrollbar(
+    frame: &mut Frame,
+    scrollbar_area: Rect,
+    total_lines: usize,
+    visible_height: usize,
+    scroll_offset: usize,
+    theme: &Theme,
+) {
+    if scrollbar_area.width == 0 || total_lines <= visible_height {
+        return;
+    }
+    let max_scroll = total_lines.saturating_sub(visible_height);
+    let position = max_scroll.saturating_sub(scroll_offset);
+    let mut state = ScrollbarState::new(max_scroll + 1).position(position);
+    let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+        .thumb_symbol("█")
+        .thumb_style(Style::default().fg(theme.scrollbar))
+        .track_symbol(Some("░"))
+        .track_style(Style::default().fg(theme.scrollbar).dim());
+    frame.render_stateful_widget(scrollbar, scrollbar_area, &mut state);
 }
 
 fn truncate(s: &str, max: usize) -> String {
