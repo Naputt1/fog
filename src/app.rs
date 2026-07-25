@@ -31,7 +31,7 @@ enum Mode {
 }
 
 /// Main application state managing terminals, the proxy, tabs, and input handling.
-    pub struct App {
+pub struct App {
     items: Vec<Terminal>,
     proxy: Option<ProxyInstance>,
     sigint: Arc<AtomicBool>,

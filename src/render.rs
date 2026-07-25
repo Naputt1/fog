@@ -141,7 +141,14 @@ pub(crate) fn draw_proxy_content(
     frame.render_widget(widget, text_area);
 
     if scrollbar_shown {
-        render_scrollbar(frame, scrollbar_area, total, visible_height, scroll_offset, theme);
+        render_scrollbar(
+            frame,
+            scrollbar_area,
+            total,
+            visible_height,
+            scroll_offset,
+            theme,
+        );
     }
 }
 
@@ -194,7 +201,14 @@ pub(crate) fn draw_terminal_content(
     frame.render_widget(widget, text_area);
 
     if scrollbar_shown {
-        render_scrollbar(frame, scrollbar_area, current_total_lines, visible_height as usize, scroll_offset, theme);
+        render_scrollbar(
+            frame,
+            scrollbar_area,
+            current_total_lines,
+            visible_height as usize,
+            scroll_offset,
+            theme,
+        );
     }
 
     if in_terminal_input
