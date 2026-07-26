@@ -37,6 +37,8 @@ pub enum Init {
 /// Health check status for a terminal.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum HealthStatus {
+    /// Service is waiting for dependencies to start.
+    Pending,
     Unknown,
     Healthy,
     Unhealthy,
@@ -56,8 +58,8 @@ pub struct Terminal {
     pub save_logs: bool,
     /// Number of scrollback lines in the parser.
     pub scrollback: usize,
-    /// Optional health check configuration.
-    pub health_check: Option<HealthCheckConfig>,
+    /// Health check configurations (empty if none).
+    pub health_checks: Vec<HealthCheckConfig>,
     parser: Arc<Mutex<vt100::Parser>>,
     health_status: Arc<Mutex<HealthStatus>>,
     screen_generation: Arc<AtomicUsize>,
@@ -77,7 +79,7 @@ impl std::fmt::Debug for Terminal {
             .field("stopped", &self.stopped)
             .field("process_running", &self.process_running)
             .field("scrollback", &self.scrollback)
-            .field("health_check", &self.health_check)
+            .field("health_checks", &self.health_checks)
             .field("handler", &self.handler)
             .field("child", &self.child)
             .finish()
@@ -194,7 +196,7 @@ impl Terminal {
             process_running: false,
             save_logs: false,
             scrollback,
-            health_check: None,
+            health_checks: vec![],
             parser,
             health_status: Arc::new(Mutex::new(HealthStatus::Unknown)),
             screen_generation,
@@ -234,7 +236,7 @@ impl Terminal {
             process_running: true,
             save_logs: false,
             scrollback,
-            health_check: None,
+            health_checks: vec![],
             parser: Arc::new(Mutex::new(vt100::Parser::new(24, 80, scrollback))),
             health_status: Arc::new(Mutex::new(HealthStatus::Unknown)),
             screen_generation: Arc::new(AtomicUsize::new(0)),
@@ -271,7 +273,7 @@ impl Terminal {
             process_running: false,
             save_logs: false,
             scrollback,
-            health_check: None,
+            health_checks: vec![],
             parser,
             health_status: Arc::new(Mutex::new(HealthStatus::Unhealthy)),
             screen_generation: Arc::new(AtomicUsize::new(0)),
@@ -281,6 +283,65 @@ impl Terminal {
             child: None,
             master: None,
         }
+    }
+
+    /// Creates a pending terminal that displays a "waiting for dependencies" message.
+    /// No process is spawned — the terminal is upgraded later via [`start`](Self::start).
+    ///
+    /// # Arguments
+    /// * `name` - The display name for the terminal tab.
+    /// * `scrollback` - Number of scrollback lines.
+    /// * `deps` - Names of the dependencies this service is waiting for.
+    pub fn spawn_pending(name: String, scrollback: usize, deps: &[String]) -> Self {
+        let message = format!("⏳ waiting for: {}", deps.join(", "));
+        let parser = Arc::new(Mutex::new(vt100::Parser::new(24, 80, scrollback)));
+        {
+            let mut p = parser.lock().unwrap_or_else(|e| e.into_inner());
+            p.screen_mut().set_size(24, 80);
+            p.process(message.as_bytes());
+        }
+
+        Self {
+            init: Init::Command {
+                path: String::new(),
+                cmd: String::new(),
+            },
+            name,
+            stopped: false,
+            process_running: false,
+            save_logs: false,
+            scrollback,
+            health_checks: vec![],
+            parser,
+            health_status: Arc::new(Mutex::new(HealthStatus::Pending)),
+            screen_generation: Arc::new(AtomicUsize::new(0)),
+            line_cache: RefCell::new(None),
+            handler: None,
+            writer: None,
+            child: None,
+            master: None,
+        }
+    }
+
+    /// Starts a command in this terminal, upgrading it from a pending state.
+    ///
+    /// # Arguments
+    /// * `path` - The working directory for the command.
+    /// * `cmd` - The shell command to execute.
+    ///
+    /// # Errors
+    /// Returns an error if the PTY could not be opened or the shell could not be spawned.
+    pub fn start(&mut self, path: &str, cmd: &str) -> io::Result<()> {
+        *self.health_status.lock().unwrap_or_else(|e| e.into_inner()) = HealthStatus::Unknown;
+        self.spawn_into(path, cmd)
+    }
+
+    /// Returns `true` if the service is running and (if health checks are configured) healthy.
+    pub fn is_ready(&self) -> bool {
+        if self.health_checks.is_empty() {
+            return !self.stopped && self.process_running;
+        }
+        *self.health_status.lock().unwrap_or_else(|e| e.into_inner()) == HealthStatus::Healthy
     }
 
     fn spawn_into(&mut self, path: &str, cmd: &str) -> io::Result<()> {
@@ -584,44 +645,52 @@ impl Terminal {
         *self.health_status.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Starts a background thread that periodically runs the configured health check.
+    /// Starts a background thread that periodically runs all configured health checks.
+    /// The service is considered healthy only when ALL checks pass.
     pub fn start_health_checks(&self) {
-        let config = match &self.health_check {
-            Some(c) => c.clone(),
-            None => return,
-        };
+        let configs: Vec<HealthCheckConfig> = self.health_checks.clone();
+        if configs.is_empty() {
+            return;
+        }
         let status = self.health_status.clone();
 
         thread::spawn(move || {
+            let min_interval = configs
+                .iter()
+                .map(|c| c.interval_ms.unwrap_or(5000))
+                .min()
+                .unwrap_or(5000);
             loop {
-                thread::sleep(std::time::Duration::from_millis(
-                    config.interval_ms.unwrap_or(5000),
-                ));
-                let target = config.target.clone();
-                let timeout = config.timeout_ms.unwrap_or(2000);
-                let healthy = match config.kind {
-                    crate::config::HealthCheckKind::Tcp | crate::config::HealthCheckKind::Http => {
-                        let addr = target
-                            .trim_start_matches("tcp://")
-                            .trim_start_matches("http://")
-                            .trim_start_matches("https://");
-                        match addr.to_socket_addrs() {
-                            Ok(mut addrs) => addrs
-                                .next()
-                                .map(|sa| {
+                thread::sleep(std::time::Duration::from_millis(min_interval));
+                let mut all_healthy = true;
+                for config in &configs {
+                    let target = config.target.clone();
+                    let timeout = config.timeout_ms.unwrap_or(2000);
+                    let healthy = match config.kind {
+                        crate::config::HealthCheckKind::Tcp
+                        | crate::config::HealthCheckKind::Http => {
+                            let addr = target
+                                .trim_start_matches("tcp://")
+                                .trim_start_matches("http://")
+                                .trim_start_matches("https://");
+                            match addr.to_socket_addrs() {
+                                Ok(mut addrs) => addrs.next().map_or(false, |sa| {
                                     std::net::TcpStream::connect_timeout(
                                         &sa,
                                         std::time::Duration::from_millis(timeout),
                                     )
                                     .is_ok()
-                                })
-                                .unwrap_or(false),
-                            Err(_) => false,
+                                }),
+                                Err(_) => false,
+                            }
                         }
+                    };
+                    if !healthy {
+                        all_healthy = false;
                     }
-                };
+                }
                 let mut s = status.lock().expect("health status mutex poisoned");
-                *s = if healthy {
+                *s = if all_healthy {
                     HealthStatus::Healthy
                 } else {
                     HealthStatus::Unhealthy
@@ -638,6 +707,9 @@ impl Terminal {
     /// Checks if the child process has exited and updates `stopped` accordingly.
     pub fn refresh_status(&mut self) {
         if self.stopped {
+            return;
+        }
+        if *self.health_status.lock().unwrap_or_else(|e| e.into_inner()) == HealthStatus::Pending {
             return;
         }
         if let Some(ref handler) = self.handler

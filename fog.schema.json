@@ -11,15 +11,37 @@
           "name": { "type": "string" },
           "path": { "type": "string" },
           "cmd": { "type": "string" },
+          "depends_on": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Names of services this service depends on"
+          },
           "health_check": {
-            "type": "object",
-            "required": ["kind", "target"],
-            "properties": {
-              "kind": { "type": "string", "enum": ["tcp", "http"] },
-              "target": { "type": "string" },
-              "interval_ms": { "type": "integer", "minimum": 100, "default": 5000 },
-              "timeout_ms": { "type": "integer", "minimum": 100, "default": 2000 }
-            }
+            "oneOf": [
+              {
+                "type": "object",
+                "required": ["kind", "target"],
+                "properties": {
+                  "kind": { "type": "string", "enum": ["tcp", "http"] },
+                  "target": { "type": "string" },
+                  "interval_ms": { "type": "integer", "minimum": 100, "default": 5000 },
+                  "timeout_ms": { "type": "integer", "minimum": 100, "default": 2000 }
+                }
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["kind", "target"],
+                  "properties": {
+                    "kind": { "type": "string", "enum": ["tcp", "http"] },
+                    "target": { "type": "string" },
+                    "interval_ms": { "type": "integer", "minimum": 100, "default": 5000 },
+                    "timeout_ms": { "type": "integer", "minimum": 100, "default": 2000 }
+                  }
+                }
+              }
+            ]
           }
         }
       }

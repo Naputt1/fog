@@ -5,12 +5,13 @@ use crossterm::event::EnableMouseCapture;
 use crossterm::execute;
 use crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
 use std::io::stdout;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{fs, io};
 
-use fog::app::App;
-use fog::config::Config;
+use fog::app::{App, PendingService};
+use fog::config::{Config, HealthCheckConfig, HealthCheckSpec};
 use fog::config_watcher;
 use fog::proxy::{ProxyInstance, RouteEntry};
 use fog::terminal::Terminal;
@@ -29,6 +30,86 @@ struct Cli {
     /// Save service output to `temp/<name>.txt` on exit.
     #[arg(long, help = "Save service output to temp/<name>.txt on exit")]
     save_logs: bool,
+}
+
+/// Resolves service startup order using topological sort (Kahn's algorithm).
+/// Returns indices into `entries` in dependency order, or an error if there
+/// is a cycle or a dependency references an unknown service name.
+fn resolve_dep_order(entries: &[fog::config::ConfigEntry]) -> Result<Vec<usize>, String> {
+    let name_to_idx: HashMap<&str, usize> = entries
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            let name = e.name.clone().unwrap_or_else(|| {
+                std::path::Path::new(&e.path)
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned()
+            });
+            // Use leak to get a &'static str from the owned String — safe because
+            // entries live for the rest of the program and we only need the map
+            // during this function.
+            let leaked: &'static str = Box::leak(name.into_boxed_str());
+            (leaked, i)
+        })
+        .collect();
+
+    for entry in entries {
+        if let Some(deps) = &entry.depends_on {
+            for dep in deps {
+                if !name_to_idx.contains_key(dep.as_str()) {
+                    let entry_name = entry
+                        .name
+                        .as_deref()
+                        .unwrap_or_else(|| {
+                            std::path::Path::new(&entry.path)
+                                .file_name()
+                                .unwrap_or_default()
+                                .to_str()
+                                .unwrap_or("?")
+                        });
+                    return Err(format!(
+                        "service '{}' depends on unknown service '{}'",
+                        entry_name, dep
+                    ));
+                }
+            }
+        }
+    }
+
+    let n = entries.len();
+    let mut in_degree = vec![0usize; n];
+    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+
+    for (i, entry) in entries.iter().enumerate() {
+        if let Some(deps) = &entry.depends_on {
+            for dep in deps {
+                let dep_idx = name_to_idx[dep.as_str()];
+                adj[dep_idx].push(i);
+                in_degree[i] += 1;
+            }
+        }
+    }
+
+    let mut queue: Vec<usize> = (0..n).filter(|i| in_degree[*i] == 0).collect();
+    let mut order = Vec::new();
+
+    while let Some(idx) = queue.pop() {
+        order.push(idx);
+        for &next in &adj[idx] {
+            in_degree[next] -= 1;
+            if in_degree[next] == 0 {
+                queue.push(next);
+            }
+        }
+    }
+
+    if order.len() != n {
+        return Err("circular dependency detected between services".to_string());
+    }
+
+    Ok(order)
 }
 
 fn main() -> io::Result<()> {
@@ -89,31 +170,72 @@ fn main() -> io::Result<()> {
         .unwrap_or(30);
     let theme = Theme::from_config(config.theme.as_ref());
 
-    let items: Vec<Terminal> = config
-        .service
-        .unwrap_or_default()
-        .into_iter()
-        .map(|entry| {
-            let service_path = config_dir.join(&entry.path);
-            let name = entry.name.clone().unwrap_or_else(|| {
-                service_path
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned()
+    let entries = config.service.unwrap_or_default();
+    let dep_order = resolve_dep_order(&entries).unwrap_or_else(|e| {
+        eprintln!("error: {}", e);
+        std::process::exit(1);
+    });
+
+    let n = entries.len();
+    let mut items: Vec<Option<Terminal>> = (0..n).map(|_| None).collect();
+    let mut pending_services: Vec<PendingService> = Vec::new();
+
+    for &idx in &dep_order {
+        let entry = &entries[idx];
+        let service_path = config_dir.join(&entry.path);
+        let name = entry.name.clone().unwrap_or_else(|| {
+            service_path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned()
+        });
+        let service_path_str = service_path.to_string_lossy().into_owned();
+
+        let health_checks: Vec<HealthCheckConfig> = match &entry.health_check {
+            Some(HealthCheckSpec::Single(c)) => vec![c.clone()],
+            Some(HealthCheckSpec::Multiple(v)) => v.clone(),
+            None => vec![],
+        };
+
+        let has_deps = entry.depends_on.is_some();
+
+        let terminal = if has_deps {
+            let deps = entry.depends_on.clone().unwrap_or_default();
+            let mut t = Terminal::spawn_pending(name.clone(), scrollback, &deps);
+            t.save_logs = cli.save_logs;
+            pending_services.push(PendingService {
+                name: name.clone(),
+                cmd: entry.cmd.clone(),
+                path: service_path_str,
+                scrollback,
+                save_logs: cli.save_logs,
+                dep_names: deps,
+                health_checks,
+                tab_index: idx,
             });
-            let service_path = service_path.to_string_lossy().into_owned();
-            match Terminal::spawn_command(&service_path, &entry.cmd, name.clone(), scrollback) {
+            t
+        } else {
+            match Terminal::spawn_command(&service_path_str, &entry.cmd, name.clone(), scrollback) {
                 Ok(mut t) => {
                     t.save_logs = cli.save_logs;
-                    t.health_check = entry.health_check.clone();
+                    t.health_checks = health_checks;
                     t.start_health_checks();
                     t
                 }
-                Err(e) => Terminal::spawn_error(name, format!("Failed to spawn: {e}"), scrollback),
+                Err(e) => {
+                    Terminal::spawn_error(
+                        name.clone(),
+                        format!("Failed to spawn: {e}"),
+                        scrollback,
+                    )
+                }
             }
-        })
-        .collect();
+        };
+        items[idx] = Some(terminal);
+    }
+
+    let items: Vec<Terminal> = items.into_iter().map(|t| t.expect("all items should be filled")).collect();
 
     let proxy = config.proxy.map(|pc| {
         let routes: Vec<RouteEntry> = pc
@@ -144,6 +266,7 @@ fn main() -> io::Result<()> {
     ratatui::run(|terminal| {
         App::new(
             items,
+            pending_services,
             proxy,
             sigint,
             scrollback,

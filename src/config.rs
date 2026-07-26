@@ -28,6 +28,14 @@ pub struct ThemeConfig {
     pub scrollbar: Option<String>,
 }
 
+/// Accepts either a single health check object or an array of health checks.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum HealthCheckSpec {
+    Single(HealthCheckConfig),
+    Multiple(Vec<HealthCheckConfig>),
+}
+
 /// A single service entry in the config file.
 #[derive(Debug, Deserialize)]
 pub struct ConfigEntry {
@@ -37,8 +45,10 @@ pub struct ConfigEntry {
     pub path: String,
     /// Shell command to start the service.
     pub cmd: String,
-    /// Optional health check configuration.
-    pub health_check: Option<HealthCheckConfig>,
+    /// Optional health check configuration (single object or array).
+    pub health_check: Option<HealthCheckSpec>,
+    /// Names of services this service depends on.
+    pub depends_on: Option<Vec<String>>,
 }
 
 /// A route definition for the reverse proxy.

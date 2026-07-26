@@ -1,10 +1,11 @@
 use crate::click_tab::{ClickTab, TabKind};
+use crate::config::HealthCheckConfig;
 use crate::config_watcher;
 use crate::keybinding;
 use crate::proxy::ProxyInstance;
 use crate::render;
 use crate::selection;
-use crate::terminal::Terminal;
+use crate::terminal::{HealthStatus, Terminal};
 use crate::theme::Theme;
 use crossterm::event::{
     self, DisableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton,
@@ -30,9 +31,30 @@ enum Mode {
     ProxyFilter,
 }
 
+/// A service waiting for its dependencies to become ready.
+pub struct PendingService {
+    /// Display name of the service.
+    pub name: String,
+    /// Shell command to execute.
+    pub cmd: String,
+    /// Working directory path.
+    pub path: String,
+    /// Maximum scrollback lines.
+    pub scrollback: usize,
+    /// Whether to save logs on exit.
+    pub save_logs: bool,
+    /// Names of services this depends on.
+    pub dep_names: Vec<String>,
+    /// Health check configurations for this service.
+    pub health_checks: Vec<HealthCheckConfig>,
+    /// Index in the `items` vec where this service's terminal lives.
+    pub tab_index: usize,
+}
+
 /// Main application state managing terminals, the proxy, tabs, and input handling.
 pub struct App {
     items: Vec<Terminal>,
+    pending_services: Vec<PendingService>,
     proxy: Option<ProxyInstance>,
     sigint: Arc<AtomicBool>,
     theme: Theme,
@@ -69,6 +91,7 @@ impl App {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         items: Vec<Terminal>,
+        pending_services: Vec<PendingService>,
         proxy: Option<ProxyInstance>,
         sigint: Arc<AtomicBool>,
         scrollback: usize,
@@ -87,17 +110,23 @@ impl App {
                 TabKind::Service
             };
         }
+        // Mark pending service tabs
+        for ps in &pending_services {
+            if let Some(entry) = tabs.entries.get_mut(ps.tab_index) {
+                entry.pending = true;
+            }
+        }
 
         let proxy_tab_index = if proxy.is_some() {
-            let idx = items.len();
-            tabs.add("proxy".to_string(), TabKind::Proxy);
-            Some(idx)
+            tabs.insert_at(0, "proxy".to_string(), TabKind::Proxy);
+            Some(0)
         } else {
             None
         };
 
         Self {
             items,
+            pending_services,
             proxy,
             sigint,
             scrollback,
@@ -437,8 +466,8 @@ impl App {
     fn new_terminal(&mut self) {
         match Terminal::spawn_shell("bash".to_string(), self.scrollback) {
             Ok(term) => {
-                let insertion_idx = self.proxy_tab_index.unwrap_or(self.items.len());
-                self.items.insert(insertion_idx, term);
+                let insertion_idx = self.items.len();
+                self.items.push(term);
                 self.tabs
                     .insert_at(insertion_idx, "bash".to_string(), TabKind::Terminal);
                 self.tabs.index = insertion_idx;
@@ -596,11 +625,14 @@ impl App {
         let content_area = main[0];
         let sidebar_area = main[1];
 
+        self.check_pending();
+
         for (i, item) in self.items.iter_mut().enumerate() {
             item.refresh_status();
             if let Some(entry) = self.tabs.entries.get_mut(i) {
                 entry.stopped = item.stopped;
                 entry.process_running = item.process_running;
+                entry.pending = item.get_health_status() == HealthStatus::Pending;
                 entry.health_status = item.get_health_status();
             }
         }
@@ -699,6 +731,51 @@ impl App {
             frame.render_widget(help, overlay_area);
         }
     }
+
+    /// Checks pending services and starts them once all dependencies are ready.
+    fn check_pending(&mut self) {
+        let ready = self
+            .pending_services
+            .iter()
+            .map(|ps| {
+                let all_deps_ready = ps.dep_names.iter().all(|dep| {
+                    self.items
+                        .iter()
+                        .find(|t| t.name == *dep)
+                        .map(|t| t.is_ready())
+                        .unwrap_or(false)
+                });
+                (ps.tab_index, all_deps_ready)
+            })
+            .collect::<Vec<_>>();
+
+        // Process in reverse index order so removals don't shift pending positions
+        for (tab_index, all_ready) in ready.into_iter().rev() {
+            if !all_ready {
+                continue;
+            }
+            let ps_idx = self
+                .pending_services
+                .iter()
+                .position(|p| p.tab_index == tab_index);
+            let Some(idx) = ps_idx else { continue };
+            let ps = self.pending_services.remove(idx);
+
+            if let Some(item) = self.items.get_mut(tab_index) {
+                if item.start(&ps.path, &ps.cmd).is_ok() {
+                    item.health_checks = ps.health_checks;
+                    item.save_logs = ps.save_logs;
+                    if !item.health_checks.is_empty() {
+                        item.start_health_checks();
+                    }
+                }
+                // Update tab entry
+                if let Some(entry) = self.tabs.entries.get_mut(tab_index) {
+                    entry.pending = false;
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -719,6 +796,7 @@ mod tests {
         let (_tx, rx) = mpsc::channel();
         App {
             items,
+            pending_services: vec![],
             proxy,
             sigint: Arc::new(AtomicBool::new(false)),
             theme: Theme::default(),

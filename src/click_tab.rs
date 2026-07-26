@@ -30,6 +30,8 @@ pub struct TabEntry {
     pub stopped: bool,
     /// Whether a command/process is actively running in this terminal.
     pub process_running: bool,
+    /// Whether the service is waiting for dependencies.
+    pub pending: bool,
     /// Health check status.
     pub health_status: HealthStatus,
 }
@@ -76,6 +78,7 @@ impl ClickTab {
                 kind: TabKind::Service,
                 stopped: false,
                 process_running: false,
+                pending: false,
                 health_status: HealthStatus::Unknown,
             })
             .collect();
@@ -102,6 +105,7 @@ impl ClickTab {
             kind,
             stopped: false,
             process_running: false,
+            pending: false,
             health_status: HealthStatus::Unknown,
         });
         self.index = self.entries.len() - 1;
@@ -122,6 +126,7 @@ impl ClickTab {
                 kind,
                 stopped: false,
                 process_running: false,
+                pending: false,
                 health_status: HealthStatus::Unknown,
             },
         );
@@ -194,7 +199,9 @@ impl ClickTab {
                 let name = e.display_name();
                 let is_selected = i == self.index;
 
-                let status_span = if e.stopped {
+                let status_span = if e.pending {
+                    Span::styled("◌", Style::default().fg(Color::Yellow).bold())
+                } else if e.stopped {
                     Span::styled("○", Style::default().fg(theme.stopped))
                 } else if e.health_status == HealthStatus::Unhealthy {
                     Span::styled("●", Style::default().fg(Color::Red).bold())
@@ -335,6 +342,7 @@ mod tests {
             kind: TabKind::Service,
             stopped: false,
             process_running: false,
+            pending: false,
             health_status: HealthStatus::Unknown,
         };
         assert_eq!(e.display_name(), "myservice");
@@ -347,6 +355,7 @@ mod tests {
             kind: TabKind::Terminal,
             stopped: false,
             process_running: false,
+            pending: false,
             health_status: HealthStatus::Unknown,
         };
         assert_eq!(e.display_name(), "$ bash");
@@ -359,6 +368,7 @@ mod tests {
             kind: TabKind::Proxy,
             stopped: false,
             process_running: false,
+            pending: false,
             health_status: HealthStatus::Unknown,
         };
         assert_eq!(e.display_name(), "▶ proxy");
