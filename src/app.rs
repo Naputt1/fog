@@ -47,6 +47,8 @@ pub struct PendingService {
     pub dep_names: Vec<String>,
     /// Health check configurations for this service.
     pub health_checks: Vec<HealthCheckConfig>,
+    /// Shell command to run on shutdown.
+    pub shutdown_cmd: Option<String>,
     /// Index in the `items` vec where this service's terminal lives.
     pub tab_index: usize,
 }
@@ -764,6 +766,7 @@ impl App {
             if let Some(item) = self.items.get_mut(tab_index) {
                 if item.start(&ps.path, &ps.cmd).is_ok() {
                     item.health_checks = ps.health_checks;
+                    item.shutdown_cmd = ps.shutdown_cmd;
                     item.save_logs = ps.save_logs;
                     if !item.health_checks.is_empty() {
                         item.start_health_checks();

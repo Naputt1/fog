@@ -212,14 +212,17 @@ fn main() -> io::Result<()> {
                 save_logs: cli.save_logs,
                 dep_names: deps,
                 health_checks,
+                shutdown_cmd: entry.shutdown_cmd.clone(),
                 tab_index: idx,
             });
             t
         } else {
+            let shutdown_cmd = entry.shutdown_cmd.clone();
             match Terminal::spawn_command(&service_path_str, &entry.cmd, name.clone(), scrollback) {
                 Ok(mut t) => {
                     t.save_logs = cli.save_logs;
                     t.health_checks = health_checks;
+                    t.shutdown_cmd = shutdown_cmd;
                     t.start_health_checks();
                     t
                 }

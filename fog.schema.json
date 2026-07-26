@@ -16,6 +16,10 @@
             "items": { "type": "string" },
             "description": "Names of services this service depends on"
           },
+          "shutdown_cmd": {
+            "type": "string",
+            "description": "Shell command to run when fog shuts down (e.g. docker compose down)"
+          },
           "health_check": {
             "oneOf": [
               {

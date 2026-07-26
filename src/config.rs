@@ -49,6 +49,8 @@ pub struct ConfigEntry {
     pub health_check: Option<HealthCheckSpec>,
     /// Names of services this service depends on.
     pub depends_on: Option<Vec<String>>,
+    /// Shell command to run when fog shuts down (e.g. "docker compose down").
+    pub shutdown_cmd: Option<String>,
 }
 
 /// A route definition for the reverse proxy.

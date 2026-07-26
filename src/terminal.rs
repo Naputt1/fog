@@ -60,6 +60,8 @@ pub struct Terminal {
     pub scrollback: usize,
     /// Health check configurations (empty if none).
     pub health_checks: Vec<HealthCheckConfig>,
+    /// Shell command to run on shutdown (e.g. "docker compose down").
+    pub shutdown_cmd: Option<String>,
     parser: Arc<Mutex<vt100::Parser>>,
     health_status: Arc<Mutex<HealthStatus>>,
     screen_generation: Arc<AtomicUsize>,
@@ -80,6 +82,7 @@ impl std::fmt::Debug for Terminal {
             .field("process_running", &self.process_running)
             .field("scrollback", &self.scrollback)
             .field("health_checks", &self.health_checks)
+            .field("shutdown_cmd", &self.shutdown_cmd)
             .field("handler", &self.handler)
             .field("child", &self.child)
             .finish()
@@ -197,6 +200,7 @@ impl Terminal {
             save_logs: false,
             scrollback,
             health_checks: vec![],
+            shutdown_cmd: None,
             parser,
             health_status: Arc::new(Mutex::new(HealthStatus::Unknown)),
             screen_generation,
@@ -237,6 +241,7 @@ impl Terminal {
             save_logs: false,
             scrollback,
             health_checks: vec![],
+            shutdown_cmd: None,
             parser: Arc::new(Mutex::new(vt100::Parser::new(24, 80, scrollback))),
             health_status: Arc::new(Mutex::new(HealthStatus::Unknown)),
             screen_generation: Arc::new(AtomicUsize::new(0)),
@@ -274,6 +279,7 @@ impl Terminal {
             save_logs: false,
             scrollback,
             health_checks: vec![],
+            shutdown_cmd: None,
             parser,
             health_status: Arc::new(Mutex::new(HealthStatus::Unhealthy)),
             screen_generation: Arc::new(AtomicUsize::new(0)),
@@ -312,6 +318,7 @@ impl Terminal {
             save_logs: false,
             scrollback,
             health_checks: vec![],
+            shutdown_cmd: None,
             parser,
             health_status: Arc::new(Mutex::new(HealthStatus::Pending)),
             screen_generation: Arc::new(AtomicUsize::new(0)),
@@ -771,6 +778,29 @@ impl Drop for Terminal {
             let _ = fs::write(format!("temp/{}.txt", self.name), &text);
         }
         self.kill_inner();
+        if let Some(ref shutdown_cmd) = self.shutdown_cmd {
+            let cwd = match &self.init {
+                Init::Command { path, .. } if !path.is_empty() => Some(path.as_str()),
+                _ => None,
+            };
+            let mut cmd = std::process::Command::new("sh");
+            cmd.args(["-c", shutdown_cmd])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            if let Some(dir) = cwd {
+                cmd.current_dir(dir);
+            }
+            #[cfg(unix)]
+            unsafe {
+                use std::os::unix::process::CommandExt;
+                cmd.pre_exec(|| {
+                    libc::setsid();
+                    Ok(())
+                });
+            }
+            let _ = cmd.spawn();
+        }
     }
 }
 
