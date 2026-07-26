@@ -1,6 +1,7 @@
 use crate::click_tab::{ClickTab, TabKind};
 use crate::config::HealthCheckConfig;
 use crate::config_watcher;
+use crate::ipc;
 use crate::keybinding;
 use crate::proxy::ProxyInstance;
 use crate::render;
@@ -74,6 +75,7 @@ pub struct App {
     proxy_filter: String,
     config_path: std::path::PathBuf,
     config_rx: std::sync::mpsc::Receiver<()>,
+    shared_state: Arc<ipc::SharedState>,
     proxy_tab_index: Option<usize>,
     scrollbar_dragging: bool,
     auto_scrolling: Option<bool>,
@@ -102,6 +104,7 @@ impl App {
         theme: Theme,
         config_path: std::path::PathBuf,
         config_rx: std::sync::mpsc::Receiver<()>,
+        shared_state: Arc<ipc::SharedState>,
     ) -> Self {
         let names: Vec<String> = items.iter().map(|t| t.name.clone()).collect();
         let mut tabs = ClickTab::new(names, sidebar_min, sidebar_max);
@@ -146,6 +149,7 @@ impl App {
             proxy_filter: String::new(),
             config_path,
             config_rx,
+            shared_state,
             proxy_tab_index,
             scrollbar_dragging: false,
             auto_scrolling: None,
@@ -179,7 +183,7 @@ impl App {
             if self.config_rx.try_recv().is_ok() {
                 self.reload_config();
             }
-            if self.sigint.load(Ordering::SeqCst) {
+            if self.sigint.load(Ordering::SeqCst) || self.shared_state.exit.load(Ordering::SeqCst) {
                 self.exit = true;
                 break;
             }
@@ -641,6 +645,8 @@ impl App {
             }
         }
 
+        self.update_shared_state();
+
         if let Some(ref mut p) = self.proxy
             && let Some(entry) = self
                 .tabs
@@ -736,6 +742,32 @@ impl App {
         }
     }
 
+    fn update_shared_state(&self) {
+        let mut services = self
+            .shared_state
+            .services
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        services.clear();
+        for item in &self.items {
+            services.push(ipc::ServiceStatus {
+                name: item.name.clone(),
+                stopped: item.stopped,
+                process_running: item.process_running,
+                health_status: format!("{:?}", item.get_health_status()).to_lowercase(),
+            });
+        }
+        let mut proxy = self
+            .shared_state
+            .proxy
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *proxy = self.proxy.as_ref().map(|p| ipc::ProxyStatus {
+            running: p.is_running(),
+            port: p.port,
+        });
+    }
+
     /// Checks pending services and starts them once all dependencies are ready.
     fn check_pending(&mut self) {
         let ready = self
@@ -819,6 +851,7 @@ mod tests {
             proxy_filter: String::new(),
             config_path: std::path::PathBuf::new(),
             config_rx: rx,
+            shared_state: Arc::new(crate::ipc::SharedState::new()),
             proxy_tab_index,
             scrollbar_dragging: false,
             auto_scrolling: None,

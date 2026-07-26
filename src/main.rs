@@ -1,6 +1,6 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use crossterm::event::EnableMouseCapture;
 use crossterm::execute;
 use crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
@@ -8,28 +8,128 @@ use std::collections::HashMap;
 use std::io::stdout;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::{fs, io};
+use std::{fs, io, process};
 
 use fog::app::{App, PendingService};
 use fog::config::{Config, HealthCheckConfig, HealthCheckSpec};
 use fog::config_watcher;
+use fog::ipc;
 use fog::proxy::{ProxyInstance, RouteEntry};
 use fog::terminal::Terminal;
 use fog::theme::Theme;
 
 const DEFAULT_SCROLLBACK: usize = 2000;
 
-/// Command-line interface arguments parsed via clap.
 #[derive(Parser)]
 #[command(name = "fog", version = env!("CARGO_PKG_VERSION"))]
 struct Cli {
-    /// Path to the configuration file. Defaults to `fog.json`.
+    /// Path to the configuration file.
     #[arg(short, long, default_value = "fog.json")]
     config: std::path::PathBuf,
 
     /// Save service output to `temp/<name>.txt` on exit.
     #[arg(long, help = "Save service output to temp/<name>.txt on exit")]
     save_logs: bool,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// List running fog instances and their service status
+    Ls {
+        /// PID of a specific fog instance
+        pid: Option<u32>,
+    },
+    /// Kill a running fog instance
+    Kill {
+        /// PID of a specific fog instance
+        pid: Option<u32>,
+    },
+}
+
+fn cmd_ls(pid: Option<u32>) -> io::Result<()> {
+    let sockets = ipc::find_sockets()?;
+
+    if sockets.is_empty() {
+        eprintln!("No running fog instances found.");
+        return Ok(());
+    }
+
+    let targets: Vec<(u32, std::path::PathBuf)> = match pid {
+        Some(p) => {
+            let filtered: Vec<_> = sockets.into_iter().filter(|(id, _)| *id == p).collect();
+            if filtered.is_empty() {
+                eprintln!("No fog instance with PID {} found.", p);
+                return Ok(());
+            }
+            filtered
+        }
+        None => {
+            if sockets.len() > 1 {
+                println!("Found {} running fog instances:", sockets.len());
+                for (id, path) in &sockets {
+                    println!("  PID {:<6} {}", id, path.display());
+                }
+                println!();
+                println!("Use \"fog ls <pid>\" to see details of a specific instance.");
+                return Ok(());
+            }
+            sockets
+        }
+    };
+
+    for (instance_pid, socket_path) in &targets {
+        println!("fog instance PID {}", instance_pid);
+        match ipc::send_request(socket_path, "status") {
+            Ok(response) => ipc::print_status(&response),
+            Err(e) => eprintln!("  error: could not connect: {}", e),
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_kill(pid: Option<u32>) -> io::Result<()> {
+    let sockets = ipc::find_sockets()?;
+
+    if sockets.is_empty() {
+        eprintln!("No running fog instances found.");
+        return Ok(());
+    }
+
+    let target = match pid {
+        Some(p) => {
+            let filtered: Vec<_> = sockets.into_iter().filter(|(id, _)| *id == p).collect();
+            match filtered.len() {
+                0 => {
+                    eprintln!("No fog instance with PID {} found.", p);
+                    return Ok(());
+                }
+                _ => filtered.into_iter().next().unwrap(),
+            }
+        }
+        None => {
+            if sockets.len() > 1 {
+                eprintln!("Multiple fog instances found. Specify a PID:");
+                for (id, _) in &sockets {
+                    eprintln!("  fog kill {}", id);
+                }
+                return Ok(());
+            }
+            sockets.into_iter().next().unwrap()
+        }
+    };
+
+    match ipc::send_request(&target.1, "kill") {
+        Ok(_) => {
+            println!("Kill signal sent to fog instance PID {}.", target.0);
+        }
+        Err(e) => eprintln!("error: could not kill fog instance {}: {}", target.0, e),
+    }
+
+    Ok(())
 }
 
 /// Resolves service startup order using topological sort (Kahn's algorithm).
@@ -47,9 +147,6 @@ fn resolve_dep_order(entries: &[fog::config::ConfigEntry]) -> Result<Vec<usize>,
                     .to_string_lossy()
                     .into_owned()
             });
-            // Use leak to get a &'static str from the owned String — safe because
-            // entries live for the rest of the program and we only need the map
-            // during this function.
             let leaked: &'static str = Box::leak(name.into_boxed_str());
             (leaked, i)
         })
@@ -109,9 +206,7 @@ fn resolve_dep_order(entries: &[fog::config::ConfigEntry]) -> Result<Vec<usize>,
     Ok(order)
 }
 
-fn main() -> io::Result<()> {
-    let cli = Cli::parse();
-
+fn cmd_run(cli: Cli) -> io::Result<()> {
     let contents = match fs::read_to_string(&cli.config) {
         Ok(c) => c,
         Err(e) => {
@@ -120,7 +215,7 @@ fn main() -> io::Result<()> {
                 cli.config.display(),
                 e
             );
-            std::process::exit(1);
+            process::exit(1);
         }
     };
 
@@ -128,7 +223,7 @@ fn main() -> io::Result<()> {
         Ok(c) => c,
         Err(e) => {
             eprintln!("error: invalid config '{}': {}", cli.config.display(), e);
-            std::process::exit(1);
+            process::exit(1);
         }
     };
 
@@ -151,6 +246,10 @@ fn main() -> io::Result<()> {
         eprintln!("warning: could not set Ctrl+C handler");
     }
 
+    let shared_state = Arc::new(ipc::SharedState::new());
+    let (_ipc_handle, listener) = ipc::bind(process::id())?;
+    ipc::spawn_server(listener, shared_state.clone());
+
     enable_raw_mode()?;
     execute!(stdout(), EnterAlternateScreen, EnableMouseCapture)?;
 
@@ -170,7 +269,7 @@ fn main() -> io::Result<()> {
     let entries = config.service.unwrap_or_default();
     let dep_order = resolve_dep_order(&entries).unwrap_or_else(|e| {
         eprintln!("error: {}", e);
-        std::process::exit(1);
+        process::exit(1);
     });
 
     let n = entries.len();
@@ -274,9 +373,20 @@ fn main() -> io::Result<()> {
             theme,
             config_path,
             config_rx,
+            shared_state,
         )
         .run(terminal)
     })?;
 
     Ok(())
+}
+
+fn main() -> io::Result<()> {
+    let cli = Cli::parse();
+
+    match cli.command {
+        Some(Command::Ls { pid }) => cmd_ls(pid),
+        Some(Command::Kill { pid }) => cmd_kill(pid),
+        None => cmd_run(cli),
+    }
 }

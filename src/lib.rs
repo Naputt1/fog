@@ -2,6 +2,7 @@ pub mod app;
 pub mod click_tab;
 pub mod config;
 pub mod config_watcher;
+pub mod ipc;
 pub mod keybinding;
 pub mod process;
 pub mod proxy;
