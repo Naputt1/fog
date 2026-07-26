@@ -681,7 +681,7 @@ impl Terminal {
                                 .trim_start_matches("http://")
                                 .trim_start_matches("https://");
                             match addr.to_socket_addrs() {
-                                Ok(mut addrs) => addrs.next().map_or(false, |sa| {
+                                Ok(mut addrs) => addrs.next().is_some_and(|sa| {
                                     std::net::TcpStream::connect_timeout(
                                         &sa,
                                         std::time::Duration::from_millis(timeout),
