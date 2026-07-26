@@ -553,7 +553,9 @@ impl App {
     }
 
     fn step_auto_scroll(&mut self) {
-        let Some(scrolling_up) = self.auto_scrolling else { return };
+        let Some(scrolling_up) = self.auto_scrolling else {
+            return;
+        };
         let col = self.auto_scroll_col;
         if scrolling_up {
             self.scroll_to(self.scroll_offset.saturating_add(3));

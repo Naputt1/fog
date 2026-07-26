@@ -4,8 +4,8 @@ use clap::Parser;
 use crossterm::event::EnableMouseCapture;
 use crossterm::execute;
 use crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
-use std::io::stdout;
 use std::collections::HashMap;
+use std::io::stdout;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{fs, io};
@@ -59,16 +59,13 @@ fn resolve_dep_order(entries: &[fog::config::ConfigEntry]) -> Result<Vec<usize>,
         if let Some(deps) = &entry.depends_on {
             for dep in deps {
                 if !name_to_idx.contains_key(dep.as_str()) {
-                    let entry_name = entry
-                        .name
-                        .as_deref()
-                        .unwrap_or_else(|| {
-                            std::path::Path::new(&entry.path)
-                                .file_name()
-                                .unwrap_or_default()
-                                .to_str()
-                                .unwrap_or("?")
-                        });
+                    let entry_name = entry.name.as_deref().unwrap_or_else(|| {
+                        std::path::Path::new(&entry.path)
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_str()
+                            .unwrap_or("?")
+                    });
                     return Err(format!(
                         "service '{}' depends on unknown service '{}'",
                         entry_name, dep
@@ -227,18 +224,17 @@ fn main() -> io::Result<()> {
                     t
                 }
                 Err(e) => {
-                    Terminal::spawn_error(
-                        name.clone(),
-                        format!("Failed to spawn: {e}"),
-                        scrollback,
-                    )
+                    Terminal::spawn_error(name.clone(), format!("Failed to spawn: {e}"), scrollback)
                 }
             }
         };
         items[idx] = Some(terminal);
     }
 
-    let items: Vec<Terminal> = items.into_iter().map(|t| t.expect("all items should be filled")).collect();
+    let items: Vec<Terminal> = items
+        .into_iter()
+        .map(|t| t.expect("all items should be filled"))
+        .collect();
 
     let proxy = config.proxy.map(|pc| {
         let routes: Vec<RouteEntry> = pc
