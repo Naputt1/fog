@@ -319,6 +319,7 @@ fn cmd_run(cli: Cli) -> io::Result<()> {
                     t.save_logs = cli.save_logs;
                     t.health_checks = health_checks;
                     t.shutdown_cmd = shutdown_cmd;
+                    t.dep_names = entry.depends_on.clone().unwrap_or_default();
                     t.start_health_checks();
                     t
                 }

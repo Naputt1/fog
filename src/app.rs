@@ -657,6 +657,36 @@ impl App {
             entry.stopped = !p.is_running();
         }
 
+        // Propagate unhealthy status through dependency chains
+        let n = self.items.len();
+        for _ in 0..n {
+            let mut changed = false;
+            for i in 0..n {
+                let deps = &self.items[i].dep_names;
+                if deps.is_empty() {
+                    continue;
+                }
+                let dep_unhealthy = deps.iter().any(|dep| {
+                    self.tabs
+                        .entries
+                        .iter()
+                        .find(|e| e.name == *dep)
+                        .map(|e| e.health_status == HealthStatus::Unhealthy)
+                        .unwrap_or(false)
+                });
+                if dep_unhealthy
+                    && let Some(entry) = self.tabs.entries.get_mut(i)
+                    && entry.health_status != HealthStatus::Unhealthy
+                {
+                    entry.health_status = HealthStatus::Unhealthy;
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+
         self.tabs.draw(frame, sidebar_area, &self.theme);
 
         self.content_area = content_area;
@@ -801,6 +831,7 @@ impl App {
                 if item.start(&ps.path, &ps.cmd).is_ok() {
                     item.health_checks = ps.health_checks;
                     item.shutdown_cmd = ps.shutdown_cmd;
+                    item.dep_names = ps.dep_names.clone();
                     item.save_logs = ps.save_logs;
                     if !item.health_checks.is_empty() {
                         item.start_health_checks();
