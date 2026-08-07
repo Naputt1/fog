@@ -86,7 +86,7 @@ fog kill [pid]            # Gracefully shut down a running instance
 
 | Option | Description |
 |--------|-------------|
-| `-c`, `--config <PATH>` | Path to config file (default: `fog.json`) |
+| `-c`, `--config <PATH>` | Path to config file, or a directory containing `fog.json` (default: `fog.json`) |
 | `--branch <BRANCH>` | Run the script in the git worktree checked out on this branch |
 | `--save-logs` | Save service output to `temp/<name>.txt` on exit |
 | `--completions <SHELL>` | Print a bash/zsh/fish completion script (`--branch` completes to all worktrees) |

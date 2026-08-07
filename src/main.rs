@@ -37,7 +37,8 @@ struct Cli {
     /// PID of a running fog instance (used with `fog kill <pid>`).
     pid: Option<u32>,
 
-    /// Path to the configuration file. Defaults to `fog.json`.
+    /// Path to the configuration file (or a directory containing `fog.json`).
+    /// Defaults to `fog.json`.
     #[arg(short, long, default_value = "fog.json")]
     config: std::path::PathBuf,
 
@@ -92,6 +93,16 @@ fn resolve_run_config(cli: &Cli) -> PathBuf {
         cli.config.clone()
     } else {
         wt.path.join(&cli.config)
+    }
+}
+
+/// Resolves the config path: if `path` is a directory, looks for `fog.json`
+/// inside it; otherwise returns the path unchanged.
+fn resolve_config_path(path: &Path) -> PathBuf {
+    if path.is_dir() {
+        path.join("fog.json")
+    } else {
+        path.to_path_buf()
     }
 }
 
@@ -388,7 +399,7 @@ fn cmd_kill(pid: Option<u32>) -> io::Result<()> {
 }
 
 fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
-    let config_path = resolve_run_config(cli);
+    let config_path = resolve_config_path(&resolve_run_config(cli));
     let config = load_config(&config_path);
     let script = match config.scripts.get(name) {
         Some(s) => s,
@@ -486,12 +497,56 @@ fn main() -> io::Result<()> {
         Some("kill") => cmd_kill(cli.pid),
         Some(name) => run_script(name, &cli),
         None => {
-            let config = load_config(&resolve_run_config(&cli));
+            let config_path = resolve_config_path(&resolve_run_config(&cli));
+            let config = load_config(&config_path);
             if config.scripts.is_empty() {
-                eprintln!("error: no scripts defined in '{}'", cli.config.display());
+                eprintln!("error: no scripts defined in '{}'", config_path.display());
                 std::process::exit(1);
             }
             list_scripts_and_exit(&config, "error: no script specified")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "fog-resolve-config-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn test_resolve_config_path_directory() {
+        let dir = temp_dir();
+        fs::write(dir.join("fog.json"), "{}").unwrap();
+        assert_eq!(resolve_config_path(&dir), dir.join("fog.json"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_resolve_config_path_file() {
+        let dir = temp_dir();
+        let file = dir.join("custom.json");
+        fs::write(&file, "{}").unwrap();
+        assert_eq!(resolve_config_path(&file), file);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_resolve_config_path_non_existent() {
+        let dir = temp_dir();
+        let missing = dir.join("missing.json");
+        assert_eq!(resolve_config_path(&missing), missing);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

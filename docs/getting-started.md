@@ -65,7 +65,7 @@ fog kill [pid]            # Gracefully shut down a running instance
 
 | Option | Description |
 |--------|-------------|
-| `-c`, `--config <PATH>` | Path to config file (default: `fog.json`) |
+| `-c`, `--config <PATH>` | Path to config file, or a directory containing `fog.json` (default: `fog.json`) |
 | `--save-logs` | Save service output to `temp/<name>.txt` on exit |
 
 ### Managing instances
