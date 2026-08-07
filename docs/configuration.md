@@ -108,8 +108,11 @@ The command is executed inside a shell (`$SHELL` or `bash`) using `cd <path> && 
 
 fog identifies the git repository a script runs in via `git rev-parse --git-common-dir`, which is shared by every worktree of the same repo. When you start `fog <script>` while another instance of the **same script in the same project** is already running (e.g. from a different worktree), fog:
 
-1. Asks the old instance to shut down — killing its non-reused services and tearing down its proxy.
-2. Waits for it to exit, then starts its own services.
+1. Acquires a per-(project, script) owner lock (`flock`, in the temp directory) so concurrent startups are decided deterministically.
+2. Asks the old instance to shut down — killing its non-reused services and tearing down its proxy — and **waits until it has fully exited** (socket gone) before starting its own services, so there is no port conflict during the switch.
+3. Starts its own services.
+
+If another `fog <script>` is **mid-start** for the same project when you launch one (two worktrees starting at the same moment, or a human racing an agent), fog waits up to 30s for it to finish. If that instance started after you did, fog backs off with an error message rather than fighting over ports — use `fog kill <pid>` to replace it.
 
 Services flagged with `"reuse": true` are treated specially to save time when switching worktrees:
 

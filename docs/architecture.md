@@ -83,8 +83,11 @@ main.rs
   │
   ├── Parses CLI args (clap): `fog <script>` | `fog ls` | `fog kill [pid]`
   ├── Loads config, looks up the named script's services & proxy
+  ├── Acquires per-(project, script) owner lock, coordinates with/reclaims
+  │   any existing instance of the same script in the same project
   ├── Spawns IPC server (Unix socket) sharing IpcState with the App
   ├── Spawns Terminal for each service entry
+  ├── Releases the owner lock (services are up)
   ├── Creates ProxyInstance (if the script configures one)
   ├── Spawns config watcher
   └── Runs App::run() in ratatui terminal
@@ -145,14 +148,28 @@ Terminal::get_screen(visible_rows, offset)
 
 ## Process lifecycle
 
-1. **Startup**: Parse config, spawn terminals, start proxy, enter TUI. Before spawning, fog detects the git project (`git rev-parse --git-common-dir`) and reclaims any running instance of the same script in the same project: it sends a `kill` request carrying the `reuse` service names over IPC. The old instance hands over live reused services (PTY master fd via `SCM_RIGHTS` + scrollback) and then exits.
+1. **Startup**: Parse config, spawn terminals, start proxy, enter TUI. Before spawning, fog detects the git project (`git rev-parse --git-common-dir`) and coordinates with any other instance running the same script in the same project (see *Cross-instance coordination* below). If it should take over, it sends a `kill` request carrying the `reuse` service names over IPC; the old instance hands over live reused services (PTY master fd via `SCM_RIGHTS` + scrollback) and then exits.
 2. **Running**: Event loop polls input at 50ms intervals, draws UI, handles events.
-3. **Shutdown**: On `q` / `Ctrl+C` / SIGINT:
+3. **Shutdown**: On `q` / `Ctrl+C` / SIGINT, or a replacement's `kill` request:
    - `exit` flag is set
-   - Each `Terminal` drops → kills child process group (SIGTERM, wait 500ms, SIGKILL), kills descendants; reuse-flagged services skip their `shutdown_cmd` so shared resources survive
+   - On a reclaim (`kill` with `reuse` names), the App extracts the requested live services, then waits for the IPC thread to send them before dropping terminals
+   - Each `Terminal` drops → kills child process group (SIGTERM, wait 500ms, SIGKILL), kills descendants; services that were handed off are released without being killed, and reuse-flagged services skip their `shutdown_cmd` so shared resources survive
    - `ProxyInstance` drops → sets shutdown flag, joins proxy thread
    - Terminal leaves raw mode, restores alternate screen, disables mouse capture
    - If `--save-logs` was passed, writes output files to `temp/<name>.txt`
+
+## Cross-instance coordination
+
+Worktree-aware runs are made deterministic by a per-(project, script) **owner lock** (`src/lock.rs`) using `flock(2)` on a temp file (`fog-owner-<hash>.lock`). `flock` is released automatically when the holding process dies, so stale locks are impossible.
+
+- The lock is held **only for the startup critical section** (scan → reclaim → spawn services). Once the instance is serving, the lock is dropped so a later worktree switch can replace it.
+- On startup, if the lock is free, the instance reclaims any existing (old) instance under the lock.
+- If the lock is held, another instance is mid-start; the new instance waits (up to 30s), re-acquires, and re-scans:
+  - an instance that **started after this attempt began** is a concurrent starter that already won → fog backs off with an error (`fog kill <pid>` replaces it), and
+  - an older instance is reclaimed normally.
+- The reclaim protocol is **single-winner**: the first `kill`+`reuse` connection claims the handoff; a second concurrent reclaim (or a plain `kill`) is refused instead of racing for the same live processes. Handoffs are only sent after the App confirms it prepared them, and a process whose fd cannot be transferred is killed to avoid orphans.
+
+`find_instances` ignores lock files: it only matches `fog-<pid>.sock` sockets.
 
 ## Key design decisions
 

@@ -11,6 +11,9 @@ use std::thread;
 use std::time::Duration;
 
 const READ_TIMEOUT_SECS: u64 = 5;
+/// How long the reclaiming side waits for the replaced instance to prepare
+/// and send its handoffs before giving up.
+const HANDOFF_PREPARE_TIMEOUT_SECS: u64 = 30;
 
 /// Status snapshot of a single service.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,6 +59,8 @@ pub struct IpcState {
     pub script: String,
     /// Identity of the git project (worktree family) this instance belongs to.
     pub project: Option<String>,
+    /// Epoch milliseconds when this instance started.
+    pub started_at: u64,
     /// Set to `true` when a kill request is received.
     pub kill_flag: Arc<AtomicBool>,
     /// Names of services whose `shutdown_cmd` should be skipped on exit
@@ -65,6 +70,11 @@ pub struct IpcState {
     pub handoff_req: Arc<Mutex<Option<Vec<String>>>>,
     /// Handoff results filled in by the App after a handover request.
     pub handoff_results: Arc<Mutex<Vec<HandoffItem>>>,
+    /// Set once a reclaim connection has claimed the handoff right, so a
+    /// second concurrent reclaim (or a plain kill) cannot steal it.
+    pub handoff_claimed: Arc<AtomicBool>,
+    /// Set by the App once handoffs have been prepared.
+    pub handoff_prepared: Arc<AtomicBool>,
     /// Set by the IPC thread once handoffs have been sent to the requester.
     pub handoff_done: Arc<AtomicBool>,
 }
@@ -77,10 +87,13 @@ impl IpcState {
             proxy: Arc::new(Mutex::new(None)),
             script,
             project,
+            started_at: crate::lock::now_ms(),
             kill_flag: Arc::new(AtomicBool::new(false)),
             reuse_skip: Arc::new(Mutex::new(Vec::new())),
             handoff_req: Arc::new(Mutex::new(None)),
             handoff_results: Arc::new(Mutex::new(Vec::new())),
+            handoff_claimed: Arc::new(AtomicBool::new(false)),
+            handoff_prepared: Arc::new(AtomicBool::new(false)),
             handoff_done: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -100,6 +113,9 @@ pub struct StatusResponse {
     /// Git project identity of the instance, if it is inside a repository.
     #[serde(default)]
     pub project: Option<String>,
+    /// Epoch milliseconds when the instance started (0 for older versions).
+    #[serde(default)]
+    pub started_at: u64,
 }
 
 /// A request received over the IPC socket.
@@ -119,6 +135,9 @@ enum Request {
 #[derive(Debug, Serialize)]
 struct KillResponse {
     ok: bool,
+    /// Human-readable reason when `ok` is false.
+    #[serde(default)]
+    reason: String,
 }
 
 /// Returns the socket path for a given PID: `$TMPDIR/fog-<pid>.sock`.
@@ -165,7 +184,7 @@ pub fn cleanup_socket() {
 }
 
 /// Handles a single IPC connection: reads one request line and writes a response.
-fn handle_connection(stream: UnixStream, state: Arc<IpcState>) {
+fn handle_connection(mut stream: UnixStream, state: Arc<IpcState>) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(READ_TIMEOUT_SECS)));
     let mut line = String::new();
     let mut reader = match stream.try_clone() {
@@ -200,6 +219,7 @@ fn handle_connection(stream: UnixStream, state: Arc<IpcState>) {
                 services,
                 proxy,
                 project: state.project.clone(),
+                started_at: state.started_at,
             })
             .unwrap_or_default();
             let mut writer = stream;
@@ -207,10 +227,31 @@ fn handle_connection(stream: UnixStream, state: Arc<IpcState>) {
         }
         Request::Kill { reuse } => {
             state.kill_flag.store(true, Ordering::SeqCst);
-            if !reuse.is_empty() {
-                *state.reuse_skip.lock().unwrap_or_else(|e| e.into_inner()) = reuse.clone();
-                *state.handoff_req.lock().unwrap_or_else(|e| e.into_inner()) = Some(reuse);
+            if reuse.is_empty() {
+                // Plain kill: acknowledge immediately and never touch handoff
+                // state, so it cannot steal a handoff in flight.
+                let resp = serde_json::to_string(&KillResponse {
+                    ok: true,
+                    reason: String::new(),
+                })
+                .unwrap_or_default();
+                let _ = writeln!(stream, "{resp}");
+                return;
             }
+            // A reclaim claims the handoff right exactly once; concurrent
+            // reclaimers are refused instead of racing for the same live
+            // processes.
+            if state.handoff_claimed.swap(true, Ordering::SeqCst) {
+                let resp = serde_json::to_string(&KillResponse {
+                    ok: false,
+                    reason: "instance is already being replaced".to_string(),
+                })
+                .unwrap_or_default();
+                let _ = writeln!(stream, "{resp}");
+                return;
+            }
+            *state.reuse_skip.lock().unwrap_or_else(|e| e.into_inner()) = reuse.clone();
+            *state.handoff_req.lock().unwrap_or_else(|e| e.into_inner()) = Some(reuse);
             send_handoffs(stream, state);
         }
     };
@@ -228,15 +269,11 @@ struct HandoffMsg {
 /// Waits for the App to prepare handoffs, then sends each one (metadata line
 /// followed by the fd via SCM_RIGHTS) and finally the kill response.
 fn send_handoffs(mut stream: UnixStream, state: Arc<IpcState>) {
-    // Give the App up to a few seconds to extract the handoffs.
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    // Wait for the App to prepare the handoffs. An empty result set after
+    // preparation legitimately means "no live services to hand over".
+    let deadline = std::time::Instant::now() + Duration::from_secs(HANDOFF_PREPARE_TIMEOUT_SECS);
     loop {
-        let ready = !state
-            .handoff_results
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_empty();
-        if ready || std::time::Instant::now() >= deadline {
+        if state.handoff_prepared.load(Ordering::SeqCst) || std::time::Instant::now() >= deadline {
             break;
         }
         thread::sleep(Duration::from_millis(20));
@@ -277,10 +314,15 @@ fn send_handoffs(mut stream: UnixStream, state: Arc<IpcState>) {
         }
     }
 
+    let reason = if ok {
+        String::new()
+    } else {
+        "handoff transfer failed; connection closed".to_string()
+    };
     let _ = writeln!(
         stream,
         "{}",
-        serde_json::to_string(&KillResponse { ok }).unwrap_or_default()
+        serde_json::to_string(&KillResponse { ok, reason }).unwrap_or_default()
     );
     let _ = stream.flush();
     state.handoff_done.store(true, Ordering::SeqCst);
@@ -363,8 +405,31 @@ struct HandoffMsgReply {
 /// The final response to a kill/reclaim request.
 #[derive(Debug, Deserialize)]
 struct KillReply {
-    #[allow(dead_code)]
     ok: bool,
+    #[serde(default)]
+    reason: String,
+}
+
+/// Outcome of a reclaim attempt against a single instance.
+pub struct ReclaimOutcome {
+    /// Live services successfully transferred. The PTY master fds are owned
+    /// by the caller.
+    pub handoffs: Vec<HandoffItem>,
+    /// True if the transfer was cut short (connection dropped or an fd could
+    /// not be received) after some handoffs were delivered.
+    pub incomplete: bool,
+    /// Present when the reclaim failed outright and no handoffs are usable.
+    pub error: Option<String>,
+}
+
+impl ReclaimOutcome {
+    fn failed(error: impl Into<String>) -> Self {
+        Self {
+            handoffs: Vec::new(),
+            incomplete: false,
+            error: Some(error.into()),
+        }
+    }
 }
 
 /// Reads a single newline-terminated line directly from the stream without
@@ -394,39 +459,90 @@ fn read_line_nobuf(mut stream: &UnixStream) -> io::Result<String> {
 /// one `handoff` message (plus an SCM_RIGHTS fd) per live service to keep
 /// running, then a kill response. Returns the received handoffs.
 ///
-/// # Errors
-/// Returns an error if the connection fails or the response is malformed.
-pub fn reclaim(path: &Path, reuse: &[String]) -> io::Result<Vec<HandoffItem>> {
-    let mut stream = UnixStream::connect(path)?;
-    stream.set_read_timeout(Some(Duration::from_secs(READ_TIMEOUT_SECS)))?;
+/// If the transfer is cut short, any already-received handoffs are still
+/// returned (alongside `incomplete`), and a process whose fd could not be
+/// transferred is killed to avoid leaving an orphan behind.
+pub fn reclaim(path: &Path, reuse: &[String]) -> ReclaimOutcome {
+    let mut stream = match UnixStream::connect(path) {
+        Ok(s) => s,
+        Err(e) => return ReclaimOutcome::failed(format!("connection failed: {e}")),
+    };
+    if stream
+        .set_read_timeout(Some(Duration::from_secs(READ_TIMEOUT_SECS)))
+        .is_err()
+    {
+        return ReclaimOutcome::failed("could not set read timeout");
+    }
     let mut payload = r#"{"type":"kill""#.to_string();
     if !reuse.is_empty() {
         let names = serde_json::to_string(reuse).unwrap_or_else(|_| "[]".to_string());
         payload.push_str(&format!(r#","reuse":{names}"#));
     }
     payload.push_str("}\n");
-    stream.write_all(payload.as_bytes())?;
-    stream.flush()?;
+    if stream.write_all(payload.as_bytes()).is_err() || stream.flush().is_err() {
+        return ReclaimOutcome::failed("could not send reclaim request");
+    }
 
     let mut handoffs = Vec::new();
     loop {
-        let line = read_line_nobuf(&stream)?;
+        let line = match read_line_nobuf(&stream) {
+            Ok(l) => l,
+            Err(e) => {
+                if handoffs.is_empty() {
+                    return ReclaimOutcome::failed(format!(
+                        "connection closed before response: {e}"
+                    ));
+                }
+                return ReclaimOutcome {
+                    handoffs,
+                    incomplete: true,
+                    error: Some(format!("connection closed mid-transfer: {e}")),
+                };
+            }
+        };
         if let Ok(reply) = serde_json::from_str::<HandoffMsgReply>(line.trim()) {
-            let fd = crate::fds::recv_fd(&stream)?;
-            handoffs.push(HandoffItem {
-                name: reply.name,
-                pid: reply.pid,
-                scrollback: reply.scrollback,
-                fd,
-            });
+            match crate::fds::recv_fd(&stream) {
+                Ok(fd) => {
+                    handoffs.push(HandoffItem {
+                        name: reply.name,
+                        pid: reply.pid,
+                        scrollback: reply.scrollback,
+                        fd,
+                    });
+                }
+                Err(e) => {
+                    // The old instance extracted this process but we could not
+                    // receive its fd: kill it so it does not run on as an
+                    // unmanaged orphan.
+                    crate::process::try_kill_process_group(reply.pid, libc::SIGTERM);
+                    thread::sleep(Duration::from_millis(300));
+                    crate::process::try_kill_process_group(reply.pid, libc::SIGKILL);
+                    return ReclaimOutcome {
+                        handoffs,
+                        incomplete: true,
+                        error: Some(format!("failed to receive fd for '{}': {e}", reply.name)),
+                    };
+                }
+            }
             continue;
         }
-        if let Ok(_reply) = serde_json::from_str::<KillReply>(line.trim()) {
-            break;
+        if let Ok(reply) = serde_json::from_str::<KillReply>(line.trim()) {
+            if reply.ok {
+                return ReclaimOutcome {
+                    handoffs,
+                    incomplete: false,
+                    error: None,
+                };
+            }
+            let reason = if reply.reason.is_empty() {
+                "instance refused to be replaced".to_string()
+            } else {
+                reply.reason
+            };
+            return ReclaimOutcome::failed(reason);
         }
-        return Err(io::Error::other("unexpected response from fog instance"));
+        return ReclaimOutcome::failed("unexpected response from fog instance");
     }
-    Ok(handoffs)
 }
 
 /// Finds all running instances belonging to the given project that run the
@@ -434,6 +550,18 @@ pub fn reclaim(path: &Path, reuse: &[String]) -> io::Result<Vec<HandoffItem>> {
 ///
 /// Returns a sorted list of `(pid, socket_path)` pairs.
 pub fn find_instances_for(project: &str, script: &str) -> Vec<(u32, PathBuf)> {
+    find_instances_with_status(project, script)
+        .into_iter()
+        .map(|(pid, path, _)| (pid, path))
+        .collect()
+}
+
+/// Like [`find_instances_for`], but also returns each instance's status
+/// snapshot (including its `started_at`).
+pub fn find_instances_with_status(
+    project: &str,
+    script: &str,
+) -> Vec<(u32, PathBuf, StatusResponse)> {
     let self_pid = std::process::id();
     let mut out = Vec::new();
     let Ok(instances) = find_instances() else {
@@ -446,7 +574,7 @@ pub fn find_instances_for(project: &str, script: &str) -> Vec<(u32, PathBuf)> {
         match query_status(&path) {
             Ok(status) => {
                 if status.project.as_deref() == Some(project) && status.script == script {
-                    out.push((pid, path));
+                    out.push((pid, path, status));
                 }
             }
             Err(_) => {
@@ -454,8 +582,15 @@ pub fn find_instances_for(project: &str, script: &str) -> Vec<(u32, PathBuf)> {
             }
         }
     }
-    out.sort();
+    out.sort_by_key(|(pid, _, _)| *pid);
     out
+}
+
+/// Returns the lowest-PID instance serving `script` in `project`, if any.
+pub fn find_serving(project: &str, script: &str) -> Option<(u32, PathBuf, StatusResponse)> {
+    find_instances_with_status(project, script)
+        .into_iter()
+        .next()
 }
 
 /// Waits until the given process has exited, up to `timeout`.
@@ -519,6 +654,7 @@ mod tests {
 
         assert_eq!(resp.script, "dev");
         assert_eq!(resp.pid, std::process::id());
+        assert!(resp.started_at > 0);
         assert_eq!(resp.services.len(), 1);
         assert_eq!(resp.services[0].name, "web");
         assert_eq!(resp.services[0].health, "healthy");
@@ -571,6 +707,7 @@ mod tests {
             scrollback: vec!["container db created".into()],
             fd: dup_fd,
         });
+        state.handoff_prepared.store(true, Ordering::SeqCst);
 
         let path = std::env::temp_dir().join("fog-test-reclaim.sock");
         let _ = fs::remove_file(&path);
@@ -581,12 +718,18 @@ mod tests {
             handle_connection(stream, server_state);
         });
 
-        let handoffs = reclaim(&path, &["db".to_string()]).unwrap();
+        let outcome = reclaim(&path, &["db".to_string()]);
         server.join().unwrap();
-        assert_eq!(handoffs.len(), 1);
-        assert_eq!(handoffs[0].name, "db");
-        assert_eq!(handoffs[0].scrollback, vec!["container db created"]);
-        assert!(handoffs[0].fd >= 0);
+        assert!(
+            outcome.error.is_none(),
+            "reclaim error: {:?}",
+            outcome.error
+        );
+        assert!(!outcome.incomplete);
+        assert_eq!(outcome.handoffs.len(), 1);
+        assert_eq!(outcome.handoffs[0].name, "db");
+        assert_eq!(outcome.handoffs[0].scrollback, vec!["container db created"]);
+        assert!(outcome.handoffs[0].fd >= 0);
         assert!(state.kill_flag.load(Ordering::SeqCst));
         assert_eq!(
             state.reuse_skip.lock().unwrap().clone(),
@@ -595,7 +738,134 @@ mod tests {
         assert!(state.handoff_done.load(Ordering::SeqCst));
 
         // SAFETY: the returned fd is owned by the test.
-        unsafe { libc::close(handoffs[0].fd) };
+        unsafe { libc::close(outcome.handoffs[0].fd) };
         let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_reclaim_single_winner() {
+        // Two concurrent reclaims: exactly one gets the handoff, the other is
+        // refused with ok:false and must not consume the handoff results.
+        let pty = portable_pty::native_pty_system()
+            .openpty(portable_pty::PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let master_fd = pty.master.as_raw_fd().expect("pty master fd");
+        let dup_fd = unsafe { libc::dup(master_fd) };
+        assert!(dup_fd >= 0);
+
+        let state = Arc::new(IpcState::new("dev".to_string(), None));
+        state.handoff_results.lock().unwrap().push(HandoffItem {
+            name: "db".into(),
+            pid: 99_999,
+            scrollback: vec![],
+            fd: dup_fd,
+        });
+        state.handoff_prepared.store(true, Ordering::SeqCst);
+
+        let path = std::env::temp_dir().join(format!(
+            "fog-test-single-winner-{}.sock",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).unwrap();
+
+        let server_state = state.clone();
+        let server = thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let st = server_state.clone();
+                thread::spawn(move || handle_connection(stream, st));
+            }
+        });
+
+        let outcome_a = reclaim(&path, &["db".to_string()]);
+        let outcome_b = reclaim(&path, &["db".to_string()]);
+
+        drop(server);
+        let _ = fs::remove_file(&path);
+
+        for outcome in [&outcome_a, &outcome_b] {
+            for item in &outcome.handoffs {
+                // SAFETY: the returned fd is owned by the test.
+                unsafe { libc::close(item.fd) };
+            }
+        }
+        let winners = [&outcome_a, &outcome_b]
+            .iter()
+            .filter(|o| o.error.is_none() && o.handoffs.len() == 1)
+            .count();
+        let refusals = [&outcome_a, &outcome_b]
+            .iter()
+            .filter(|o| {
+                o.error
+                    .as_deref()
+                    .is_some_and(|e| e.contains("already being replaced"))
+            })
+            .count();
+        assert_eq!(winners, 1, "exactly one reclaim must win");
+        assert_eq!(refusals, 1, "the other reclaim must be refused");
+    }
+
+    #[test]
+    fn test_plain_kill_does_not_consume_handoffs() {
+        // A plain kill arriving while a handoff is pending must not take the
+        // prepared results away from the reclaiming client.
+        let state = Arc::new(IpcState::new("dev".to_string(), None));
+        let pty = portable_pty::native_pty_system()
+            .openpty(portable_pty::PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let master_fd = pty.master.as_raw_fd().expect("pty master fd");
+        let dup_fd = unsafe { libc::dup(master_fd) };
+        assert!(dup_fd >= 0);
+        state.handoff_results.lock().unwrap().push(HandoffItem {
+            name: "db".into(),
+            pid: 99_998,
+            scrollback: vec![],
+            fd: dup_fd,
+        });
+        state.handoff_prepared.store(true, Ordering::SeqCst);
+
+        let path =
+            std::env::temp_dir().join(format!("fog-test-plain-kill-{}.sock", std::process::id()));
+        let _ = fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).unwrap();
+        let server_state = state.clone();
+        let server = thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let st = server_state.clone();
+                thread::spawn(move || handle_connection(stream, st));
+            }
+        });
+
+        // Plain kill first, then the reclaiming client.
+        let kill_res = send_kill(&path);
+        assert!(kill_res.is_ok());
+        let outcome = reclaim(&path, &["db".to_string()]);
+
+        drop(server);
+        let _ = fs::remove_file(&path);
+
+        assert!(
+            outcome.error.is_none(),
+            "reclaim error: {:?}",
+            outcome.error
+        );
+        assert_eq!(
+            outcome.handoffs.len(),
+            1,
+            "plain kill must not steal handoffs"
+        );
+        assert_eq!(outcome.handoffs[0].name, "db");
+        // SAFETY: the returned fd is owned by the test.
+        unsafe { libc::close(outcome.handoffs[0].fd) };
     }
 }

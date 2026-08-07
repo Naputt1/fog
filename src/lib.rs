@@ -5,6 +5,7 @@ pub mod config_watcher;
 pub mod fds;
 pub mod ipc;
 pub mod keybinding;
+pub mod lock;
 pub mod process;
 pub mod project;
 pub mod proxy;

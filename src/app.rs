@@ -209,6 +209,11 @@ impl App {
             .handoff_results
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = results;
+        // Signal the IPC thread that the handoffs are ready to send, so it
+        // never sends an empty set before we have prepared ours.
+        self.ipc_state
+            .handoff_prepared
+            .store(true, Ordering::SeqCst);
     }
 
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
@@ -228,11 +233,34 @@ impl App {
                     .unwrap_or_else(|e| e.into_inner())
                     .is_some()
                 {
-                    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                    let deadline = std::time::Instant::now() + Duration::from_secs(30);
                     while std::time::Instant::now() < deadline
                         && !self.ipc_state.handoff_done.load(Ordering::SeqCst)
                     {
                         thread::sleep(Duration::from_millis(20));
+                    }
+                    // If the transfer never completed (e.g. the connection
+                    // dropped), close any prepared-but-unsent fds so they are
+                    // not leaked. Reuse services themselves survive: they were
+                    // marked handed-off and are not killed on teardown.
+                    if !self.ipc_state.handoff_done.load(Ordering::SeqCst) {
+                        let fds: Vec<_> = std::mem::take(
+                            &mut *self
+                                .ipc_state
+                                .handoff_results
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner()),
+                        )
+                        .into_iter()
+                        .map(|h| h.fd)
+                        .collect();
+                        for fd in fds {
+                            // SAFETY: these fds were dupped for transfer and
+                            // are owned by this instance until sent.
+                            unsafe {
+                                libc::close(fd);
+                            }
+                        }
                     }
                 }
                 self.exit = true;

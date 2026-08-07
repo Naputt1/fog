@@ -22,6 +22,12 @@ use fog::theme::Theme;
 
 const DEFAULT_SCROLLBACK: usize = 2000;
 
+/// How long a starter waits for another instance that is mid-start before
+/// giving up.
+const LOCK_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a replacer waits for the old instance to fully exit.
+const RECLAIM_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Command-line interface arguments parsed via clap.
 #[derive(Parser)]
 #[command(name = "fog", version = env!("CARGO_PKG_VERSION"))]
@@ -174,6 +180,8 @@ fn reuse_names(script: &fog::config::ScriptConfig) -> Vec<String> {
 /// Shuts down existing fog instances running the same script in the same
 /// project, so a new instance can take their place. Returns any live services
 /// handed over, keyed by service name, together with their PTY master fd.
+///
+/// The caller is expected to hold the per-(project, script) owner lock.
 fn reclaim_existing(
     project: &str,
     script: &str,
@@ -186,20 +194,19 @@ fn reclaim_existing(
         eprintln!(
             "replacing existing fog instance (pid {pid}, script {script}, project {project})"
         );
-        let handoffs = match ipc::reclaim(path, reuse) {
-            Ok(h) => h,
-            Err(e) => {
-                eprintln!("  warning: could not reach instance {pid}: {e}, continuing");
-                continue;
-            }
-        };
-        if handoffs.is_empty() {
+        let outcome = ipc::reclaim(path, reuse);
+        if let Some(err) = &outcome.error {
+            eprintln!("  warning: could not reclaim instance {pid}: {err}, continuing");
+        } else if outcome.incomplete {
+            eprintln!("  warning: handoff from instance {pid} was incomplete");
+        }
+        if outcome.handoffs.is_empty() {
             eprintln!("  old instance {pid} has no live services to reuse");
         } else {
-            let names: Vec<&str> = handoffs.iter().map(|h| h.name.as_str()).collect();
+            let names: Vec<&str> = outcome.handoffs.iter().map(|h| h.name.as_str()).collect();
             eprintln!("  reusing live services: {}", names.join(", "));
         }
-        for handoff in handoffs {
+        for handoff in outcome.handoffs {
             adopted.entry(handoff.name.clone()).or_insert(handoff);
         }
         if ipc::wait_for_exit(*pid, timeout) {
@@ -207,8 +214,97 @@ fn reclaim_existing(
         } else {
             eprintln!("  warning: instance {pid} did not stop within the timeout");
         }
+        wait_for_socket_gone(path);
     }
     adopted
+}
+
+/// Waits until the old instance's socket is gone or unreachable, guaranteeing
+/// it fully cleaned up (and released its ports) before we spawn replacements.
+fn wait_for_socket_gone(path: &std::path::Path) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        if !path.exists() || ipc::query_status(path).is_err() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Coordinates with any other fog instance running `script` in `project`, then
+/// reclaims it. Returns any handed-over services and the owner lock, which the
+/// caller must drop once its own services are up.
+///
+/// This makes concurrent startups deterministic:
+/// - the instance that acquires the lock first performs the reclaim, and
+/// - an instance that finds a just-started serving instance backs off with a
+///   clear error instead of fighting over ports or shared infra.
+fn reconcile_instance(
+    project: &str,
+    script: &str,
+    reuse: &[String],
+) -> (
+    HashMap<String, ipc::HandoffItem>,
+    Option<fog::lock::OwnerLock>,
+) {
+    let attempt_started = fog::lock::now_ms();
+
+    let lock = match fog::lock::OwnerLock::try_acquire(project, script) {
+        Ok(fog::lock::AcquireResult::Locked(lock)) => lock,
+        Ok(fog::lock::AcquireResult::HeldBy(holder)) => {
+            let pid = holder
+                .as_ref()
+                .map(|h| format!(" (pid {})", h.pid))
+                .unwrap_or_default();
+            eprintln!(
+                "another fog instance{pid} is starting script '{script}' for this project; waiting up to 30s"
+            );
+            match fog::lock::OwnerLock::acquire_with_timeout(project, script, LOCK_WAIT_TIMEOUT) {
+                Ok(Some(lock)) => lock,
+                Ok(None) => {
+                    eprintln!(
+                        "error: another fog instance is already starting or stuck starting \
+                         script '{script}' for this project; check `fog ls` and `fog kill <pid>`"
+                    );
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!(
+                        "  warning: could not lock project: {e}, proceeding without coordination"
+                    );
+                    return (
+                        reclaim_existing(project, script, reuse, RECLAIM_WAIT_TIMEOUT),
+                        None,
+                    );
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("  warning: could not lock project: {e}, proceeding without coordination");
+            return (
+                reclaim_existing(project, script, reuse, RECLAIM_WAIT_TIMEOUT),
+                None,
+            );
+        }
+    };
+
+    // We now hold the owner lock. An instance that started after we began our
+    // startup is a concurrent starter that beat us and is now serving: back
+    // off rather than kill a freshly-started instance.
+    let instances = ipc::find_instances_with_status(project, script);
+    if let Some((pid, _, _)) = instances
+        .iter()
+        .find(|(_, _, s)| s.started_at > attempt_started)
+    {
+        eprintln!(
+            "error: another fog instance (pid {pid}) just started script '{script}' for this \
+             project and now serves it; use `fog kill {pid}` to replace it"
+        );
+        std::process::exit(1);
+    }
+
+    let adopted = reclaim_existing(project, script, reuse, RECLAIM_WAIT_TIMEOUT);
+    (adopted, Some(lock))
 }
 
 fn cmd_ls() -> io::Result<()> {
@@ -347,9 +443,10 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
     let project =
         fog::project::detect(&config_dir).or_else(|| fog::project::fallback_identity(&config_dir));
     let mut adopted: HashMap<String, ipc::HandoffItem> = HashMap::new();
+    let mut owner_lock: Option<fog::lock::OwnerLock> = None;
     if let Some(ref project) = project {
         let reuse = reuse_names(script);
-        adopted = reclaim_existing(project, name, &reuse, Duration::from_secs(15));
+        (adopted, owner_lock) = reconcile_instance(project, name, &reuse);
     }
 
     let sigint = Arc::new(AtomicBool::new(false));
@@ -480,6 +577,10 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
         .into_iter()
         .map(|t| t.expect("all items should be filled"))
         .collect();
+
+    // Services are up: release the owner lock so a later worktree switch can
+    // replace this instance.
+    drop(owner_lock);
 
     let proxy = script.proxy.clone().map(|pc| {
         let routes: Vec<RouteEntry> = pc

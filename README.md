@@ -20,7 +20,7 @@ fog lets you define named *scripts* — each a set of local services and an opti
 - **Keyboard navigation** — Vim-style `j`/`k` tab switching, terminal input mode (`i`), restart services (`R`), open shell tabs (`t`).
 - **Configuration hot-reload** — Edit `fog.json` at runtime to update themes and proxy settings without restarting.
 - **Instance management** — `fog ls` lists running instances and their service status; `fog kill` gracefully shuts one down.
-- **Worktree-aware runs** — Starting a script that is already running in another worktree of the same git repo shuts the old instance down first. Services flagged `reuse: true` (e.g. a shared `docker compose` database) are handed over instead of torn down, so switching worktrees doesn't restart your infra.
+- **Worktree-aware runs** — Starting a script that is already running in another worktree of the same git repo shuts the old instance down first (and only once it has fully exited, so ports don't collide). Services flagged `reuse: true` (e.g. a shared `docker compose` database) are handed over instead of torn down, so switching worktrees doesn't restart your infra. A per-project owner lock makes concurrent starts deterministic.
 - **TLS support** — Terminate TLS connections directly in the proxy using PEM certificates.
 - **Health checks** — Periodic TCP health checks per service with sidebar status indicators.
 
