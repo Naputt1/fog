@@ -933,8 +933,13 @@ impl Terminal {
         }
         let mut p = self.parser.lock().unwrap_or_else(|e| e.into_inner());
         let (cur_rows, cur_cols) = p.screen().size();
-        if cols != cur_cols || rows != cur_rows {
-            p.screen_mut().set_size(rows, cols);
+        // Grow-only width: shrinking the vt100 screen truncates every visible
+        // and scrollback row irreversibly, so text cut at a narrow width never
+        // comes back on re-expand. Keep the widest width seen. Height still
+        // tracks the visible area so bottom-anchored output stays on screen.
+        let new_cols = cur_cols.max(cols);
+        if new_cols != cur_cols || rows != cur_rows {
+            p.screen_mut().set_size(rows, new_cols);
             changed = true;
         }
         drop(p);
@@ -1461,5 +1466,57 @@ mod tests {
         let cell = screen.cell(0, 1).expect("cell should exist at (0,1)");
         let style = cell_style(&cell);
         assert_eq!(style, Style::default());
+    }
+
+    #[test]
+    fn test_resize_shrink_does_not_truncate_content() {
+        let mut t = Terminal::spawn_reused("svc".into(), ".".into(), "true".into(), 100);
+        // Fits on one parser row (initial width 80) but exceeds the 60-col
+        // shrink target, so it would be truncated by a shrink-to-fit resize.
+        let long_line = format!("ERROR {}", "x".repeat(70));
+        {
+            let mut p = t.parser.lock().unwrap_or_else(|e| e.into_inner());
+            // Clear the header spawn_reused wrote so the line sits alone on row 0.
+            p.process(b"\x1b[2J\x1b[H");
+            p.process(long_line.as_bytes());
+        }
+
+        t.resize(60, 24);
+        let after: Vec<String> = t.get_all_lines();
+        assert!(
+            after.iter().any(|l| l.contains(&long_line)),
+            "shrink must not truncate text (resize width is grow-only), got: {:?}",
+            after
+        );
+
+        t.resize(120, 24);
+        assert!(
+            t.get_all_lines().iter().any(|l| l.contains(&long_line)),
+            "re-expand must still show the full text"
+        );
+    }
+
+    #[test]
+    fn test_resize_height_tracks_visible_area() {
+        let mut t = Terminal::spawn_reused("svc".into(), ".".into(), "true".into(), 100);
+        t.resize(80, 30);
+        let (rows, cols) = t
+            .parser
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .screen()
+            .size();
+        assert_eq!(rows, 30);
+        assert_eq!(cols, 80);
+
+        t.resize(50, 20);
+        let (rows, cols) = t
+            .parser
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .screen()
+            .size();
+        assert_eq!(rows, 20, "height must track the visible area");
+        assert_eq!(cols, 80, "width must never shrink");
     }
 }
