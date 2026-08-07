@@ -145,11 +145,11 @@ Terminal::get_screen(visible_rows, offset)
 
 ## Process lifecycle
 
-1. **Startup**: Parse config, spawn terminals, start proxy, enter TUI
-2. **Running**: Event loop polls input at 50ms intervals, draws UI, handles events
+1. **Startup**: Parse config, spawn terminals, start proxy, enter TUI. Before spawning, fog detects the git project (`git rev-parse --git-common-dir`) and reclaims any running instance of the same script in the same project: it sends a `kill` request carrying the `reuse` service names over IPC. The old instance hands over live reused services (PTY master fd via `SCM_RIGHTS` + scrollback) and then exits.
+2. **Running**: Event loop polls input at 50ms intervals, draws UI, handles events.
 3. **Shutdown**: On `q` / `Ctrl+C` / SIGINT:
    - `exit` flag is set
-   - Each `Terminal` drops → kills child process group (SIGTERM, wait 500ms, SIGKILL), kills descendants
+   - Each `Terminal` drops → kills child process group (SIGTERM, wait 500ms, SIGKILL), kills descendants; reuse-flagged services skip their `shutdown_cmd` so shared resources survive
    - `ProxyInstance` drops → sets shutdown flag, joins proxy thread
    - Terminal leaves raw mode, restores alternate screen, disables mouse capture
    - If `--save-logs` was passed, writes output files to `temp/<name>.txt`

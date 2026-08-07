@@ -52,6 +52,22 @@ pub fn waitpid_nohang(pid: u32) -> io::Result<Option<i32>> {
     }
 }
 
+/// Returns `true` if a process with the given PID exists and is signalable.
+///
+/// Uses `kill(pid, 0)` which performs no signal delivery but reports whether
+/// the process exists.
+pub fn is_pid_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    let ret = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    if ret == 0 {
+        return true;
+    }
+    // EPERM means the process exists but we lack permission to signal it.
+    io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
 /// Attempts to send a signal to a process group, ignoring any errors.
 ///
 /// # Arguments

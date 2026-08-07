@@ -24,6 +24,7 @@ use ratatui::{
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
 use std::{io, time::Duration};
 
 enum Mode {
@@ -183,6 +184,33 @@ impl App {
         );
     }
 
+    /// Extracts live services requested for handover by a replacing instance
+    /// and publishes them for the IPC thread to send over the socket.
+    fn perform_handoff(&mut self) {
+        let req = self
+            .ipc_state
+            .handoff_req
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let Some(names) = req else {
+            return;
+        };
+        let mut results = Vec::new();
+        for item in &mut self.items {
+            if names.contains(&item.name)
+                && let Some(handoff) = item.extract_handoff()
+            {
+                results.push(handoff);
+            }
+        }
+        *self
+            .ipc_state
+            .handoff_results
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = results;
+    }
+
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
         while !self.exit {
             if self.config_rx.try_recv().is_ok() {
@@ -190,14 +218,49 @@ impl App {
             }
             if self.sigint.load(Ordering::SeqCst) || self.ipc_state.kill_flag.load(Ordering::SeqCst)
             {
+                self.perform_handoff();
+                // Give the IPC thread a moment to send any handoffs before we
+                // drop our terminals.
+                if self
+                    .ipc_state
+                    .handoff_req
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .is_some()
+                {
+                    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                    while std::time::Instant::now() < deadline
+                        && !self.ipc_state.handoff_done.load(Ordering::SeqCst)
+                    {
+                        thread::sleep(Duration::from_millis(20));
+                    }
+                }
                 self.exit = true;
                 break;
+            }
+            for i in 0..self.items.len() {
+                if let Err(e) = self.items[i].maybe_auto_start() {
+                    self.errors.push(format!("auto-start error: {}", e));
+                }
             }
             terminal.draw(|frame| self.draw(frame))?;
             if event::poll(Duration::from_millis(50))? {
                 self.handle_events()?;
             }
             self.handle_auto_scroll();
+        }
+        // Services a replacing instance asked to reuse survive the handoff:
+        // skip their shutdown_cmd so the shared resource stays up.
+        let reuse_skip = self
+            .ipc_state
+            .reuse_skip
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        for item in &mut self.items {
+            if reuse_skip.contains(&item.name) {
+                item.shutdown_cmd = None;
+            }
         }
         let _ = execute!(std::io::stdout(), DisableMouseCapture);
         let _ = event::poll(Duration::from_millis(20));
@@ -887,7 +950,7 @@ mod tests {
             proxy_filter: String::new(),
             config_path: std::path::PathBuf::new(),
             config_rx: rx,
-            ipc_state: Arc::new(IpcState::new("test".to_string())),
+            ipc_state: Arc::new(IpcState::new("test".to_string(), None)),
             proxy_tab_index,
             scrollbar_dragging: false,
             auto_scrolling: None,

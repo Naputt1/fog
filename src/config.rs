@@ -51,6 +51,11 @@ pub struct ConfigEntry {
     pub depends_on: Option<Vec<String>>,
     /// Shell command to run when fog shuts down (e.g. "docker compose down").
     pub shutdown_cmd: Option<String>,
+    /// When another instance of the same project+script starts, this service's
+    /// `shutdown_cmd` is skipped (and its live process handed over) instead of
+    /// being torn down, so the resource can be reused across worktrees.
+    #[serde(default)]
+    pub reuse: bool,
 }
 
 /// A route definition for the reverse proxy.

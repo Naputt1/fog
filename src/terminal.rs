@@ -9,16 +9,21 @@ use ratatui::{
 use std::{
     cell::RefCell,
     fs,
-    io::{self, Read, Write},
+    io::{self, Write},
     net::ToSocketAddrs,
+    os::unix::io::RawFd,
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
     thread::{self, JoinHandle},
+    time::{Duration, Instant},
 };
 
 const INITIAL_COLS: u16 = 256;
+
+/// How long a reused service may be unhealthy before fog starts it itself.
+const DEFAULT_REUSE_GRACE: Duration = Duration::from_secs(10);
 
 /// How a terminal was initialized.
 #[derive(Debug, Clone, PartialEq)]
@@ -64,6 +69,25 @@ pub struct Terminal {
     pub shutdown_cmd: Option<String>,
     /// Names of services this service depends on.
     pub dep_names: Vec<String>,
+    /// Whether this service is borrowed from another instance (reuse mode):
+    /// no process is spawned, health checks verify the resource, and it is
+    /// not torn down on exit.
+    pub reused: bool,
+    /// When a reused service is adopted from another instance, the child PID
+    /// to wait on / kill instead of a [`Child`] handle.
+    owned_pid: Option<u32>,
+    /// Raw master fd of an adopted PTY (used for resizing).
+    raw_fd: Option<RawFd>,
+    /// When the reused service was created, for the grace-period auto-start.
+    reused_since: Option<Instant>,
+    /// How long to wait for a reused resource to become healthy before
+    /// starting it ourselves.
+    reuse_grace: Duration,
+    /// Write end of the pipe used to stop the reader thread.
+    stop_w: Option<RawFd>,
+    /// Set when this terminal's live process has been handed to another
+    /// instance; `kill_inner` then releases resources without killing.
+    handed_off: bool,
     parser: Arc<Mutex<vt100::Parser>>,
     health_status: Arc<Mutex<HealthStatus>>,
     screen_generation: Arc<AtomicUsize>,
@@ -85,6 +109,8 @@ impl std::fmt::Debug for Terminal {
             .field("scrollback", &self.scrollback)
             .field("health_checks", &self.health_checks)
             .field("shutdown_cmd", &self.shutdown_cmd)
+            .field("reused", &self.reused)
+            .field("owned_pid", &self.owned_pid)
             .field("handler", &self.handler)
             .field("child", &self.child)
             .finish()
@@ -129,26 +155,100 @@ fn cell_style(cell: &vt100::Cell) -> Style {
     style
 }
 
+/// Creates a pipe used to signal a reader thread to stop. Returns
+/// `(read_end, write_end)`.
+fn make_stop_pipe() -> io::Result<(RawFd, RawFd)> {
+    let mut fds = [-1i32, -1];
+    let ret = unsafe { libc::pipe(fds.as_mut_ptr()) };
+    if ret != 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok((fds[0], fds[1]))
+    }
+}
+
+/// Spawns a thread that reads PTY output from `fd` and feeds the parser,
+/// stopping when the PTY reaches EOF or the `stop` pipe becomes readable.
+///
+/// The thread owns `fd` and `stop` and closes them on exit.
 fn spawn_reader(
     parser: Arc<Mutex<vt100::Parser>>,
     generation: Arc<AtomicUsize>,
-    mut reader: Box<dyn Read + Send>,
+    fd: RawFd,
+    stop: RawFd,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
         let mut buf = [0u8; 4096];
+        let mut pfds = [
+            libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: stop,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
         loop {
-            match reader.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    if let Ok(mut p) = parser.lock() {
-                        p.process(&buf[..n]);
-                    }
-                    generation.fetch_add(1, Ordering::Relaxed);
+            // SAFETY: pfds is a valid array of pollfd structs.
+            let r = unsafe { libc::poll(pfds.as_mut_ptr(), 2, -1) };
+            if r < 0 {
+                break;
+            }
+            if pfds[1].revents != 0 {
+                break;
+            }
+            if pfds[0].revents & libc::POLLIN != 0 {
+                // SAFETY: fd is a valid, owned descriptor opened for reading.
+                let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+                if n <= 0 {
+                    break;
                 }
-                Err(_) => break,
+                if let Ok(mut p) = parser.lock() {
+                    p.process(&buf[..n as usize]);
+                }
+                generation.fetch_add(1, Ordering::Relaxed);
+            } else if pfds[0].revents != 0 {
+                break;
             }
         }
+        // SAFETY: this thread owns these fds.
+        unsafe {
+            libc::close(fd);
+            libc::close(stop);
+        }
     })
+}
+
+/// A write-only wrapper around a raw fd (e.g. a PTY master received from
+/// another instance). Owns the fd and closes it on drop.
+struct FdWriter {
+    fd: RawFd,
+}
+
+impl Write for FdWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        // SAFETY: fd is a valid, owned descriptor opened for writing.
+        let n = unsafe { libc::write(self.fd, buf.as_ptr() as *const libc::c_void, buf.len()) };
+        if n < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(n as usize)
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Drop for FdWriter {
+    fn drop(&mut self) {
+        // SAFETY: this struct owns the fd.
+        unsafe { libc::close(self.fd) };
+    }
 }
 
 impl Terminal {
@@ -181,18 +281,25 @@ impl Terminal {
             .spawn_command(cmd)
             .map_err(|e| io::Error::other(e.to_string()))?;
 
-        let reader = pair
-            .master
-            .try_clone_reader()
-            .map_err(|e| io::Error::other(e.to_string()))?;
         let writer = pair
             .master
             .take_writer()
             .map_err(|e| io::Error::other(e.to_string()))?;
 
+        let master_fd = pair
+            .master
+            .as_raw_fd()
+            .ok_or_else(|| io::Error::other("pty master has no fd"))?;
+        let (stop_r, stop_w) = make_stop_pipe()?;
+        // SAFETY: dup creates a new independent descriptor for the thread.
+        let reader_fd = unsafe { libc::dup(master_fd) };
+        if reader_fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+
         let parser = Arc::new(Mutex::new(vt100::Parser::new(24, 80, scrollback)));
         let screen_generation = Arc::new(AtomicUsize::new(0));
-        let handler = spawn_reader(parser.clone(), screen_generation.clone(), reader);
+        let handler = spawn_reader(parser.clone(), screen_generation.clone(), reader_fd, stop_r);
 
         Ok(Self {
             init: Init::Shell,
@@ -204,6 +311,13 @@ impl Terminal {
             health_checks: vec![],
             shutdown_cmd: None,
             dep_names: vec![],
+            reused: false,
+            owned_pid: None,
+            raw_fd: None,
+            reused_since: None,
+            reuse_grace: DEFAULT_REUSE_GRACE,
+            stop_w: Some(stop_w),
+            handed_off: false,
             parser,
             health_status: Arc::new(Mutex::new(HealthStatus::Unknown)),
             screen_generation: Arc::new(AtomicUsize::new(0)),
@@ -246,6 +360,13 @@ impl Terminal {
             health_checks: vec![],
             shutdown_cmd: None,
             dep_names: vec![],
+            reused: false,
+            owned_pid: None,
+            raw_fd: None,
+            reused_since: None,
+            reuse_grace: DEFAULT_REUSE_GRACE,
+            stop_w: None,
+            handed_off: false,
             parser: Arc::new(Mutex::new(vt100::Parser::new(24, 80, scrollback))),
             health_status: Arc::new(Mutex::new(HealthStatus::Unknown)),
             screen_generation: Arc::new(AtomicUsize::new(0)),
@@ -285,6 +406,13 @@ impl Terminal {
             health_checks: vec![],
             shutdown_cmd: None,
             dep_names: vec![],
+            reused: false,
+            owned_pid: None,
+            raw_fd: None,
+            reused_since: None,
+            reuse_grace: DEFAULT_REUSE_GRACE,
+            stop_w: None,
+            handed_off: false,
             parser,
             health_status: Arc::new(Mutex::new(HealthStatus::Unhealthy)),
             screen_generation: Arc::new(AtomicUsize::new(0)),
@@ -325,6 +453,13 @@ impl Terminal {
             health_checks: vec![],
             shutdown_cmd: None,
             dep_names: deps.to_vec(),
+            reused: false,
+            owned_pid: None,
+            raw_fd: None,
+            reused_since: None,
+            reuse_grace: DEFAULT_REUSE_GRACE,
+            stop_w: None,
+            handed_off: false,
             parser,
             health_status: Arc::new(Mutex::new(HealthStatus::Pending)),
             screen_generation: Arc::new(AtomicUsize::new(0)),
@@ -334,6 +469,185 @@ impl Terminal {
             child: None,
             master: None,
         }
+    }
+
+    /// Creates a terminal for a reused service that is borrowed from another
+    /// instance: no process is spawned and the resource is verified via health
+    /// checks instead. If the resource does not come up within the grace
+    /// period, [`maybe_auto_start`](Self::maybe_auto_start) starts it.
+    ///
+    /// # Arguments
+    /// * `name` - The display name for the terminal tab.
+    /// * `path` - The working directory the command would run in.
+    /// * `cmd` - The command that would start the service.
+    /// * `scrollback` - Number of scrollback lines.
+    pub fn spawn_reused(name: String, path: String, cmd: String, scrollback: usize) -> Self {
+        let message =
+            format!("♻ reusing already-running '{name}'; start skipped (press R to take over)");
+        let parser = Arc::new(Mutex::new(vt100::Parser::new(24, 80, scrollback)));
+        {
+            let mut p = parser.lock().unwrap_or_else(|e| e.into_inner());
+            p.screen_mut().set_size(24, 80);
+            p.process(message.as_bytes());
+        }
+
+        Self {
+            init: Init::Command { path, cmd },
+            name,
+            stopped: false,
+            process_running: true,
+            save_logs: false,
+            scrollback,
+            health_checks: vec![],
+            shutdown_cmd: None,
+            dep_names: vec![],
+            reused: true,
+            owned_pid: None,
+            raw_fd: None,
+            reused_since: Some(Instant::now()),
+            reuse_grace: DEFAULT_REUSE_GRACE,
+            stop_w: None,
+            handed_off: false,
+            parser,
+            health_status: Arc::new(Mutex::new(HealthStatus::Unknown)),
+            screen_generation: Arc::new(AtomicUsize::new(0)),
+            line_cache: RefCell::new(None),
+            handler: None,
+            writer: None,
+            child: None,
+            master: None,
+        }
+    }
+
+    /// Adopts a live PTY handed over from another fog instance.
+    ///
+    /// The process keeps running; its output is streamed into this terminal
+    /// via the received master `fd`. Ownership is taken lazily: pressing
+    /// `R` (restart) kills the borrowed process and starts the command fresh.
+    ///
+    /// # Arguments
+    /// * `path` - The working directory the command would run in.
+    /// * `cmd` - The command that started the service.
+    /// * `name` - The display name for the terminal tab.
+    /// * `scrollback` - Number of scrollback lines.
+    /// * `fd` - The PTY master fd received via SCM_RIGHTS (now owned by us).
+    /// * `pid` - The process group leader of the running service.
+    /// * `history` - Scrollback text transferred from the previous instance.
+    pub fn adopt(
+        path: String,
+        cmd: String,
+        name: String,
+        scrollback: usize,
+        fd: RawFd,
+        pid: u32,
+        history: Vec<String>,
+    ) -> Self {
+        let parser = Arc::new(Mutex::new(vt100::Parser::new(24, INITIAL_COLS, scrollback)));
+        if !history.is_empty() {
+            let text = history.join("\n");
+            let mut p = parser.lock().unwrap_or_else(|e| e.into_inner());
+            p.process(text.as_bytes());
+        }
+        let screen_generation = Arc::new(AtomicUsize::new(0));
+        let (stop_r, stop_w) = make_stop_pipe().unwrap_or((-1, -1));
+        // SAFETY: dup creates an independent descriptor for the reader thread.
+        let reader_fd = unsafe { libc::dup(fd) };
+        let handler = if reader_fd >= 0 && stop_r >= 0 {
+            Some(spawn_reader(
+                parser.clone(),
+                screen_generation.clone(),
+                reader_fd,
+                stop_r,
+            ))
+        } else {
+            if reader_fd >= 0 {
+                // SAFETY: this descriptor is owned by us.
+                unsafe { libc::close(reader_fd) };
+            }
+            if stop_r >= 0 {
+                // SAFETY: this descriptor is owned by us.
+                unsafe { libc::close(stop_r) };
+            }
+            None
+        };
+        // SAFETY: dup creates an independent descriptor for the writer.
+        let writer_fd = unsafe { libc::dup(fd) };
+        let writer = if writer_fd >= 0 {
+            Some(Box::new(FdWriter { fd: writer_fd }) as Box<dyn Write + Send>)
+        } else {
+            None
+        };
+
+        Self {
+            init: Init::Command { path, cmd },
+            name,
+            stopped: false,
+            process_running: true,
+            save_logs: false,
+            scrollback,
+            health_checks: vec![],
+            shutdown_cmd: None,
+            dep_names: vec![],
+            reused: true,
+            owned_pid: Some(pid),
+            raw_fd: Some(fd),
+            reused_since: None,
+            reuse_grace: DEFAULT_REUSE_GRACE,
+            stop_w: if stop_w >= 0 { Some(stop_w) } else { None },
+            handed_off: false,
+            parser,
+            health_status: Arc::new(Mutex::new(HealthStatus::Unknown)),
+            screen_generation,
+            line_cache: RefCell::new(None),
+            handler,
+            writer,
+            child: None,
+            master: None,
+        }
+    }
+
+    /// Extracts this terminal's live process for transfer to another instance.
+    ///
+    /// Dups the PTY master fd, captures the scrollback, and stops this
+    /// terminal's reader so output is not consumed after handoff. Returns
+    /// `None` if there is no live process to hand over.
+    pub fn extract_handoff(&mut self) -> Option<crate::ipc::HandoffItem> {
+        let pid = if let Some(pid) = self.owned_pid {
+            pid
+        } else {
+            self.child.as_ref()?.process_id()?
+        };
+        let fd = if let Some(fd) = self.raw_fd {
+            fd
+        } else {
+            self.master.as_ref()?.as_raw_fd()?
+        };
+        // SAFETY: dup creates an independent descriptor for the receiver.
+        let dup_fd = unsafe { libc::dup(fd) };
+        if dup_fd < 0 {
+            return None;
+        }
+        let scrollback = self.get_all_lines();
+
+        if let Some(stop) = self.stop_w.take() {
+            // SAFETY: stop is a valid pipe write end owned by this terminal.
+            unsafe {
+                libc::write(stop, c"".as_ptr().cast(), 1);
+                libc::close(stop);
+            }
+        }
+        if let Some(handler) = self.handler.take() {
+            let _ = handler.join();
+        }
+        self.writer = None;
+        self.reused = true;
+        self.handed_off = true;
+        Some(crate::ipc::HandoffItem {
+            name: self.name.clone(),
+            pid,
+            scrollback,
+            fd: dup_fd,
+        })
     }
 
     /// Starts a command in this terminal, upgrading it from a pending state.
@@ -383,14 +697,21 @@ impl Terminal {
             .spawn_command(cmd_builder)
             .map_err(|e| io::Error::other(e.to_string()))?;
 
-        let reader = pair
-            .master
-            .try_clone_reader()
-            .map_err(|e| io::Error::other(e.to_string()))?;
         let mut writer = pair
             .master
             .take_writer()
             .map_err(|e| io::Error::other(e.to_string()))?;
+
+        let master_fd = pair
+            .master
+            .as_raw_fd()
+            .ok_or_else(|| io::Error::other("pty master has no fd"))?;
+        let (stop_r, stop_w) = make_stop_pipe()?;
+        // SAFETY: dup creates a new independent descriptor for the thread.
+        let reader_fd = unsafe { libc::dup(master_fd) };
+        if reader_fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
 
         let _ = writeln!(writer, "cd {} && {}", path, cmd);
 
@@ -404,8 +725,10 @@ impl Terminal {
         self.handler = Some(spawn_reader(
             self.parser.clone(),
             self.screen_generation.clone(),
-            reader,
+            reader_fd,
+            stop_r,
         ));
+        self.stop_w = Some(stop_w);
         self.writer = Some(writer);
         self.child = Some(child);
         self.master = Some(pair.master);
@@ -588,6 +911,20 @@ impl Terminal {
     /// * `rows` - The new number of rows.
     pub fn resize(&mut self, cols: u16, rows: u16) {
         let mut changed = false;
+        // A zero-size screen makes the vt100 parser overflow; clamp to sane
+        // minimums (also avoids PTY ioctls that would fail).
+        let rows = rows.max(1);
+        let cols = cols.max(1);
+        if let Some(fd) = self.raw_fd {
+            // Adopted PTY: resize directly via ioctl.
+            // SAFETY: ws is a valid, fully-initialized winsize struct.
+            unsafe {
+                let mut ws: libc::winsize = std::mem::zeroed();
+                ws.ws_row = rows;
+                ws.ws_col = cols;
+                libc::ioctl(fd, libc::TIOCSWINSZ, &ws);
+            }
+        }
         if let Some(ref m) = self.master {
             let _ = m.resize(PtySize {
                 rows,
@@ -609,11 +946,46 @@ impl Terminal {
     }
 
     fn kill_inner(&mut self) {
+        // Signal the reader thread to stop reading so it releases its fd.
+        if let Some(stop) = self.stop_w.take() {
+            // SAFETY: stop is a valid pipe write end owned by this terminal.
+            unsafe {
+                libc::write(stop, c"".as_ptr().cast(), 1);
+                libc::close(stop);
+            }
+        }
+
+        if self.handed_off {
+            // The live process was transferred to another instance: release
+            // our resources without killing or reaping the child.
+            let _ = self.child.take();
+            self.master = None;
+            self.writer = None;
+            self.raw_fd = None;
+            self.owned_pid = None;
+            if let Some(handler) = self.handler.take() {
+                let _ = handler.join();
+            }
+            self.process_running = false;
+            return;
+        }
+
+        // An adopted terminal: kill the process group by the stored PID.
+        if let Some(pid) = self.owned_pid {
+            process::try_kill_process_group(pid, SIGTERM);
+            thread::sleep(Duration::from_millis(500));
+            if let Ok(None) = process::waitpid_nohang(pid) {
+                process::try_kill_process_group(pid, SIGKILL);
+            }
+            process::kill_descendants(pid);
+            self.owned_pid = None;
+        }
+
         if let Some(ref child) = self.child
             && let Some(pid) = child.process_id()
         {
             process::try_kill_process_group(pid, SIGTERM);
-            thread::sleep(std::time::Duration::from_millis(500));
+            thread::sleep(Duration::from_millis(500));
             if let Ok(None) = process::waitpid_nohang(pid) {
                 process::try_kill_process_group(pid, SIGKILL);
             }
@@ -623,6 +995,12 @@ impl Terminal {
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
             let _ = child.wait();
+        }
+
+        if let Some(fd) = self.raw_fd {
+            // SAFETY: fd was received via SCM_RIGHTS and is owned by us.
+            unsafe { libc::close(fd) };
+            self.raw_fd = None;
         }
 
         if let Some(handler) = self.handler.take() {
@@ -636,11 +1014,11 @@ impl Terminal {
 
     /// Restarts the command process in this terminal.
     ///
+    /// For a reused service this takes ownership: any borrowed process is
+    /// killed and the command is spawned fresh in this terminal.
+    ///
     /// # Errors
     /// Returns an error if this is a shell tab (shells cannot be restarted).
-    ///
-    /// # Panics
-    /// Panics if the PTY could not be re-opened or the command re-spawned.
     pub fn restart(&mut self) -> io::Result<()> {
         let (path, cmd) = match &self.init {
             Init::Command { path, cmd } => (path.clone(), cmd.clone()),
@@ -649,6 +1027,8 @@ impl Terminal {
             }
         };
         self.kill_inner();
+        self.reused = false;
+        self.reused_since = None;
         self.stopped = false;
         self.spawn_into(&path, &cmd)
     }
@@ -722,6 +1102,26 @@ impl Terminal {
         if self.stopped {
             return;
         }
+        // An adopted terminal whose transferred process has already exited
+        // (e.g. a one-shot `docker compose up`) falls back to plain reuse:
+        // drop the dead fd and rely on health checks.
+        if let Some(pid) = self.owned_pid
+            && process::waitpid_nohang(pid).unwrap_or(Some(0)).is_some()
+        {
+            self.owned_pid = None;
+            self.raw_fd = None;
+            self.process_running = false;
+        }
+        // Reused services have no owned process; their state is driven by
+        // health checks (or assumed up when none are configured).
+        if self.reused {
+            let healthy = *self.health_status.lock().unwrap_or_else(|e| e.into_inner())
+                == HealthStatus::Healthy;
+            let up = self.health_checks.is_empty() || healthy;
+            self.process_running = up;
+            self.stopped = !up;
+            return;
+        }
         if *self.health_status.lock().unwrap_or_else(|e| e.into_inner()) == HealthStatus::Pending {
             return;
         }
@@ -741,6 +1141,43 @@ impl Terminal {
             return;
         }
         self.update_process_running();
+    }
+
+    /// Starts a reused service if it has not become healthy within the grace
+    /// period, taking ownership of it.
+    ///
+    /// # Errors
+    /// Returns an error if the process could not be spawned.
+    pub fn maybe_auto_start(&mut self) -> io::Result<()> {
+        if !self.reused {
+            return Ok(());
+        }
+        if self.health_checks.is_empty() {
+            return Ok(());
+        }
+        let Some(since) = self.reused_since else {
+            return Ok(());
+        };
+        if since.elapsed() < self.reuse_grace {
+            return Ok(());
+        }
+        let healthy =
+            *self.health_status.lock().unwrap_or_else(|e| e.into_inner()) == HealthStatus::Healthy;
+        if healthy {
+            return Ok(());
+        }
+        let (path, cmd) = match &self.init {
+            Init::Command { path, cmd } => (path.clone(), cmd.clone()),
+            Init::Shell => return Ok(()),
+        };
+        self.reused = false;
+        self.reused_since = None;
+        let _ = writeln!(
+            std::io::stderr(),
+            "reused service '{}' not healthy after grace period, starting it",
+            self.name
+        );
+        self.start(&path, &cmd)
     }
 
     #[cfg(unix)]
@@ -784,7 +1221,9 @@ impl Drop for Terminal {
             let _ = fs::write(format!("temp/{}.txt", self.name), &text);
         }
         self.kill_inner();
-        if let Some(ref shutdown_cmd) = self.shutdown_cmd {
+        if !self.reused
+            && let Some(ref shutdown_cmd) = self.shutdown_cmd
+        {
             let cwd = match &self.init {
                 Init::Command { path, .. } if !path.is_empty() => Some(path.as_str()),
                 _ => None,
@@ -814,6 +1253,51 @@ impl Drop for Terminal {
 mod tests {
     use super::*;
     use ratatui::style::{Color, Modifier};
+
+    #[test]
+    fn test_spawn_reused_is_ready_without_health_checks() {
+        let mut t =
+            Terminal::spawn_reused("db".into(), ".".into(), "docker compose up -d".into(), 100);
+        assert!(t.reused);
+        assert!(t.process_running);
+        assert!(!t.stopped);
+        assert!(t.is_ready());
+        t.refresh_status();
+        assert!(!t.stopped);
+    }
+
+    #[test]
+    fn test_reused_with_unreachable_health_auto_starts() {
+        let mut t = Terminal::spawn_reused("db".into(), ".".into(), "true".into(), 100);
+        t.health_checks.push(HealthCheckConfig {
+            kind: crate::config::HealthCheckKind::Tcp,
+            target: "127.0.0.1:1".into(),
+            interval_ms: Some(50),
+            timeout_ms: Some(50),
+        });
+        t.reuse_grace = Duration::ZERO;
+        t.start_health_checks();
+        // health starts Unknown (not Healthy), so auto-start should take over.
+        t.maybe_auto_start().unwrap();
+        assert!(!t.reused);
+        assert!(t.process_running);
+        t.kill_inner();
+    }
+
+    #[test]
+    fn test_extract_handoff_live_process() {
+        let mut t = Terminal::spawn_command(".", "echo hello-fog", "svc".into(), 100).unwrap();
+        let handoff = t.extract_handoff().expect("live process should hand off");
+        assert_eq!(handoff.name, "svc");
+        assert!(handoff.pid > 0);
+        assert!(handoff.fd >= 0);
+        assert!(!handoff.scrollback.is_empty());
+        assert!(t.handed_off);
+        // Releasing must not kill the (already-extracted) process.
+        t.kill_inner();
+        // SAFETY: handoff.fd is owned by the test after extraction.
+        unsafe { libc::close(handoff.fd) };
+    }
 
     #[test]
     fn test_cell_style_default() {

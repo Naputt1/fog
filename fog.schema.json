@@ -26,6 +26,11 @@
                   "type": "string",
                   "description": "Shell command to run when fog shuts down (e.g. docker compose down)"
                 },
+                "reuse": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "When another instance of the same project+script starts, this service is reused instead of torn down: its shutdown_cmd is skipped, a live process is handed over, and starting it is skipped if it is already up (verified via health_check)."
+                },
                 "health_check": {
                   "oneOf": [
                     {

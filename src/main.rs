@@ -9,6 +9,7 @@ use std::io::stdout;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 use std::{fs, io};
 
 use fog::app::{App, PendingService};
@@ -147,6 +148,69 @@ fn list_scripts_and_exit(config: &Config, message: &str) -> ! {
     std::process::exit(1);
 }
 
+/// Names of reuse-flagged services in a script.
+fn reuse_names(script: &fog::config::ScriptConfig) -> Vec<String> {
+    script
+        .service
+        .as_ref()
+        .map(|entries| {
+            entries
+                .iter()
+                .filter(|e| e.reuse)
+                .map(|e| {
+                    e.name.clone().unwrap_or_else(|| {
+                        Path::new(&e.path)
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into_owned()
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Shuts down existing fog instances running the same script in the same
+/// project, so a new instance can take their place. Returns any live services
+/// handed over, keyed by service name, together with their PTY master fd.
+fn reclaim_existing(
+    project: &str,
+    script: &str,
+    reuse: &[String],
+    timeout: Duration,
+) -> HashMap<String, ipc::HandoffItem> {
+    let mut adopted = HashMap::new();
+    let existing = ipc::find_instances_for(project, script);
+    for (pid, path) in &existing {
+        eprintln!(
+            "replacing existing fog instance (pid {pid}, script {script}, project {project})"
+        );
+        let handoffs = match ipc::reclaim(path, reuse) {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!("  warning: could not reach instance {pid}: {e}, continuing");
+                continue;
+            }
+        };
+        if handoffs.is_empty() {
+            eprintln!("  old instance {pid} has no live services to reuse");
+        } else {
+            let names: Vec<&str> = handoffs.iter().map(|h| h.name.as_str()).collect();
+            eprintln!("  reusing live services: {}", names.join(", "));
+        }
+        for handoff in handoffs {
+            adopted.entry(handoff.name.clone()).or_insert(handoff);
+        }
+        if ipc::wait_for_exit(*pid, timeout) {
+            eprintln!("  old instance {pid} stopped");
+        } else {
+            eprintln!("  warning: instance {pid} did not stop within the timeout");
+        }
+    }
+    adopted
+}
+
 fn cmd_ls() -> io::Result<()> {
     let instances = ipc::find_instances()?;
 
@@ -155,7 +219,7 @@ fn cmd_ls() -> io::Result<()> {
         return Ok(());
     }
 
-    let mut rows: Vec<(u32, String, String, String)> = Vec::new();
+    let mut rows: Vec<(u32, String, String, String, String)> = Vec::new();
     for (pid, path) in &instances {
         match ipc::query_status(path) {
             Ok(status) => {
@@ -177,7 +241,16 @@ fn cmd_ls() -> io::Result<()> {
                     })
                     .collect::<Vec<_>>()
                     .join(", ");
-                rows.push((*pid, status.script, proxy, services));
+                let project = status
+                    .project
+                    .map(|p| {
+                        Path::new(&p)
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or(p)
+                    })
+                    .unwrap_or_else(|| "-".to_string());
+                rows.push((*pid, status.script, project, proxy, services));
             }
             Err(_) => {
                 // Stale socket: remove it and skip.
@@ -197,16 +270,17 @@ fn cmd_ls() -> io::Result<()> {
         .max()
         .unwrap_or(3);
     let w_script = rows.iter().map(|r| r.1.len()).max().unwrap_or(6);
-    let w_proxy = rows.iter().map(|r| r.2.len()).max().unwrap_or(5);
+    let w_project = rows.iter().map(|r| r.2.len()).max().unwrap_or(7);
+    let w_proxy = rows.iter().map(|r| r.3.len()).max().unwrap_or(5);
 
     println!(
-        "{:<w_pid$}  {:<w_script$}  {:<w_proxy$}  services",
-        "pid", "script", "proxy"
+        "{:<w_pid$}  {:<w_script$}  {:<w_project$}  {:<w_proxy$}  services",
+        "pid", "script", "project", "proxy"
     );
-    for (pid, script, proxy, services) in rows {
+    for (pid, script, project, proxy, services) in rows {
         println!(
-            "{:<w_pid$}  {:<w_script$}  {:<w_proxy$}  {}",
-            pid, script, proxy, services
+            "{:<w_pid$}  {:<w_script$}  {:<w_project$}  {:<w_proxy$}  {}",
+            pid, script, project, proxy, services
         );
     }
     Ok(())
@@ -270,6 +344,14 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
         .unwrap_or_else(|| std::path::Path::new("."))
         .to_path_buf();
 
+    let project =
+        fog::project::detect(&config_dir).or_else(|| fog::project::fallback_identity(&config_dir));
+    let mut adopted: HashMap<String, ipc::HandoffItem> = HashMap::new();
+    if let Some(ref project) = project {
+        let reuse = reuse_names(script);
+        adopted = reclaim_existing(project, name, &reuse, Duration::from_secs(15));
+    }
+
     let sigint = Arc::new(AtomicBool::new(false));
     let sig = sigint.clone();
     if ctrlc::set_handler(move || {
@@ -280,7 +362,7 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
         eprintln!("warning: could not set Ctrl+C handler");
     }
 
-    let ipc_state = Arc::new(ipc::IpcState::new(name.to_string()));
+    let ipc_state = Arc::new(ipc::IpcState::new(name.to_string(), project));
     ipc::spawn_server(ipc_state.clone())?;
 
     enable_raw_mode()?;
@@ -329,7 +411,38 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
 
         let has_deps = entry.depends_on.is_some();
 
-        let terminal = if has_deps {
+        let terminal = if entry.reuse {
+            if health_checks.is_empty() {
+                eprintln!(
+                    "warning: service '{}' has reuse: true but no health_check; \
+                     fog cannot verify it is already running",
+                    name
+                );
+            }
+            let mut t = if let Some(handoff) = adopted.remove(&name) {
+                Terminal::adopt(
+                    service_path_str.clone(),
+                    entry.cmd.clone(),
+                    name.clone(),
+                    scrollback,
+                    handoff.fd,
+                    handoff.pid,
+                    handoff.scrollback,
+                )
+            } else {
+                Terminal::spawn_reused(
+                    name.clone(),
+                    service_path_str,
+                    entry.cmd.clone(),
+                    scrollback,
+                )
+            };
+            t.save_logs = cli.save_logs;
+            t.health_checks = health_checks;
+            t.shutdown_cmd = entry.shutdown_cmd.clone();
+            t.start_health_checks();
+            t
+        } else if has_deps {
             let deps = entry.depends_on.clone().unwrap_or_default();
             let mut t = Terminal::spawn_pending(name.clone(), scrollback, &deps);
             t.save_logs = cli.save_logs;

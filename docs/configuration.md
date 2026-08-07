@@ -99,8 +99,40 @@ A script bundles a set of services and an optional proxy under a name. Run it wi
 | `path` | **Yes** | `string` | Working directory for the command (relative to the config file). |
 | `cmd` | **Yes** | `string` | Shell command to execute (e.g. `cargo run`, `npm run dev`, `air`). |
 | `health_check` | No | `object` | Health check configuration (see below). |
+| `shutdown_cmd` | No | `string` | Shell command to run on shutdown (e.g. `docker compose down`). |
+| `reuse` | No | `boolean` | Reuse this service across worktree switches (see below). |
 
 The command is executed inside a shell (`$SHELL` or `bash`) using `cd <path> && <cmd>`.
+
+## Worktree-aware runs & service reuse
+
+fog identifies the git repository a script runs in via `git rev-parse --git-common-dir`, which is shared by every worktree of the same repo. When you start `fog <script>` while another instance of the **same script in the same project** is already running (e.g. from a different worktree), fog:
+
+1. Asks the old instance to shut down — killing its non-reused services and tearing down its proxy.
+2. Waits for it to exit, then starts its own services.
+
+Services flagged with `"reuse": true` are treated specially to save time when switching worktrees:
+
+- **Handover**: the old instance's `shutdown_cmd` is skipped for that service (e.g. no `docker compose down`), and if a live process is running its PTY output is piped into the new instance's tab.
+- **No re-creation**: the new instance does not run the service's `cmd` if the resource is already reachable (verified via `health_check`); it shows a `♻ reusing already-running ...` tab instead.
+- **Auto-start fallback**: if the reused resource is down, fog starts the `cmd` itself after a grace period (~10s).
+- **Take over**: pressing `R` on a reused tab kills the borrowed process and starts the `cmd` fresh in this worktree.
+- **Persistence**: reused resources survive `q` exits and worktree switches; only an explicit `fog kill <pid>` tears them down.
+
+```json
+{
+  "name": "db",
+  "path": ".",
+  "cmd": "docker compose up -d",
+  "shutdown_cmd": "docker compose down",
+  "reuse": true,
+  "health_check": [
+    { "kind": "tcp", "target": "localhost:5432" }
+  ]
+}
+```
+
+> `reuse` works best **with** a `health_check` — fog needs it to verify the resource is already up. If `reuse` is set without one, fog warns and starts the `cmd` normally.
 
 ### Health check
 
