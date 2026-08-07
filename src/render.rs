@@ -266,6 +266,8 @@ pub(crate) fn draw_instructions(
             "input".blue().bold(),
             " T ".into(),
             "new-term".blue().bold(),
+            " S ".into(),
+            "switch-wt".blue().bold(),
         ])
     }
 }

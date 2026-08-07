@@ -28,8 +28,10 @@ pub fn spawn_config_watcher(config_path: PathBuf) -> mpsc::Receiver<()> {
         {
             let _ = watcher.watch(&config_path, RecursiveMode::NonRecursive);
             loop {
-                if notify_rx.recv().is_ok() {
-                    let _ = tx.send(());
+                if notify_rx.recv().is_ok() && tx.send(()).is_err() {
+                    // The receiver is gone (e.g. the app switched configs):
+                    // stop watching instead of leaking this thread.
+                    break;
                 }
             }
         }

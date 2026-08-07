@@ -1,5 +1,6 @@
 pub mod app;
 pub mod click_tab;
+pub mod completion;
 pub mod config;
 pub mod config_watcher;
 pub mod fds;
@@ -10,6 +11,8 @@ pub mod process;
 pub mod project;
 pub mod proxy;
 pub mod render;
+pub mod runtime;
 pub mod selection;
 pub mod terminal;
 pub mod theme;
+pub mod worktree;

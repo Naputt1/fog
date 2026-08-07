@@ -19,6 +19,7 @@ Default mode. Navigate tabs, scroll, and access commands.
 | `R` | Restart current service or proxy |
 | `t` / `Ctrl+t` | Open a new shell tab |
 | `d` | Close current shell tab (shells only) |
+| `s` | Open worktree switch popup (type to filter, `Enter` to switch) |
 | `↑` | Scroll output up |
 | `↓` | Scroll output down |
 | `PageUp` | Scroll up by one page |
@@ -52,6 +53,20 @@ Entered by pressing `/` on the proxy tab.
 | `Esc` | Clear filter and return to normal mode |
 
 The filter is case-insensitive and matches against method, path, status code, and upstream fields.
+
+## Worktree switch popup
+
+Opened by pressing `s` in normal mode on a service tab. Lists every worktree of the current repository.
+
+| Key | Action |
+|-----|--------|
+| Any character | Appends to filter (matches branch or path) |
+| `Backspace` | Removes last character |
+| `↑` / `↓` | Move selection |
+| `Enter` | Switch to the selected worktree |
+| `Esc` | Close the popup |
+
+Switching reloads the script's config from the target worktree in place: non-reuse services are torn down, `reuse` services are handed over (their processes keep running), and tabs/proxy are rebuilt. The current worktree is marked with `*`.
 
 ## Mouse
 

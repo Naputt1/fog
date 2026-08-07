@@ -1,5 +1,6 @@
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::path::Path;
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "snake_case")]
@@ -120,4 +121,45 @@ pub struct Config {
     pub sidebar: Option<SidebarConfig>,
     /// Optional color theme overrides.
     pub theme: Option<ThemeConfig>,
+}
+
+/// Loads and parses a config file, returning a human-readable error on failure.
+pub fn load(path: &Path) -> Result<Config, String> {
+    let contents = std::fs::read_to_string(path)
+        .map_err(|e| format!("could not read config '{}': {}", path.display(), e))?;
+    serde_json::from_str(&contents)
+        .map_err(|e| format!("invalid config '{}': {}", path.display(), e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_load_missing_file_errors() {
+        let path =
+            std::env::temp_dir().join(format!("fog-config-missing-{}.json", std::process::id()));
+        let err = load(&path).unwrap_err();
+        assert!(err.contains("could not read config"), "{err}");
+    }
+
+    #[test]
+    fn test_load_invalid_json_errors() {
+        let path =
+            std::env::temp_dir().join(format!("fog-config-invalid-{}.json", std::process::id()));
+        std::fs::write(&path, "{ not json").unwrap();
+        let err = load(&path).unwrap_err();
+        assert!(err.contains("invalid config"), "{err}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_load_valid() {
+        let path =
+            std::env::temp_dir().join(format!("fog-config-valid-{}.json", std::process::id()));
+        std::fs::write(&path, r#"{"scripts":{"dev":{}}}"#).unwrap();
+        let config = load(&path).unwrap();
+        assert!(config.scripts.contains_key("dev"));
+        let _ = std::fs::remove_file(&path);
+    }
 }

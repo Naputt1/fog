@@ -20,7 +20,7 @@ fog lets you define named *scripts* — each a set of local services and an opti
 - **Keyboard navigation** — Vim-style `j`/`k` tab switching, terminal input mode (`i`), restart services (`R`), open shell tabs (`t`).
 - **Configuration hot-reload** — Edit `fog.json` at runtime to update themes and proxy settings without restarting.
 - **Instance management** — `fog ls` lists running instances and their service status; `fog kill` gracefully shuts one down.
-- **Worktree-aware runs** — Starting a script that is already running in another worktree of the same git repo shuts the old instance down first (and only once it has fully exited, so ports don't collide). Services flagged `reuse: true` (e.g. a shared `docker compose` database) are handed over instead of torn down, so switching worktrees doesn't restart your infra. A per-project owner lock makes concurrent starts deterministic.
+- **Worktree-aware runs** — Starting a script that is already running in another worktree of the same git repo shuts the old instance down first (and only once it has fully exited, so ports don't collide). Services flagged `reuse: true` (e.g. a shared `docker compose` database) are handed over instead of torn down, so switching worktrees doesn't restart your infra. A per-project owner lock makes concurrent starts deterministic. Start directly on a branch with `fog <script> --branch <name>`, or switch worktrees from inside the TUI with `s`.
 - **TLS support** — Terminate TLS connections directly in the proxy using PEM certificates.
 - **Health checks** — Periodic TCP health checks per service with sidebar status indicators.
 
@@ -87,7 +87,9 @@ fog kill [pid]            # Gracefully shut down a running instance
 | Option | Description |
 |--------|-------------|
 | `-c`, `--config <PATH>` | Path to config file (default: `fog.json`) |
+| `--branch <BRANCH>` | Run the script in the git worktree checked out on this branch |
 | `--save-logs` | Save service output to `temp/<name>.txt` on exit |
+| `--completions <SHELL>` | Print a bash/zsh/fish completion script (`--branch` completes to all worktrees) |
 
 Each running `fog` instance exposes a Unix socket in `$TMPDIR/fog-<pid>.sock`. `fog ls` discovers these sockets and queries their live service status; `fog kill` asks an instance to shut down gracefully. When multiple instances are running, pass a PID to target one (`fog ls 1234`, `fog kill 1234`).
 
@@ -105,6 +107,7 @@ See the [full documentation](https://naputt1.github.io/fog/) for configuration r
 | `R` | Normal | Restart current service or proxy |
 | `t` / `Ctrl+t` | Normal | Open a new shell tab |
 | `d` | Normal | Close current shell tab |
+| `s` | Normal | Open worktree switch popup |
 | `↑` / `↓` | Normal | Scroll output |
 | `PageUp` / `PageDown` | Normal | Scroll by page |
 | `g` / `Home` | Normal | Scroll to top |

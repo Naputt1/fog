@@ -14,7 +14,7 @@ use std::{
     os::unix::io::RawFd,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -90,6 +90,8 @@ pub struct Terminal {
     handed_off: bool,
     parser: Arc<Mutex<vt100::Parser>>,
     health_status: Arc<Mutex<HealthStatus>>,
+    /// Set when this terminal is dropped, so its health-check thread exits.
+    health_stop: Arc<AtomicBool>,
     screen_generation: Arc<AtomicUsize>,
     #[allow(clippy::type_complexity)]
     line_cache: RefCell<Option<(usize, usize, usize, Vec<Line<'static>>)>>,
@@ -111,6 +113,7 @@ impl std::fmt::Debug for Terminal {
             .field("shutdown_cmd", &self.shutdown_cmd)
             .field("reused", &self.reused)
             .field("owned_pid", &self.owned_pid)
+            .field("health_stop", &self.health_stop)
             .field("handler", &self.handler)
             .field("child", &self.child)
             .finish()
@@ -222,6 +225,29 @@ fn spawn_reader(
     })
 }
 
+/// Polls `waitpid(pid, WNOHANG)` until the child is reaped or `timeout` elapses.
+///
+/// Returns `true` if the child was reaped, `false` if it was still running (or
+/// was already reaped elsewhere) when the timeout expired. Never blocks longer
+/// than `timeout`, so a process stuck in an uninterruptible exit state cannot
+/// freeze teardown.
+fn wait_reaped(pid: u32, timeout: Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match process::waitpid_nohang(pid) {
+            Ok(Some(_)) => return true,
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    return false;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            // ECHILD (already reaped) or another error: nothing left to wait on.
+            Err(_) => return false,
+        }
+    }
+}
+
 /// A write-only wrapper around a raw fd (e.g. a PTY master received from
 /// another instance). Owns the fd and closes it on drop.
 struct FdWriter {
@@ -320,6 +346,7 @@ impl Terminal {
             handed_off: false,
             parser,
             health_status: Arc::new(Mutex::new(HealthStatus::Unknown)),
+            health_stop: Arc::new(AtomicBool::new(false)),
             screen_generation: Arc::new(AtomicUsize::new(0)),
             line_cache: RefCell::new(None),
             handler: Some(handler),
@@ -369,6 +396,7 @@ impl Terminal {
             handed_off: false,
             parser: Arc::new(Mutex::new(vt100::Parser::new(24, 80, scrollback))),
             health_status: Arc::new(Mutex::new(HealthStatus::Unknown)),
+            health_stop: Arc::new(AtomicBool::new(false)),
             screen_generation: Arc::new(AtomicUsize::new(0)),
             line_cache: RefCell::new(None),
             handler: None,
@@ -415,6 +443,7 @@ impl Terminal {
             handed_off: false,
             parser,
             health_status: Arc::new(Mutex::new(HealthStatus::Unhealthy)),
+            health_stop: Arc::new(AtomicBool::new(false)),
             screen_generation: Arc::new(AtomicUsize::new(0)),
             line_cache: RefCell::new(None),
             handler: None,
@@ -462,6 +491,7 @@ impl Terminal {
             handed_off: false,
             parser,
             health_status: Arc::new(Mutex::new(HealthStatus::Pending)),
+            health_stop: Arc::new(AtomicBool::new(false)),
             screen_generation: Arc::new(AtomicUsize::new(0)),
             line_cache: RefCell::new(None),
             handler: None,
@@ -510,6 +540,7 @@ impl Terminal {
             handed_off: false,
             parser,
             health_status: Arc::new(Mutex::new(HealthStatus::Unknown)),
+            health_stop: Arc::new(AtomicBool::new(false)),
             screen_generation: Arc::new(AtomicUsize::new(0)),
             line_cache: RefCell::new(None),
             handler: None,
@@ -597,6 +628,7 @@ impl Terminal {
             handed_off: false,
             parser,
             health_status: Arc::new(Mutex::new(HealthStatus::Unknown)),
+            health_stop: Arc::new(AtomicBool::new(false)),
             screen_generation,
             line_cache: RefCell::new(None),
             handler,
@@ -996,8 +1028,17 @@ impl Terminal {
         }
 
         if let Some(mut child) = self.child.take() {
+            let pid = child.process_id();
             let _ = child.kill();
-            let _ = child.wait();
+            // Reap with a bounded wait. A process stuck in an uninterruptible
+            // exit state can defer even SIGKILL, so a bare blocking `wait()`
+            // would freeze fog's teardown on quit or worktree switch. If it is
+            // not reaped in time, leave the zombie for the OS to reap on exit.
+            if let Some(pid) = pid
+                && !wait_reaped(pid, Duration::from_secs(2))
+            {
+                process::try_kill_process_group(pid, SIGKILL);
+            }
         }
 
         if let Some(fd) = self.raw_fd {
@@ -1049,6 +1090,7 @@ impl Terminal {
             return;
         }
         let status = self.health_status.clone();
+        let stop = self.health_stop.clone();
 
         thread::spawn(move || {
             let min_interval = configs
@@ -1058,6 +1100,9 @@ impl Terminal {
                 .unwrap_or(5000);
             loop {
                 thread::sleep(std::time::Duration::from_millis(min_interval));
+                if stop.load(Ordering::SeqCst) {
+                    return;
+                }
                 let mut all_healthy = true;
                 for config in &configs {
                     let target = config.target.clone();
@@ -1216,6 +1261,9 @@ impl Terminal {
 
 impl Drop for Terminal {
     fn drop(&mut self) {
+        // Stop the health-check thread so it does not outlive this terminal
+        // (relevant when services are replaced by an in-place worktree switch).
+        self.health_stop.store(true, Ordering::SeqCst);
         if self.save_logs
             && let Init::Command { .. } = &self.init
         {
@@ -1299,6 +1347,42 @@ mod tests {
         t.kill_inner();
         // SAFETY: handoff.fd is owned by the test after extraction.
         unsafe { libc::close(handoff.fd) };
+    }
+
+    #[test]
+    fn test_wait_reaped_exited_child() {
+        let child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("exit 0")
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        thread::sleep(Duration::from_millis(200));
+        assert!(
+            wait_reaped(pid, Duration::from_secs(5)),
+            "an exited child must be reaped"
+        );
+        drop(child);
+    }
+
+    #[test]
+    fn test_wait_reaped_still_running_then_killed() {
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("sleep 30")
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        assert!(
+            !wait_reaped(pid, Duration::from_millis(150)),
+            "a running child must not be reaped within a short timeout"
+        );
+        let _ = child.kill();
+        assert!(
+            wait_reaped(pid, Duration::from_secs(5)),
+            "a killed child must be reaped"
+        );
+        drop(child);
     }
 
     #[test]

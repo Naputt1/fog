@@ -6,18 +6,17 @@ use crossterm::execute;
 use crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
 use std::collections::HashMap;
 use std::io::stdout;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use std::{fs, io};
 
-use fog::app::{App, PendingService};
-use fog::config::{Config, HealthCheckConfig, HealthCheckSpec};
+use fog::app::App;
+use fog::completion::CompletionShell;
+use fog::config::Config;
 use fog::config_watcher;
 use fog::ipc;
-use fog::proxy::{ProxyInstance, RouteEntry};
-use fog::terminal::Terminal;
 use fog::theme::Theme;
 
 const DEFAULT_SCROLLBACK: usize = 2000;
@@ -45,99 +44,63 @@ struct Cli {
     /// Save service output to `temp/<name>.txt` on exit.
     #[arg(long, help = "Save service output to temp/<name>.txt on exit")]
     save_logs: bool,
+
+    /// Run the script in the git worktree checked out on this branch.
+    #[arg(long)]
+    branch: Option<String>,
+
+    /// Print a shell completion script to stdout and exit.
+    #[arg(long, value_name = "SHELL")]
+    completions: Option<CompletionShell>,
 }
 
-/// Resolves service startup order using topological sort (Kahn's algorithm).
-/// Returns indices into `entries` in dependency order, or an error if there
-/// is a cycle or a dependency references an unknown service name.
-fn resolve_dep_order(entries: &[fog::config::ConfigEntry]) -> Result<Vec<usize>, String> {
-    let name_to_idx: HashMap<&str, usize> = entries
+/// Resolves the config file to use, honoring `--branch`:
+///
+/// When `--branch <name>` is given, fog runs the script from the git worktree
+/// checked out on that branch (a relative `--config` is resolved against the
+/// worktree root). Errors out when no worktree has that branch.
+fn resolve_run_config(cli: &Cli) -> PathBuf {
+    let Some(branch) = &cli.branch else {
+        return cli.config.clone();
+    };
+
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let worktrees = fog::worktree::list(&cwd).unwrap_or_else(|| {
+        eprintln!("error: --branch requires a git repository (could not list worktrees)");
+        std::process::exit(1);
+    });
+
+    let Some(wt) = worktrees
         .iter()
-        .enumerate()
-        .map(|(i, e)| {
-            let name = e.name.clone().unwrap_or_else(|| {
-                std::path::Path::new(&e.path)
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned()
-            });
-            // Use leak to get a &'static str from the owned String — safe because
-            // entries live for the rest of the program and we only need the map
-            // during this function.
-            let leaked: &'static str = Box::leak(name.into_boxed_str());
-            (leaked, i)
-        })
-        .collect();
-
-    for entry in entries {
-        if let Some(deps) = &entry.depends_on {
-            for dep in deps {
-                if !name_to_idx.contains_key(dep.as_str()) {
-                    let entry_name = entry.name.as_deref().unwrap_or_else(|| {
-                        std::path::Path::new(&entry.path)
-                            .file_name()
-                            .unwrap_or_default()
-                            .to_str()
-                            .unwrap_or("?")
-                    });
-                    return Err(format!(
-                        "service '{}' depends on unknown service '{}'",
-                        entry_name, dep
-                    ));
-                }
-            }
+        .find(|w| w.branch.as_deref() == Some(branch.as_str()))
+    else {
+        eprintln!("error: no worktree is checked out on branch '{}'", branch);
+        eprintln!("available worktrees:");
+        for w in &worktrees {
+            let label = w.branch.as_deref().unwrap_or("(detached)");
+            eprintln!("  {:<24} {}", label, w.path.display());
         }
+        std::process::exit(1);
+    };
+
+    eprintln!(
+        "switching to worktree {} (branch {})",
+        wt.path.display(),
+        branch
+    );
+    if cli.config.is_absolute() {
+        cli.config.clone()
+    } else {
+        wt.path.join(&cli.config)
     }
-
-    let n = entries.len();
-    let mut in_degree = vec![0usize; n];
-    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
-
-    for (i, entry) in entries.iter().enumerate() {
-        if let Some(deps) = &entry.depends_on {
-            for dep in deps {
-                let dep_idx = name_to_idx[dep.as_str()];
-                adj[dep_idx].push(i);
-                in_degree[i] += 1;
-            }
-        }
-    }
-
-    let mut queue: Vec<usize> = (0..n).filter(|i| in_degree[*i] == 0).collect();
-    let mut order = Vec::new();
-
-    while let Some(idx) = queue.pop() {
-        order.push(idx);
-        for &next in &adj[idx] {
-            in_degree[next] -= 1;
-            if in_degree[next] == 0 {
-                queue.push(next);
-            }
-        }
-    }
-
-    if order.len() != n {
-        return Err("circular dependency detected between services".to_string());
-    }
-
-    Ok(order)
 }
 
 /// Loads and parses the config file, exiting with a diagnostic on failure.
 fn load_config(path: &Path) -> Config {
-    let contents = match fs::read_to_string(path) {
+    match fog::config::load(path) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("error: could not read config '{}': {}", path.display(), e);
-            std::process::exit(1);
-        }
-    };
-
-    match serde_json::from_str(&contents) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("error: invalid config '{}': {}", path.display(), e);
+            eprintln!("error: {e}");
             std::process::exit(1);
         }
     }
@@ -175,26 +138,6 @@ fn reuse_names(script: &fog::config::ScriptConfig) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
-}
-
-/// Lexically normalizes an absolute path, dropping `.` segments, resolving
-/// `..` segments, and removing the doubled `./` produced by `join` (so the
-/// `cd` command reads `/repo/infra` instead of `/repo/./infra`).
-fn normalize_service_path(path: &Path) -> String {
-    use std::path::Component;
-    let mut parts: Vec<String> = Vec::new();
-    for comp in path.components() {
-        match comp {
-            Component::RootDir => parts.clear(),
-            Component::CurDir => {}
-            Component::ParentDir => {
-                parts.pop();
-            }
-            Component::Normal(c) => parts.push(c.to_string_lossy().into_owned()),
-            Component::Prefix(_) => {}
-        }
-    }
-    format!("/{}", parts.join("/"))
 }
 
 /// Shuts down existing fog instances running the same script in the same
@@ -445,16 +388,16 @@ fn cmd_kill(pid: Option<u32>) -> io::Result<()> {
 }
 
 fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
-    let config = load_config(&cli.config);
+    let config_path = resolve_run_config(cli);
+    let config = load_config(&config_path);
     let script = match config.scripts.get(name) {
         Some(s) => s,
         None => list_scripts_and_exit(&config, &format!("error: unknown script '{}'", name)),
     };
 
-    let config_path = cli
-        .config
+    let config_path = config_path
         .canonicalize()
-        .unwrap_or_else(|_| cli.config.clone());
+        .unwrap_or_else(|_| config_path.clone());
     let config_dir = config_path
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
@@ -498,140 +441,19 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
         .unwrap_or(30);
     let theme = Theme::from_config(config.theme.as_ref());
 
-    let entries = script.service.clone().unwrap_or_default();
-    let dep_order = resolve_dep_order(&entries).unwrap_or_else(|e| {
-        eprintln!("error: {}", e);
-        std::process::exit(1);
-    });
-
-    let n = entries.len();
-    let mut items: Vec<Option<Terminal>> = (0..n).map(|_| None).collect();
-    let mut pending_services: Vec<PendingService> = Vec::new();
-
-    for &idx in &dep_order {
-        let entry = &entries[idx];
-        let service_path = config_dir.join(&entry.path);
-        let name = entry.name.clone().unwrap_or_else(|| {
-            service_path
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned()
-        });
-        let service_path_str = normalize_service_path(&service_path);
-
-        let health_checks: Vec<HealthCheckConfig> = match &entry.health_check {
-            Some(HealthCheckSpec::Single(c)) => vec![c.clone()],
-            Some(HealthCheckSpec::Multiple(v)) => v.clone(),
-            None => vec![],
-        };
-
-        let has_deps = entry.depends_on.is_some();
-
-        let terminal = if entry.reuse {
-            if health_checks.is_empty() {
-                eprintln!(
-                    "warning: service '{}' has reuse: true but no health_check; \
-                     fog cannot verify it is already running",
-                    name
-                );
-            }
-            let mut t = if let Some(handoff) = adopted.remove(&name) {
-                Terminal::adopt(
-                    service_path_str.clone(),
-                    entry.cmd.clone(),
-                    name.clone(),
-                    scrollback,
-                    handoff.fd,
-                    handoff.pid,
-                )
-            } else {
-                Terminal::spawn_reused(
-                    name.clone(),
-                    service_path_str,
-                    entry.cmd.clone(),
-                    scrollback,
-                )
-            };
-            t.save_logs = cli.save_logs;
-            t.health_checks = health_checks;
-            t.shutdown_cmd = entry.shutdown_cmd.clone();
-            t.start_health_checks();
-            t
-        } else if has_deps {
-            let deps = entry.depends_on.clone().unwrap_or_default();
-            let mut t = Terminal::spawn_pending(name.clone(), scrollback, &deps);
-            t.save_logs = cli.save_logs;
-            pending_services.push(PendingService {
-                name: name.clone(),
-                cmd: entry.cmd.clone(),
-                path: service_path_str,
-                scrollback,
-                save_logs: cli.save_logs,
-                dep_names: deps,
-                health_checks,
-                shutdown_cmd: entry.shutdown_cmd.clone(),
-                tab_index: idx,
-            });
-            t
-        } else {
-            let shutdown_cmd = entry.shutdown_cmd.clone();
-            match Terminal::spawn_command(&service_path_str, &entry.cmd, name.clone(), scrollback) {
-                Ok(mut t) => {
-                    t.save_logs = cli.save_logs;
-                    t.health_checks = health_checks;
-                    t.shutdown_cmd = shutdown_cmd;
-                    t.start_health_checks();
-                    t
-                }
-                Err(e) => {
-                    Terminal::spawn_error(name.clone(), format!("Failed to spawn: {e}"), scrollback)
-                }
-            }
-        };
-        items[idx] = Some(terminal);
-    }
-
-    let items: Vec<Terminal> = items
-        .into_iter()
-        .map(|t| t.expect("all items should be filled"))
-        .collect();
+    let runtime = fog::runtime::build(script, &config_dir, cli.save_logs, scrollback, &mut adopted);
 
     // Services are up: release the owner lock so a later worktree switch can
     // replace this instance.
     drop(owner_lock);
 
-    let proxy = script.proxy.clone().map(|pc| {
-        let routes: Vec<RouteEntry> = pc
-            .routes
-            .into_iter()
-            .map(|r| RouteEntry {
-                path: r.path,
-                host: r.host,
-                upstream: r.upstream,
-                ws: r.ws.unwrap_or(false),
-            })
-            .collect();
-        let max_log_entries = pc.max_log_entries.unwrap_or(1000);
-        let mut p = ProxyInstance::new(
-            pc.port,
-            pc.host,
-            routes,
-            max_log_entries,
-            pc.tls_cert,
-            pc.tls_key,
-        );
-        p.start();
-        p
-    });
-
     let config_rx = config_watcher::spawn_config_watcher(config_path.clone());
 
     ratatui::run(|terminal| {
         App::new(
-            items,
-            pending_services,
-            proxy,
+            runtime.items,
+            runtime.pending_services,
+            runtime.proxy,
             sigint,
             scrollback,
             sidebar_min,
@@ -640,6 +462,8 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
             config_path,
             config_rx,
             ipc_state,
+            cli.config.clone(),
+            cli.save_logs,
         )
         .run(terminal)
     })?;
@@ -652,47 +476,22 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
 fn main() -> io::Result<()> {
     let cli = Cli::parse();
 
+    if let Some(shell) = cli.completions {
+        print!("{}", fog::completion::generate(shell));
+        return Ok(());
+    }
+
     match cli.script.as_deref() {
         Some("ls") => cmd_ls(),
         Some("kill") => cmd_kill(cli.pid),
         Some(name) => run_script(name, &cli),
         None => {
-            let config = load_config(&cli.config);
+            let config = load_config(&resolve_run_config(&cli));
             if config.scripts.is_empty() {
                 eprintln!("error: no scripts defined in '{}'", cli.config.display());
                 std::process::exit(1);
             }
             list_scripts_and_exit(&config, "error: no script specified")
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_normalize_service_path_strips_dot_segments() {
-        assert_eq!(
-            normalize_service_path(Path::new("/Users/naputt/git/GEMS/./infra")),
-            "/Users/naputt/git/GEMS/infra"
-        );
-        assert_eq!(
-            normalize_service_path(Path::new("/Users/naputt/git/GEMS/.")),
-            "/Users/naputt/git/GEMS"
-        );
-    }
-
-    #[test]
-    fn test_normalize_service_path_resolves_parent() {
-        assert_eq!(
-            normalize_service_path(Path::new("/repo/fog/../cinema_ticket/backend")),
-            "/repo/cinema_ticket/backend"
-        );
-    }
-
-    #[test]
-    fn test_normalize_service_path_preserves_absolute() {
-        assert_eq!(normalize_service_path(Path::new("/etc")), "/etc");
     }
 }

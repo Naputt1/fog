@@ -5,9 +5,11 @@ use crate::ipc::{self, IpcState};
 use crate::keybinding;
 use crate::proxy::ProxyInstance;
 use crate::render;
+use crate::runtime;
 use crate::selection;
 use crate::terminal::{HealthStatus, Terminal};
 use crate::theme::Theme;
+use crate::worktree::{self, Worktree};
 use crossterm::event::{
     self, DisableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton,
     MouseEventKind,
@@ -21,7 +23,9 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Clear, Paragraph},
 };
+use std::collections::HashMap;
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -31,6 +35,32 @@ enum Mode {
     Normal,
     TerminalInput,
     ProxyFilter,
+}
+
+/// An open worktree-switch popup: the repository's worktrees plus an
+/// incremental filter and a selected row.
+struct SwitchPopup {
+    worktrees: Vec<Worktree>,
+    filter: String,
+    selected: usize,
+}
+
+impl SwitchPopup {
+    /// The worktrees matching the current filter, in original order.
+    fn matches(&self) -> Vec<Worktree> {
+        if self.filter.is_empty() {
+            return self.worktrees.clone();
+        }
+        let f = self.filter.to_lowercase();
+        self.worktrees
+            .iter()
+            .filter(|w| {
+                w.label().to_lowercase().contains(&f)
+                    || w.path.to_string_lossy().to_lowercase().contains(&f)
+            })
+            .cloned()
+            .collect()
+    }
 }
 
 /// A service waiting for its dependencies to become ready.
@@ -75,11 +105,19 @@ pub struct App {
     errors: Vec<String>,
     proxy_filter: String,
     config_path: std::path::PathBuf,
+    /// The `--config` value as passed on the command line (may be relative),
+    /// used to resolve a target worktree's config when switching.
+    config_rel: PathBuf,
+    /// Whether service output is saved to `temp/<name>.txt` on exit.
+    save_logs: bool,
     config_rx: std::sync::mpsc::Receiver<()>,
     proxy_tab_index: Option<usize>,
+    sidebar_min: u16,
+    sidebar_max: u16,
     scrollbar_dragging: bool,
     auto_scrolling: Option<bool>,
     auto_scroll_col: u16,
+    switch_popup: Option<SwitchPopup>,
     ipc_state: Arc<IpcState>,
 }
 
@@ -106,29 +144,16 @@ impl App {
         config_path: std::path::PathBuf,
         config_rx: std::sync::mpsc::Receiver<()>,
         ipc_state: Arc<IpcState>,
+        config_rel: PathBuf,
+        save_logs: bool,
     ) -> Self {
-        let names: Vec<String> = items.iter().map(|t| t.name.clone()).collect();
-        let mut tabs = ClickTab::new(names, sidebar_min, sidebar_max);
-        for (i, item) in items.iter().enumerate() {
-            tabs.entries[i].kind = if item.is_shell() {
-                TabKind::Terminal
-            } else {
-                TabKind::Service
-            };
-        }
-        // Mark pending service tabs
-        for ps in &pending_services {
-            if let Some(entry) = tabs.entries.get_mut(ps.tab_index) {
-                entry.pending = true;
-            }
-        }
-
-        let proxy_tab_index = if proxy.is_some() {
-            tabs.insert_at(0, "proxy".to_string(), TabKind::Proxy);
-            Some(0)
-        } else {
-            None
-        };
+        let (tabs, proxy_tab_index) = Self::build_tabs(
+            &items,
+            &pending_services,
+            proxy.is_some(),
+            sidebar_min,
+            sidebar_max,
+        );
 
         Self {
             items,
@@ -149,13 +174,50 @@ impl App {
             errors: Vec::new(),
             proxy_filter: String::new(),
             config_path,
+            config_rel,
+            save_logs,
             config_rx,
             ipc_state,
             proxy_tab_index,
+            sidebar_min,
+            sidebar_max,
             scrollbar_dragging: false,
             auto_scrolling: None,
             auto_scroll_col: 0,
+            switch_popup: None,
         }
+    }
+
+    /// Builds the sidebar tabs and proxy-tab index for a set of items.
+    fn build_tabs(
+        items: &[Terminal],
+        pending_services: &[PendingService],
+        has_proxy: bool,
+        sidebar_min: u16,
+        sidebar_max: u16,
+    ) -> (ClickTab, Option<usize>) {
+        let names: Vec<String> = items.iter().map(|t| t.name.clone()).collect();
+        let mut tabs = ClickTab::new(names, sidebar_min, sidebar_max);
+        for (i, item) in items.iter().enumerate() {
+            tabs.entries[i].kind = if item.is_shell() {
+                TabKind::Terminal
+            } else {
+                TabKind::Service
+            };
+        }
+        // Mark pending service tabs
+        for ps in pending_services {
+            if let Some(entry) = tabs.entries.get_mut(ps.tab_index) {
+                entry.pending = true;
+            }
+        }
+        let proxy_tab_index = if has_proxy {
+            tabs.insert_at(0, "proxy".to_string(), TabKind::Proxy);
+            Some(0)
+        } else {
+            None
+        };
+        (tabs, proxy_tab_index)
     }
 
     fn is_proxy_tab(&self) -> bool {
@@ -420,6 +482,11 @@ impl App {
             return;
         }
 
+        if self.switch_popup.is_some() {
+            self.handle_switch_key(key);
+            return;
+        }
+
         if key.modifiers == KeyModifiers::CONTROL {
             match key.code {
                 KeyCode::Char('q') => {
@@ -542,9 +609,172 @@ impl App {
                     self.mode = Mode::ProxyFilter;
                 }
             }
+            KeyCode::Char('s') => self.open_switch_popup(),
             KeyCode::Char('?') => self.show_help = !self.show_help,
             _ => {}
         }
+    }
+
+    /// Opens the worktree-switch popup, listing the repository's worktrees.
+    fn open_switch_popup(&mut self) {
+        let config_dir = self
+            .config_path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        match worktree::list(&config_dir) {
+            Some(worktrees) if !worktrees.is_empty() => {
+                self.switch_popup = Some(SwitchPopup {
+                    worktrees,
+                    filter: String::new(),
+                    selected: 0,
+                });
+            }
+            _ => {
+                self.errors
+                    .push("no git worktrees found in this repository".to_string());
+            }
+        }
+    }
+
+    /// Handles keys while the worktree-switch popup is open.
+    fn handle_switch_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.switch_popup = None;
+            }
+            KeyCode::Enter => {
+                let selected = self.switch_popup.as_ref().and_then(|p| {
+                    let matches = p.matches();
+                    if matches.is_empty() {
+                        None
+                    } else {
+                        Some(matches[p.selected.min(matches.len() - 1)].clone())
+                    }
+                });
+                if let Some(wt) = selected {
+                    self.switch_popup = None;
+                    self.switch_worktree(&wt);
+                }
+            }
+            KeyCode::Up | KeyCode::Down => {
+                if let Some(p) = &mut self.switch_popup {
+                    let len = p.matches().len();
+                    if len > 0 {
+                        p.selected = if matches!(key.code, KeyCode::Up) {
+                            (p.selected + len - 1) % len
+                        } else {
+                            (p.selected + 1) % len
+                        };
+                    }
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(p) = &mut self.switch_popup {
+                    p.filter.pop();
+                    p.selected = 0;
+                }
+            }
+            KeyCode::Char(c) if !c.is_control() => {
+                if let Some(p) = &mut self.switch_popup {
+                    p.filter.push(c);
+                    p.selected = 0;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Switches this instance to run the given worktree's script in place:
+    /// shared (reuse) services are handed over internally, non-reuse services
+    /// are torn down, and tabs/proxy/config-watcher are rebuilt from the
+    /// target worktree's config file.
+    fn switch_worktree(&mut self, wt: &Worktree) {
+        // Resolve and validate the target worktree's config first, so a failure
+        // leaves the current instance untouched.
+        let config_path = if self.config_rel.is_absolute() {
+            self.config_rel.clone()
+        } else {
+            wt.path.join(&self.config_rel)
+        };
+        let config = match crate::config::load(&config_path) {
+            Ok(c) => c,
+            Err(e) => {
+                self.errors.push(format!("switch worktree: {e}"));
+                return;
+            }
+        };
+        let script_name = self.ipc_state.script.clone();
+        let Some(script) = config.scripts.get(&script_name) else {
+            self.errors.push(format!(
+                "switch worktree: script '{}' not found in '{}'",
+                script_name,
+                config_path.display()
+            ));
+            return;
+        };
+        let config_path = config_path.canonicalize().unwrap_or(config_path);
+        let config_dir = config_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+
+        // Preserve shared services: mark reuse terminals handed off so dropping
+        // the old set neither kills their processes nor runs their shutdown_cmds.
+        let mut adopted: HashMap<String, ipc::HandoffItem> = HashMap::new();
+        for item in &mut self.items {
+            if item.reused
+                && let Some(handoff) = item.extract_handoff()
+            {
+                adopted.insert(handoff.name.clone(), handoff);
+            }
+        }
+
+        // The project identity is the repo's git-common-dir, shared by every
+        // worktree, so `ipc_state.project` stays unchanged across switches.
+
+        // Tear down the old services and proxy now so their ports are free
+        // before the new worktree's services start.
+        self.proxy = None;
+        self.items.clear();
+        self.pending_services.clear();
+        self.tabs = ClickTab::new(Vec::new(), self.sidebar_min, self.sidebar_max);
+        self.proxy_tab_index = None;
+
+        let built = runtime::build(
+            script,
+            &config_dir,
+            self.save_logs,
+            self.scrollback,
+            &mut adopted,
+        );
+        let (tabs, proxy_tab_index) = Self::build_tabs(
+            &built.items,
+            &built.pending_services,
+            built.proxy.is_some(),
+            self.sidebar_min,
+            self.sidebar_max,
+        );
+
+        self.items = built.items;
+        self.pending_services = built.pending_services;
+        self.proxy = built.proxy;
+        self.tabs = tabs;
+        self.proxy_tab_index = proxy_tab_index;
+        self.config_path = config_path;
+        self.config_rx = config_watcher::spawn_config_watcher(self.config_path.clone());
+
+        self.tabs.index = 0;
+        self.scroll_offset = 0;
+        self.mode = Mode::Normal;
+        self.proxy_filter.clear();
+        self.show_help = false;
+        self.switch_popup = None;
+        self.selecting = false;
+        self.select_start = None;
+        self.select_end = None;
+        self.scrollbar_dragging = false;
+        self.auto_scrolling = None;
     }
 
     fn restart_current(&mut self) {
@@ -840,6 +1070,7 @@ impl App {
                 Line::from(vec![Span::raw("  R          Restart service     ")]),
                 Line::from(vec![Span::raw("  t/Ctrl+t   New shell tab       ")]),
                 Line::from(vec![Span::raw("  d          Close shell tab     ")]),
+                Line::from(vec![Span::raw("  s          Switch worktree     ")]),
                 Line::from(vec![Span::raw("  g/Home     Scroll to top       ")]),
                 Line::from(vec![Span::raw("  G/End      Scroll to bottom    ")]),
                 Line::from(vec![Span::raw("  Up/Down    Scroll output       ")]),
@@ -866,6 +1097,60 @@ impl App {
 
             frame.render_widget(Clear, overlay_area);
             frame.render_widget(help, overlay_area);
+        }
+
+        if let Some(popup) = &self.switch_popup {
+            let config_dir = self.config_path.parent().unwrap_or_else(|| Path::new("."));
+            let matches = popup.matches();
+
+            let mut lines = vec![
+                Line::from(vec![
+                    Span::raw(" filter: "),
+                    Span::styled(format!("{}▌", popup.filter), Style::default().bold()),
+                ]),
+                Line::from(""),
+            ];
+            for (i, wt) in matches.iter().enumerate() {
+                let is_current = wt.contains(config_dir);
+                let marker = if is_current { " *" } else { "" };
+                let (prefix, label_style) = if i == popup.selected {
+                    (" >", Style::default().fg(self.theme.highlight).bold())
+                } else {
+                    ("  ", Style::default())
+                };
+                let line = Line::from(vec![
+                    Span::styled(format!("{prefix} {}{marker}", wt.label()), label_style),
+                    Span::styled(format!("  {}", wt.path.display()), Style::default().dim()),
+                ]);
+                lines.push(line);
+            }
+            if matches.is_empty() {
+                lines.push(Line::from("  (no matching worktrees)"));
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                " Enter switch   Esc cancel ",
+                Style::default().dim(),
+            )));
+
+            let overlay_width = 64u16.min(area.width.saturating_sub(4));
+            let overlay_height = (lines.len() as u16).min(area.height.saturating_sub(2));
+            let overlay_x = (area.width.saturating_sub(overlay_width)) / 2;
+            let overlay_y = (area.height.saturating_sub(overlay_height)) / 2;
+            let overlay_area = Rect {
+                x: overlay_x,
+                y: overlay_y,
+                width: overlay_width,
+                height: overlay_height,
+            };
+
+            let block = Block::bordered().title(" Switch worktree ");
+            let widget = Paragraph::new(Text::from(lines))
+                .block(block)
+                .alignment(Alignment::Left);
+
+            frame.render_widget(Clear, overlay_area);
+            frame.render_widget(widget, overlay_area);
         }
     }
 
@@ -976,13 +1261,18 @@ mod tests {
             show_help: false,
             errors: vec![],
             proxy_filter: String::new(),
-            config_path: std::path::PathBuf::new(),
+            config_path: PathBuf::new(),
+            config_rel: PathBuf::from("fog.json"),
+            save_logs: false,
             config_rx: rx,
             ipc_state: Arc::new(IpcState::new("test".to_string(), None)),
             proxy_tab_index,
+            sidebar_min: 10,
+            sidebar_max: 30,
             scrollbar_dragging: false,
             auto_scrolling: None,
             auto_scroll_col: 0,
+            switch_popup: None,
         }
     }
 
@@ -1103,5 +1393,65 @@ mod tests {
             Rect::default(),
         );
         assert_eq!(app.current_total_lines(), 4);
+    }
+
+    #[test]
+    fn test_switch_popup_filter_by_branch() {
+        let popup = SwitchPopup {
+            worktrees: vec![
+                Worktree {
+                    path: PathBuf::from("/repo/fog"),
+                    branch: Some("main".to_string()),
+                },
+                Worktree {
+                    path: PathBuf::from("/repo/fog-feature"),
+                    branch: Some("feature-x".to_string()),
+                },
+            ],
+            filter: "feature".to_string(),
+            selected: 0,
+        };
+        let matches = popup.matches();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].branch.as_deref(), Some("feature-x"));
+    }
+
+    #[test]
+    fn test_switch_popup_filter_empty_matches_all() {
+        let popup = SwitchPopup {
+            worktrees: vec![Worktree {
+                path: PathBuf::from("/repo/fog"),
+                branch: Some("main".to_string()),
+            }],
+            filter: String::new(),
+            selected: 0,
+        };
+        assert_eq!(popup.matches().len(), 1);
+    }
+
+    #[test]
+    fn test_switch_popup_filter_matches_path() {
+        let popup = SwitchPopup {
+            worktrees: vec![Worktree {
+                path: PathBuf::from("/repo/fog-detached"),
+                branch: None,
+            }],
+            filter: "detached".to_string(),
+            selected: 0,
+        };
+        assert_eq!(popup.matches().len(), 1);
+    }
+
+    #[test]
+    fn test_switch_popup_filter_no_match() {
+        let popup = SwitchPopup {
+            worktrees: vec![Worktree {
+                path: PathBuf::from("/repo/fog"),
+                branch: Some("main".to_string()),
+            }],
+            filter: "zzz".to_string(),
+            selected: 0,
+        };
+        assert!(popup.matches().is_empty());
     }
 }
