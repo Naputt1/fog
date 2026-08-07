@@ -1,85 +1,93 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
+  "required": ["scripts"],
   "properties": {
-    "service": {
-      "type": "array",
-      "items": {
+    "scripts": {
+      "type": "object",
+      "additionalProperties": {
         "type": "object",
-        "required": ["path", "cmd"],
         "properties": {
-          "name": { "type": "string" },
-          "path": { "type": "string" },
-          "cmd": { "type": "string" },
-          "depends_on": {
+          "service": {
             "type": "array",
-            "items": { "type": "string" },
-            "description": "Names of services this service depends on"
-          },
-          "shutdown_cmd": {
-            "type": "string",
-            "description": "Shell command to run when fog shuts down (e.g. docker compose down)"
-          },
-          "health_check": {
-            "oneOf": [
-              {
-                "type": "object",
-                "required": ["kind", "target"],
-                "properties": {
-                  "kind": { "type": "string", "enum": ["tcp", "http"] },
-                  "target": { "type": "string" },
-                  "interval_ms": { "type": "integer", "minimum": 100, "default": 5000 },
-                  "timeout_ms": { "type": "integer", "minimum": 100, "default": 2000 }
+            "items": {
+              "type": "object",
+              "required": ["path", "cmd"],
+              "properties": {
+                "name": { "type": "string" },
+                "path": { "type": "string" },
+                "cmd": { "type": "string" },
+                "depends_on": {
+                  "type": "array",
+                  "items": { "type": "string" },
+                  "description": "Names of services this service depends on"
+                },
+                "shutdown_cmd": {
+                  "type": "string",
+                  "description": "Shell command to run when fog shuts down (e.g. docker compose down)"
+                },
+                "health_check": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "required": ["kind", "target"],
+                      "properties": {
+                        "kind": { "type": "string", "enum": ["tcp", "http"] },
+                        "target": { "type": "string" },
+                        "interval_ms": { "type": "integer", "minimum": 100, "default": 5000 },
+                        "timeout_ms": { "type": "integer", "minimum": 100, "default": 2000 }
+                      }
+                    },
+                    {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": ["kind", "target"],
+                        "properties": {
+                          "kind": { "type": "string", "enum": ["tcp", "http"] },
+                          "target": { "type": "string" },
+                          "interval_ms": { "type": "integer", "minimum": 100, "default": 5000 },
+                          "timeout_ms": { "type": "integer", "minimum": 100, "default": 2000 }
+                        }
+                      }
+                    }
+                  ]
                 }
+              }
+            }
+          },
+          "proxy": {
+            "type": "object",
+            "required": ["port", "routes"],
+            "properties": {
+              "port": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 65535
               },
-              {
+              "host": {
+                "type": "string"
+              },
+              "routes": {
                 "type": "array",
                 "items": {
                   "type": "object",
-                  "required": ["kind", "target"],
+                  "required": ["path", "upstream"],
                   "properties": {
-                    "kind": { "type": "string", "enum": ["tcp", "http"] },
-                    "target": { "type": "string" },
-                    "interval_ms": { "type": "integer", "minimum": 100, "default": 5000 },
-                    "timeout_ms": { "type": "integer", "minimum": 100, "default": 2000 }
+                    "path": { "type": "string" },
+                    "host": { "type": "string" },
+                    "upstream": { "type": "string" },
+                    "ws": { "type": "boolean" }
                   }
                 }
-              }
-            ]
+              },
+              "tls_cert": { "type": "string" },
+              "tls_key": { "type": "string" }
+            }
           }
         }
       }
     },
-    "proxy": {
-      "type": "object",
-      "required": ["port", "routes"],
-      "properties": {
-        "port": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 65535
-        },
-        "host": {
-          "type": "string"
-        },
-        "routes": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "required": ["path", "upstream"],
-            "properties": {
-              "path": { "type": "string" },
-              "host": { "type": "string" },
-              "upstream": { "type": "string" },
-              "ws": { "type": "boolean" }
-            }
-          }
-        },
-        "tls_cert": { "type": "string" },
-        "tls_key": { "type": "string" }
-      }
-    }
-  },
     "max_scrollback": {
       "type": "integer",
       "minimum": 100,
@@ -106,4 +114,5 @@
         "scrollbar": { "type": "string" }
       }
     }
+  }
 }

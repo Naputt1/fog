@@ -77,15 +77,19 @@ On successful WebSocket connections, a log entry with status `101` is recorded. 
 
 ## TLS
 
-If `tls_cert` and `tls_key` paths are provided in the config, the proxy accepts TLS connections. Both must be PEM-encoded — the certificate chain and a PKCS8 private key.
+If `tls_cert` and `tls_key` paths are provided in the script's proxy config, the proxy accepts TLS connections. Both must be PEM-encoded — the certificate chain and a PKCS8 private key.
 
 ```
 {
-  "proxy": {
-    "port": 443,
-    "routes": [...],
-    "tls_cert": "/etc/ssl/certs/fog.pem",
-    "tls_key": "/etc/ssl/private/fog.pem"
+  "scripts": {
+    "dev": {
+      "proxy": {
+        "port": 443,
+        "routes": [...],
+        "tls_cert": "/etc/ssl/certs/fog.pem",
+        "tls_key": "/etc/ssl/private/fog.pem"
+      }
+    }
   }
 }
 ```

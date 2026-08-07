@@ -81,10 +81,11 @@ fog runs three concurrent threads:
 ```
 main.rs
   │
-  ├── Parses CLI args (clap)
-  ├── Reads & parses fog.json (serde_json)
+  ├── Parses CLI args (clap): `fog <script>` | `fog ls` | `fog kill [pid]`
+  ├── Loads config, looks up the named script's services & proxy
+  ├── Spawns IPC server (Unix socket) sharing IpcState with the App
   ├── Spawns Terminal for each service entry
-  ├── Creates ProxyInstance (if configured)
+  ├── Creates ProxyInstance (if the script configures one)
   ├── Spawns config watcher
   └── Runs App::run() in ratatui terminal
        │
@@ -93,6 +94,7 @@ main.rs
             ├── proxy: Option<ProxyInstance>
             ├── tabs: ClickTab            ← sidebar widget
             ├── theme: Theme
+            ├── ipc_state: Arc<IpcState>  ← published to the IPC socket
             └── mode: Mode                ← Normal / TerminalInput / ProxyFilter
                  │
                  ├── draw()

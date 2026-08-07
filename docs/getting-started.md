@@ -32,35 +32,58 @@ The `fog` binary is placed in `~/.cargo/bin/`.
 
 ## Quick start
 
-Create a `fog.json`:
+Create a `fog.json` with at least one script:
 
 ```json
 {
-  "service": [
-    {
-      "path": "/path/to/project",
-      "cmd": "npm run dev"
+  "scripts": {
+    "dev": {
+      "service": [
+        {
+          "path": "/path/to/project",
+          "cmd": "npm run dev"
+        }
+      ]
     }
-  ]
+  }
 }
 ```
 
 Then run:
 
 ```bash
-fog
+fog dev
 ```
 
 ## Usage
 
 ```bash
-fog [OPTIONS]
+fog <script> [OPTIONS]    # Run a script in the TUI (e.g. `fog dev`)
+fog ls [pid]              # List running instances and service status
+fog kill [pid]            # Gracefully shut down a running instance
 ```
 
 | Option | Description |
 |--------|-------------|
 | `-c`, `--config <PATH>` | Path to config file (default: `fog.json`) |
 | `--save-logs` | Save service output to `temp/<name>.txt` on exit |
+
+### Managing instances
+
+Every running `fog` instance listens on a Unix socket at `$TMPDIR/fog-<pid>.sock`. While a TUI session is running, you can inspect or stop it from another terminal:
+
+```bash
+fog ls        # show running instances, their scripts, proxy, and per-service status
+fog kill      # shut down the only running instance
+fog kill 1234 # shut down the instance with PID 1234
+```
+
+`fog ls` prints one line per instance:
+
+```
+pid   script  proxy   services
+1234  dev     :3000   api:healthy db:healthy
+```
 
 ## Configuration
 

@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use std::collections::HashMap;
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "snake_case")]
@@ -14,8 +15,7 @@ pub struct HealthCheckConfig {
     pub interval_ms: Option<u64>,
     pub timeout_ms: Option<u64>,
 }
-
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct ThemeConfig {
     pub proxy: Option<String>,
     pub terminal: Option<String>,
@@ -29,7 +29,7 @@ pub struct ThemeConfig {
 }
 
 /// Accepts either a single health check object or an array of health checks.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(untagged)]
 pub enum HealthCheckSpec {
     Single(HealthCheckConfig),
@@ -37,7 +37,7 @@ pub enum HealthCheckSpec {
 }
 
 /// A single service entry in the config file.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct ConfigEntry {
     /// Optional display name for the service tab.
     pub name: Option<String>,
@@ -54,7 +54,7 @@ pub struct ConfigEntry {
 }
 
 /// A route definition for the reverse proxy.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct ProxyRoute {
     /// The incoming path prefix to match against.
     /// Supports `*` wildcards (e.g. `/api/*` matches `/api/foo`).
@@ -70,7 +70,7 @@ pub struct ProxyRoute {
 }
 
 /// Reverse proxy configuration.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct ProxyConfig {
     /// The port the reverse proxy listens on.
     pub port: u16,
@@ -87,7 +87,7 @@ pub struct ProxyConfig {
 }
 
 /// Sidebar width configuration.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct SidebarConfig {
     /// Minimum sidebar width in columns (default: 12).
     pub min_width: Option<u16>,
@@ -95,13 +95,20 @@ pub struct SidebarConfig {
     pub max_width: Option<u16>,
 }
 
-/// Top-level application configuration loaded from `fog.json`.
-#[derive(Debug, Deserialize)]
-pub struct Config {
+/// A named script: a full set of services and optional proxy configuration.
+#[derive(Debug, Deserialize, Clone)]
+pub struct ScriptConfig {
     /// Optional list of service entries to manage.
     pub service: Option<Vec<ConfigEntry>>,
     /// Optional reverse proxy configuration.
     pub proxy: Option<ProxyConfig>,
+}
+
+/// Top-level application configuration loaded from `fog.json`.
+#[derive(Debug, Deserialize, Clone)]
+pub struct Config {
+    /// Named scripts, each defining its own services and proxy.
+    pub scripts: HashMap<String, ScriptConfig>,
     /// Maximum number of scrollback lines to retain per terminal (default: 2000).
     pub max_scrollback: Option<usize>,
     /// Optional sidebar width constraints.

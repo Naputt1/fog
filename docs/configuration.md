@@ -13,8 +13,12 @@ See [`fog.schema.json`](https://github.com/Naputt1/fog/blob/main/fog.schema.json
 ```json
 {
   "$schema": "https://raw.githubusercontent.com/Naputt1/fog/main/fog.schema.json",
-  "service": [...],
-  "proxy": {...},
+  "scripts": {
+    "dev": {
+      "service": [...],
+      "proxy": {...}
+    }
+  },
   "max_scrollback": 2000,
   "sidebar": {...},
   "theme": {...}
@@ -23,29 +27,67 @@ See [`fog.schema.json`](https://github.com/Naputt1/fog/blob/main/fog.schema.json
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `service` | `array` | `[]` | List of service entries to manage |
-| `proxy` | `object` | `null` | Reverse proxy configuration |
+| `scripts` | `object` | — | Named profiles; each defines its own services and proxy |
 | `max_scrollback` | `integer` | `2000` | Maximum scrollback lines per terminal (min: 100) |
 | `sidebar` | `object` | `null` | Sidebar width constraints |
 | `theme` | `object` | `null` | Color theme overrides |
+
+## Scripts
+
+A script bundles a set of services and an optional proxy under a name. Run it with `fog <name>` (e.g. `fog dev`). Each script is fully self-contained — services shared between scripts (like a database) must be defined in each script that needs them.
+
+```json
+{
+  "scripts": {
+    "infra": {
+      "service": [
+        { "name": "db", "path": ".", "cmd": "docker compose up -d" }
+      ]
+    },
+    "dev": {
+      "service": [
+        { "name": "db", "path": ".", "cmd": "docker compose up -d" },
+        { "name": "api", "path": "backend", "cmd": "cargo run" }
+      ],
+      "proxy": {
+        "port": 3000,
+        "routes": [{ "path": "/api", "upstream": "http://localhost:8080" }]
+      }
+    }
+  }
+}
+```
+
+### Script fields
+
+| Field | Required | Type | Description |
+|-------|----------|------|-------------|
+| `service` | No | `array` | List of service entries to manage |
+| `proxy` | No | `object` | Reverse proxy configuration (see below) |
+
+`fog` requires a script name; running `fog` with no arguments lists the available scripts.
 
 ## Service entries
 
 ```json
 {
-  "service": [
-    {
-      "name": "backend",
-      "path": "/path/to/project",
-      "cmd": "npm run dev",
-      "health_check": {
-        "kind": "tcp",
-        "target": "localhost:3000",
-        "interval_ms": 5000,
-        "timeout_ms": 2000
-      }
+  "scripts": {
+    "dev": {
+      "service": [
+        {
+          "name": "backend",
+          "path": "/path/to/project",
+          "cmd": "npm run dev",
+          "health_check": {
+            "kind": "tcp",
+            "target": "localhost:3000",
+            "interval_ms": 5000,
+            "timeout_ms": 2000
+          }
+        }
+      ]
     }
-  ]
+  }
 }
 ```
 
@@ -77,20 +119,25 @@ Both `"tcp"` and `"http"` health checks work the same way: they attempt a TCP co
 
 ```json
 {
-  "proxy": {
-    "port": 3000,
-    "host": "0.0.0.0",
-    "routes": [
-      {
-        "path": "/api",
-        "host": "api.local",
-        "upstream": "http://localhost:8080",
-        "ws": false
+  "scripts": {
+    "dev": {
+      "service": [],
+      "proxy": {
+        "port": 3000,
+        "host": "0.0.0.0",
+        "routes": [
+          {
+            "path": "/api",
+            "host": "api.local",
+            "upstream": "http://localhost:8080",
+            "ws": false
+          }
+        ],
+        "tls_cert": "/path/to/cert.pem",
+        "tls_key": "/path/to/key.pem",
+        "max_log_entries": 1000
       }
-    ],
-    "tls_cert": "/path/to/cert.pem",
-    "tls_key": "/path/to/key.pem",
-    "max_log_entries": 1000
+    }
   }
 }
 ```
@@ -157,35 +204,39 @@ See the [Themes docs](/themes) for available colors and customization examples.
 ```json
 {
   "$schema": "https://raw.githubusercontent.com/Naputt1/fog/main/fog.schema.json",
-  "service": [
-    {
-      "name": "api",
-      "path": "backend",
-      "cmd": "cargo run",
-      "health_check": {
-        "kind": "tcp",
-        "target": "localhost:8080",
-        "interval_ms": 3000
+  "scripts": {
+    "dev": {
+      "service": [
+        {
+          "name": "api",
+          "path": "backend",
+          "cmd": "cargo run",
+          "health_check": {
+            "kind": "tcp",
+            "target": "localhost:8080",
+            "interval_ms": 3000
+          }
+        },
+        {
+          "path": "frontend",
+          "cmd": "npm run dev"
+        }
+      ],
+      "proxy": {
+        "port": 3000,
+        "routes": [
+          {
+            "path": "/api",
+            "upstream": "http://localhost:8080"
+          },
+          {
+            "path": "/",
+            "upstream": "http://localhost:5173",
+            "ws": true
+          }
+        ]
       }
-    },
-    {
-      "path": "frontend",
-      "cmd": "npm run dev"
     }
-  ],
-  "proxy": {
-    "port": 3000,
-    "routes": [
-      {
-        "path": "/api",
-        "upstream": "http://localhost:8080"
-      },
-      {
-        "path": "/",
-        "upstream": "http://localhost:5173",
-        "ws": true
-      }
-    ]
   },
   "max_scrollback": 5000,
   "sidebar": {

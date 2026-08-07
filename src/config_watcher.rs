@@ -39,7 +39,12 @@ pub fn spawn_config_watcher(config_path: PathBuf) -> mpsc::Receiver<()> {
 }
 
 /// Reloads configuration from a file and applies changes to the running app state.
-pub fn reload_config(config_path: &PathBuf, proxy: &mut Option<ProxyInstance>, theme: &mut Theme) {
+pub fn reload_config(
+    config_path: &PathBuf,
+    script_name: &str,
+    proxy: &mut Option<ProxyInstance>,
+    theme: &mut Theme,
+) {
     let contents = match std::fs::read_to_string(config_path) {
         Ok(c) => c,
         Err(_) => return,
@@ -53,7 +58,10 @@ pub fn reload_config(config_path: &PathBuf, proxy: &mut Option<ProxyInstance>, t
         *theme = Theme::from_config(Some(tc));
     }
 
-    if let Some(ref pc) = config.proxy
+    if let Some(pc) = config
+        .scripts
+        .get(script_name)
+        .and_then(|s| s.proxy.as_ref())
         && let Some(p) = proxy
     {
         let new_routes: Vec<RouteEntry> = pc

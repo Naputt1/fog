@@ -1,7 +1,7 @@
 use crate::click_tab::{ClickTab, TabKind};
 use crate::config::HealthCheckConfig;
 use crate::config_watcher;
-use crate::ipc;
+use crate::ipc::{self, IpcState};
 use crate::keybinding;
 use crate::proxy::ProxyInstance;
 use crate::render;
@@ -75,11 +75,11 @@ pub struct App {
     proxy_filter: String,
     config_path: std::path::PathBuf,
     config_rx: std::sync::mpsc::Receiver<()>,
-    shared_state: Arc<ipc::SharedState>,
     proxy_tab_index: Option<usize>,
     scrollbar_dragging: bool,
     auto_scrolling: Option<bool>,
     auto_scroll_col: u16,
+    ipc_state: Arc<IpcState>,
 }
 
 impl App {
@@ -104,7 +104,7 @@ impl App {
         theme: Theme,
         config_path: std::path::PathBuf,
         config_rx: std::sync::mpsc::Receiver<()>,
-        shared_state: Arc<ipc::SharedState>,
+        ipc_state: Arc<IpcState>,
     ) -> Self {
         let names: Vec<String> = items.iter().map(|t| t.name.clone()).collect();
         let mut tabs = ClickTab::new(names, sidebar_min, sidebar_max);
@@ -149,7 +149,7 @@ impl App {
             proxy_filter: String::new(),
             config_path,
             config_rx,
-            shared_state,
+            ipc_state,
             proxy_tab_index,
             scrollbar_dragging: false,
             auto_scrolling: None,
@@ -175,7 +175,12 @@ impl App {
     /// # Errors
     /// Returns an error if terminal rendering or event polling fails.
     fn reload_config(&mut self) {
-        config_watcher::reload_config(&self.config_path, &mut self.proxy, &mut self.theme);
+        config_watcher::reload_config(
+            &self.config_path,
+            &self.ipc_state.script,
+            &mut self.proxy,
+            &mut self.theme,
+        );
     }
 
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
@@ -183,7 +188,8 @@ impl App {
             if self.config_rx.try_recv().is_ok() {
                 self.reload_config();
             }
-            if self.sigint.load(Ordering::SeqCst) || self.shared_state.exit.load(Ordering::SeqCst) {
+            if self.sigint.load(Ordering::SeqCst) || self.ipc_state.kill_flag.load(Ordering::SeqCst)
+            {
                 self.exit = true;
                 break;
             }
@@ -774,7 +780,7 @@ impl App {
 
     fn update_shared_state(&self) {
         let mut services = self
-            .shared_state
+            .ipc_state
             .services
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -782,13 +788,12 @@ impl App {
         for item in &self.items {
             services.push(ipc::ServiceStatus {
                 name: item.name.clone(),
-                stopped: item.stopped,
-                process_running: item.process_running,
-                health_status: format!("{:?}", item.get_health_status()).to_lowercase(),
+                running: !item.stopped && item.process_running,
+                health: format!("{:?}", item.get_health_status()).to_lowercase(),
             });
         }
         let mut proxy = self
-            .shared_state
+            .ipc_state
             .proxy
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -882,7 +887,7 @@ mod tests {
             proxy_filter: String::new(),
             config_path: std::path::PathBuf::new(),
             config_rx: rx,
-            shared_state: Arc::new(crate::ipc::SharedState::new()),
+            ipc_state: Arc::new(IpcState::new("test".to_string())),
             proxy_tab_index,
             scrollbar_dragging: false,
             auto_scrolling: None,

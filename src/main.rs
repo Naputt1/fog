@@ -1,14 +1,15 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
-use clap::{Parser, Subcommand};
+use clap::Parser;
 use crossterm::event::EnableMouseCapture;
 use crossterm::execute;
 use crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
 use std::collections::HashMap;
 use std::io::stdout;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::{fs, io, process};
+use std::{fs, io};
 
 use fog::app::{App, PendingService};
 use fog::config::{Config, HealthCheckConfig, HealthCheckSpec};
@@ -20,116 +21,23 @@ use fog::theme::Theme;
 
 const DEFAULT_SCROLLBACK: usize = 2000;
 
+/// Command-line interface arguments parsed via clap.
 #[derive(Parser)]
 #[command(name = "fog", version = env!("CARGO_PKG_VERSION"))]
 struct Cli {
-    /// Path to the configuration file.
+    /// Script to run (e.g. `fog dev`), or a built-in command (`ls`, `kill`).
+    script: Option<String>,
+
+    /// PID of a running fog instance (used with `fog kill <pid>`).
+    pid: Option<u32>,
+
+    /// Path to the configuration file. Defaults to `fog.json`.
     #[arg(short, long, default_value = "fog.json")]
     config: std::path::PathBuf,
 
     /// Save service output to `temp/<name>.txt` on exit.
     #[arg(long, help = "Save service output to temp/<name>.txt on exit")]
     save_logs: bool,
-
-    #[command(subcommand)]
-    command: Option<Command>,
-}
-
-#[derive(Subcommand)]
-enum Command {
-    /// List running fog instances and their service status
-    Ls {
-        /// PID of a specific fog instance
-        pid: Option<u32>,
-    },
-    /// Kill a running fog instance
-    Kill {
-        /// PID of a specific fog instance
-        pid: Option<u32>,
-    },
-}
-
-fn cmd_ls(pid: Option<u32>) -> io::Result<()> {
-    let sockets = ipc::find_sockets()?;
-
-    if sockets.is_empty() {
-        eprintln!("No running fog instances found.");
-        return Ok(());
-    }
-
-    let targets: Vec<(u32, std::path::PathBuf)> = match pid {
-        Some(p) => {
-            let filtered: Vec<_> = sockets.into_iter().filter(|(id, _)| *id == p).collect();
-            if filtered.is_empty() {
-                eprintln!("No fog instance with PID {} found.", p);
-                return Ok(());
-            }
-            filtered
-        }
-        None => {
-            if sockets.len() > 1 {
-                println!("Found {} running fog instances:", sockets.len());
-                for (id, path) in &sockets {
-                    println!("  PID {:<6} {}", id, path.display());
-                }
-                println!();
-                println!("Use \"fog ls <pid>\" to see details of a specific instance.");
-                return Ok(());
-            }
-            sockets
-        }
-    };
-
-    for (instance_pid, socket_path) in &targets {
-        println!("fog instance PID {}", instance_pid);
-        match ipc::send_request(socket_path, "status") {
-            Ok(response) => ipc::print_status(&response),
-            Err(e) => eprintln!("  error: could not connect: {}", e),
-        }
-    }
-
-    Ok(())
-}
-
-fn cmd_kill(pid: Option<u32>) -> io::Result<()> {
-    let sockets = ipc::find_sockets()?;
-
-    if sockets.is_empty() {
-        eprintln!("No running fog instances found.");
-        return Ok(());
-    }
-
-    let target = match pid {
-        Some(p) => {
-            let filtered: Vec<_> = sockets.into_iter().filter(|(id, _)| *id == p).collect();
-            match filtered.len() {
-                0 => {
-                    eprintln!("No fog instance with PID {} found.", p);
-                    return Ok(());
-                }
-                _ => filtered.into_iter().next().unwrap(),
-            }
-        }
-        None => {
-            if sockets.len() > 1 {
-                eprintln!("Multiple fog instances found. Specify a PID:");
-                for (id, _) in &sockets {
-                    eprintln!("  fog kill {}", id);
-                }
-                return Ok(());
-            }
-            sockets.into_iter().next().unwrap()
-        }
-    };
-
-    match ipc::send_request(&target.1, "kill") {
-        Ok(_) => {
-            println!("Kill signal sent to fog instance PID {}.", target.0);
-        }
-        Err(e) => eprintln!("error: could not kill fog instance {}: {}", target.0, e),
-    }
-
-    Ok(())
 }
 
 /// Resolves service startup order using topological sort (Kahn's algorithm).
@@ -147,6 +55,9 @@ fn resolve_dep_order(entries: &[fog::config::ConfigEntry]) -> Result<Vec<usize>,
                     .to_string_lossy()
                     .into_owned()
             });
+            // Use leak to get a &'static str from the owned String — safe because
+            // entries live for the rest of the program and we only need the map
+            // during this function.
             let leaked: &'static str = Box::leak(name.into_boxed_str());
             (leaked, i)
         })
@@ -206,25 +117,148 @@ fn resolve_dep_order(entries: &[fog::config::ConfigEntry]) -> Result<Vec<usize>,
     Ok(order)
 }
 
-fn cmd_run(cli: Cli) -> io::Result<()> {
-    let contents = match fs::read_to_string(&cli.config) {
+/// Loads and parses the config file, exiting with a diagnostic on failure.
+fn load_config(path: &Path) -> Config {
+    let contents = match fs::read_to_string(path) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!(
-                "error: could not read config '{}': {}",
-                cli.config.display(),
-                e
-            );
-            process::exit(1);
+            eprintln!("error: could not read config '{}': {}", path.display(), e);
+            std::process::exit(1);
         }
     };
 
-    let config: Config = match serde_json::from_str(&contents) {
+    match serde_json::from_str(&contents) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("error: invalid config '{}': {}", cli.config.display(), e);
-            process::exit(1);
+            eprintln!("error: invalid config '{}': {}", path.display(), e);
+            std::process::exit(1);
         }
+    }
+}
+
+/// Lists available script names and exits with an error.
+fn list_scripts_and_exit(config: &Config, message: &str) -> ! {
+    eprintln!("{message}");
+    let mut names: Vec<&String> = config.scripts.keys().collect();
+    names.sort();
+    for name in names {
+        eprintln!("  fog {name}");
+    }
+    std::process::exit(1);
+}
+
+fn cmd_ls() -> io::Result<()> {
+    let instances = ipc::find_instances()?;
+
+    if instances.is_empty() {
+        println!("no running fog instances");
+        return Ok(());
+    }
+
+    let mut rows: Vec<(u32, String, String, String)> = Vec::new();
+    for (pid, path) in &instances {
+        match ipc::query_status(path) {
+            Ok(status) => {
+                let proxy = match status.proxy {
+                    Some(p) if p.running => format!(":{}", p.port),
+                    Some(_) => ":down".to_string(),
+                    None => "-".to_string(),
+                };
+                let services = status
+                    .services
+                    .iter()
+                    .map(|s| {
+                        let state = if s.running {
+                            s.health.clone()
+                        } else {
+                            "stopped".to_string()
+                        };
+                        format!("{}:{}", s.name, state)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                rows.push((*pid, status.script, proxy, services));
+            }
+            Err(_) => {
+                // Stale socket: remove it and skip.
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
+
+    if rows.is_empty() {
+        println!("no running fog instances");
+        return Ok(());
+    }
+
+    let w_pid = rows
+        .iter()
+        .map(|r| r.0.to_string().len())
+        .max()
+        .unwrap_or(3);
+    let w_script = rows.iter().map(|r| r.1.len()).max().unwrap_or(6);
+    let w_proxy = rows.iter().map(|r| r.2.len()).max().unwrap_or(5);
+
+    println!(
+        "{:<w_pid$}  {:<w_script$}  {:<w_proxy$}  services",
+        "pid", "script", "proxy"
+    );
+    for (pid, script, proxy, services) in rows {
+        println!(
+            "{:<w_pid$}  {:<w_script$}  {:<w_proxy$}  {}",
+            pid, script, proxy, services
+        );
+    }
+    Ok(())
+}
+
+fn cmd_kill(pid: Option<u32>) -> io::Result<()> {
+    let instances = ipc::find_instances()?;
+
+    if instances.is_empty() {
+        eprintln!("error: no running fog instances");
+        std::process::exit(1);
+    }
+
+    let target = match pid {
+        Some(pid) => match instances.iter().find(|(p, _)| *p == pid) {
+            Some((_, path)) => Some(path),
+            None => {
+                eprintln!("error: no fog instance with pid {pid}");
+                std::process::exit(1);
+            }
+        },
+        None => {
+            if instances.len() == 1 {
+                Some(&instances[0].1)
+            } else {
+                eprintln!("error: multiple fog instances running, specify a pid:");
+                for (p, _) in &instances {
+                    eprintln!("  fog kill {p}");
+                }
+                std::process::exit(1);
+            }
+        }
+    };
+
+    match target {
+        Some(path) => {
+            ipc::send_kill(path)?;
+            println!("sent kill request to fog instance");
+        }
+        None => {
+            eprintln!("error: no fog instance to kill");
+            std::process::exit(1);
+        }
+    }
+    Ok(())
+}
+
+fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
+    let config = load_config(&cli.config);
+    let script = match config.scripts.get(name) {
+        Some(s) => s,
+        None => list_scripts_and_exit(&config, &format!("error: unknown script '{}'", name)),
     };
 
     let config_path = cli
@@ -246,9 +280,8 @@ fn cmd_run(cli: Cli) -> io::Result<()> {
         eprintln!("warning: could not set Ctrl+C handler");
     }
 
-    let shared_state = Arc::new(ipc::SharedState::new());
-    let (_ipc_handle, listener) = ipc::bind(process::id())?;
-    ipc::spawn_server(listener, shared_state.clone());
+    let ipc_state = Arc::new(ipc::IpcState::new(name.to_string()));
+    ipc::spawn_server(ipc_state.clone())?;
 
     enable_raw_mode()?;
     execute!(stdout(), EnterAlternateScreen, EnableMouseCapture)?;
@@ -266,10 +299,10 @@ fn cmd_run(cli: Cli) -> io::Result<()> {
         .unwrap_or(30);
     let theme = Theme::from_config(config.theme.as_ref());
 
-    let entries = config.service.unwrap_or_default();
+    let entries = script.service.clone().unwrap_or_default();
     let dep_order = resolve_dep_order(&entries).unwrap_or_else(|e| {
         eprintln!("error: {}", e);
-        process::exit(1);
+        std::process::exit(1);
     });
 
     let n = entries.len();
@@ -319,7 +352,6 @@ fn cmd_run(cli: Cli) -> io::Result<()> {
                     t.save_logs = cli.save_logs;
                     t.health_checks = health_checks;
                     t.shutdown_cmd = shutdown_cmd;
-                    t.dep_names = entry.depends_on.clone().unwrap_or_default();
                     t.start_health_checks();
                     t
                 }
@@ -336,7 +368,7 @@ fn cmd_run(cli: Cli) -> io::Result<()> {
         .map(|t| t.expect("all items should be filled"))
         .collect();
 
-    let proxy = config.proxy.map(|pc| {
+    let proxy = script.proxy.clone().map(|pc| {
         let routes: Vec<RouteEntry> = pc
             .routes
             .into_iter()
@@ -374,10 +406,12 @@ fn cmd_run(cli: Cli) -> io::Result<()> {
             theme,
             config_path,
             config_rx,
-            shared_state,
+            ipc_state,
         )
         .run(terminal)
     })?;
+
+    ipc::cleanup_socket();
 
     Ok(())
 }
@@ -385,9 +419,17 @@ fn cmd_run(cli: Cli) -> io::Result<()> {
 fn main() -> io::Result<()> {
     let cli = Cli::parse();
 
-    match cli.command {
-        Some(Command::Ls { pid }) => cmd_ls(pid),
-        Some(Command::Kill { pid }) => cmd_kill(pid),
-        None => cmd_run(cli),
+    match cli.script.as_deref() {
+        Some("ls") => cmd_ls(),
+        Some("kill") => cmd_kill(cli.pid),
+        Some(name) => run_script(name, &cli),
+        None => {
+            let config = load_config(&cli.config);
+            if config.scripts.is_empty() {
+                eprintln!("error: no scripts defined in '{}'", cli.config.display());
+                std::process::exit(1);
+            }
+            list_scripts_and_exit(&config, "error: no script specified")
+        }
     }
 }
