@@ -532,7 +532,6 @@ impl Terminal {
     /// * `scrollback` - Number of scrollback lines.
     /// * `fd` - The PTY master fd received via SCM_RIGHTS (now owned by us).
     /// * `pid` - The process group leader of the running service.
-    /// * `history` - Scrollback text transferred from the previous instance.
     pub fn adopt(
         path: String,
         cmd: String,
@@ -540,13 +539,14 @@ impl Terminal {
         scrollback: usize,
         fd: RawFd,
         pid: u32,
-        history: Vec<String>,
     ) -> Self {
         let parser = Arc::new(Mutex::new(vt100::Parser::new(24, INITIAL_COLS, scrollback)));
-        if !history.is_empty() {
-            let text = history.join("\n");
+        {
             let mut p = parser.lock().unwrap_or_else(|e| e.into_inner());
-            p.process(text.as_bytes());
+            p.process(
+                format!("\x1b[36m♻ adopted from instance {pid} — streaming live output\x1b[0m\r\n")
+                    .as_bytes(),
+            );
         }
         let screen_generation = Arc::new(AtomicUsize::new(0));
         let (stop_r, stop_w) = make_stop_pipe().unwrap_or((-1, -1));
@@ -608,9 +608,9 @@ impl Terminal {
 
     /// Extracts this terminal's live process for transfer to another instance.
     ///
-    /// Dups the PTY master fd, captures the scrollback, and stops this
-    /// terminal's reader so output is not consumed after handoff. Returns
-    /// `None` if there is no live process to hand over.
+    /// Dups the PTY master fd and stops this terminal's reader so output is
+    /// not consumed after handoff. Returns `None` if there is no live process
+    /// to hand over.
     pub fn extract_handoff(&mut self) -> Option<crate::ipc::HandoffItem> {
         let pid = if let Some(pid) = self.owned_pid {
             pid
@@ -627,7 +627,6 @@ impl Terminal {
         if dup_fd < 0 {
             return None;
         }
-        let scrollback = self.get_all_lines();
 
         if let Some(stop) = self.stop_w.take() {
             // SAFETY: stop is a valid pipe write end owned by this terminal.
@@ -645,7 +644,6 @@ impl Terminal {
         Some(crate::ipc::HandoffItem {
             name: self.name.clone(),
             pid,
-            scrollback,
             fd: dup_fd,
         })
     }
@@ -1291,12 +1289,56 @@ mod tests {
         assert_eq!(handoff.name, "svc");
         assert!(handoff.pid > 0);
         assert!(handoff.fd >= 0);
-        assert!(!handoff.scrollback.is_empty());
         assert!(t.handed_off);
         // Releasing must not kill the (already-extracted) process.
         t.kill_inner();
         // SAFETY: handoff.fd is owned by the test after extraction.
         unsafe { libc::close(handoff.fd) };
+    }
+
+    #[test]
+    fn test_adopt_starts_clean_with_header() {
+        // Build a live PTY to adopt.
+        let pty = portable_pty::native_pty_system()
+            .openpty(portable_pty::PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let master_fd = pty.master.as_raw_fd().unwrap();
+        let fd = unsafe { libc::dup(master_fd) };
+        assert!(fd >= 0);
+
+        let mut t = Terminal::adopt(
+            "/repo/infra".into(),
+            "docker compose up -d".into(),
+            "infra".into(),
+            100,
+            fd,
+            99_999,
+        );
+        let lines: Vec<String> = t
+            .get_all_lines()
+            .into_iter()
+            .filter(|l| !l.trim().is_empty())
+            .collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "adopt should start clean with only the header, got: {:?}",
+            lines
+        );
+        assert!(lines[0].contains("adopted from instance 99999"));
+
+        // Pid is owned; a dead pid (not a child of this test) makes
+        // refresh_status fall back to reuse.
+        t.refresh_status();
+        assert!(t.reused);
+        t.kill_inner();
+        // SAFETY: fd is owned by the test.
+        unsafe { libc::close(fd) };
     }
 
     #[test]

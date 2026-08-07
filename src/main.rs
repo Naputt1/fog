@@ -177,6 +177,26 @@ fn reuse_names(script: &fog::config::ScriptConfig) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Lexically normalizes an absolute path, dropping `.` segments, resolving
+/// `..` segments, and removing the doubled `./` produced by `join` (so the
+/// `cd` command reads `/repo/infra` instead of `/repo/./infra`).
+fn normalize_service_path(path: &Path) -> String {
+    use std::path::Component;
+    let mut parts: Vec<String> = Vec::new();
+    for comp in path.components() {
+        match comp {
+            Component::RootDir => parts.clear(),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                parts.pop();
+            }
+            Component::Normal(c) => parts.push(c.to_string_lossy().into_owned()),
+            Component::Prefix(_) => {}
+        }
+    }
+    format!("/{}", parts.join("/"))
+}
+
 /// Shuts down existing fog instances running the same script in the same
 /// project, so a new instance can take their place. Returns any live services
 /// handed over, keyed by service name, together with their PTY master fd.
@@ -498,7 +518,7 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
                 .to_string_lossy()
                 .into_owned()
         });
-        let service_path_str = service_path.to_string_lossy().into_owned();
+        let service_path_str = normalize_service_path(&service_path);
 
         let health_checks: Vec<HealthCheckConfig> = match &entry.health_check {
             Some(HealthCheckSpec::Single(c)) => vec![c.clone()],
@@ -524,7 +544,6 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
                     scrollback,
                     handoff.fd,
                     handoff.pid,
-                    handoff.scrollback,
                 )
             } else {
                 Terminal::spawn_reused(
@@ -645,5 +664,35 @@ fn main() -> io::Result<()> {
             }
             list_scripts_and_exit(&config, "error: no script specified")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_service_path_strips_dot_segments() {
+        assert_eq!(
+            normalize_service_path(Path::new("/Users/naputt/git/GEMS/./infra")),
+            "/Users/naputt/git/GEMS/infra"
+        );
+        assert_eq!(
+            normalize_service_path(Path::new("/Users/naputt/git/GEMS/.")),
+            "/Users/naputt/git/GEMS"
+        );
+    }
+
+    #[test]
+    fn test_normalize_service_path_resolves_parent() {
+        assert_eq!(
+            normalize_service_path(Path::new("/repo/fog/../cinema_ticket/backend")),
+            "/repo/cinema_ticket/backend"
+        );
+    }
+
+    #[test]
+    fn test_normalize_service_path_preserves_absolute() {
+        assert_eq!(normalize_service_path(Path::new("/etc")), "/etc");
     }
 }

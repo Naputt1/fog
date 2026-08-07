@@ -43,8 +43,6 @@ pub struct HandoffItem {
     pub name: String,
     /// Process group leader of the running service.
     pub pid: u32,
-    /// Scrollback text captured from the previous instance.
-    pub scrollback: Vec<String>,
     /// A dup of the PTY master fd (now owned by the receiver).
     pub fd: RawFd,
 }
@@ -263,7 +261,6 @@ struct HandoffMsg {
     r#type: String,
     name: String,
     pid: u32,
-    scrollback: Vec<String>,
 }
 
 /// Waits for the App to prepare handoffs, then sends each one (metadata line
@@ -292,7 +289,6 @@ fn send_handoffs(mut stream: UnixStream, state: Arc<IpcState>) {
             r#type: "handoff".to_string(),
             name: item.name,
             pid: item.pid,
-            scrollback: item.scrollback,
         };
         let line = match serde_json::to_string(&msg) {
             Ok(l) => l,
@@ -399,7 +395,6 @@ pub fn send_kill_with_reuse(path: &Path, reuse: &[String]) -> io::Result<()> {
 struct HandoffMsgReply {
     name: String,
     pid: u32,
-    scrollback: Vec<String>,
 }
 
 /// The final response to a kill/reclaim request.
@@ -506,7 +501,6 @@ pub fn reclaim(path: &Path, reuse: &[String]) -> ReclaimOutcome {
                     handoffs.push(HandoffItem {
                         name: reply.name,
                         pid: reply.pid,
-                        scrollback: reply.scrollback,
                         fd,
                     });
                 }
@@ -704,7 +698,6 @@ mod tests {
         state.handoff_results.lock().unwrap().push(HandoffItem {
             name: "db".into(),
             pid: 99_999,
-            scrollback: vec!["container db created".into()],
             fd: dup_fd,
         });
         state.handoff_prepared.store(true, Ordering::SeqCst);
@@ -728,7 +721,6 @@ mod tests {
         assert!(!outcome.incomplete);
         assert_eq!(outcome.handoffs.len(), 1);
         assert_eq!(outcome.handoffs[0].name, "db");
-        assert_eq!(outcome.handoffs[0].scrollback, vec!["container db created"]);
         assert!(outcome.handoffs[0].fd >= 0);
         assert!(state.kill_flag.load(Ordering::SeqCst));
         assert_eq!(
@@ -762,7 +754,6 @@ mod tests {
         state.handoff_results.lock().unwrap().push(HandoffItem {
             name: "db".into(),
             pid: 99_999,
-            scrollback: vec![],
             fd: dup_fd,
         });
         state.handoff_prepared.store(true, Ordering::SeqCst);
@@ -829,7 +820,6 @@ mod tests {
         state.handoff_results.lock().unwrap().push(HandoffItem {
             name: "db".into(),
             pid: 99_998,
-            scrollback: vec![],
             fd: dup_fd,
         });
         state.handoff_prepared.store(true, Ordering::SeqCst);

@@ -148,7 +148,7 @@ Terminal::get_screen(visible_rows, offset)
 
 ## Process lifecycle
 
-1. **Startup**: Parse config, spawn terminals, start proxy, enter TUI. Before spawning, fog detects the git project (`git rev-parse --git-common-dir`) and coordinates with any other instance running the same script in the same project (see *Cross-instance coordination* below). If it should take over, it sends a `kill` request carrying the `reuse` service names over IPC; the old instance hands over live reused services (PTY master fd via `SCM_RIGHTS` + scrollback) and then exits.
+1. **Startup**: Parse config, spawn terminals, start proxy, enter TUI. Before spawning, fog detects the git project (`git rev-parse --git-common-dir`) and coordinates with any other instance running the same script in the same project (see *Cross-instance coordination* below). If it should take over, it sends a `kill` request carrying the `reuse` service names over IPC; the old instance hands over live reused services (PTY master fd via `SCM_RIGHTS`) and then exits.
 2. **Running**: Event loop polls input at 50ms intervals, draws UI, handles events.
 3. **Shutdown**: On `q` / `Ctrl+C` / SIGINT, or a replacement's `kill` request:
    - `exit` flag is set
