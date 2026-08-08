@@ -118,6 +118,7 @@ pub struct App {
     auto_scrolling: Option<bool>,
     auto_scroll_col: u16,
     switch_popup: Option<SwitchPopup>,
+    config_watcher_stop: Arc<AtomicBool>,
     ipc_state: Arc<IpcState>,
 }
 
@@ -177,6 +178,7 @@ impl App {
             config_rel,
             save_logs,
             config_rx,
+            config_watcher_stop: Arc::new(AtomicBool::new(false)),
             ipc_state,
             proxy_tab_index,
             sidebar_min,
@@ -226,6 +228,23 @@ impl App {
             .get(self.tabs.index)
             .map(|e| e.kind == TabKind::Proxy)
             .unwrap_or(false)
+    }
+
+    /// Maps a tab-bar index to an index into `self.items`, accounting for the
+    /// proxy tab (which exists only in the tab bar, never in `items`).
+    ///
+    /// Returns `None` for the proxy tab itself or any out-of-range tab.
+    fn item_index_for_tab(&self, tab_idx: usize) -> Option<usize> {
+        match self.proxy_tab_index {
+            Some(p) if tab_idx == p => None,
+            Some(p) if tab_idx > p => Some(tab_idx - 1),
+            _ => Some(tab_idx),
+        }
+    }
+
+    /// Maps the currently selected tab to an index into `self.items`.
+    fn service_tab_index(&self) -> Option<usize> {
+        self.item_index_for_tab(self.tabs.index)
     }
 
     /// Runs the main event loop until exit is requested.
@@ -427,8 +446,10 @@ impl App {
                     }
                     if self.selecting {
                         self.selecting = false;
-                        if let (Some(start), Some(end)) = (self.select_start, self.select_end) {
-                            selection::copy_selection(start, end, &self.items, self.tabs.index);
+                        if let (Some(start), Some(end)) = (self.select_start, self.select_end)
+                            && let Some(idx) = self.service_tab_index()
+                        {
+                            selection::copy_selection(start, end, &self.items, idx);
                         }
                         self.select_start = None;
                         self.select_end = None;
@@ -459,7 +480,7 @@ impl App {
         self.proxy_filter.clear();
         if self.is_proxy_tab() {
             self.mode = Mode::Normal;
-        } else if let Some(item) = self.items.get(self.tabs.index) {
+        } else if let Some(item) = self.service_tab_index().and_then(|i| self.items.get(i)) {
             self.mode = if item.is_shell() {
                 Mode::TerminalInput
             } else {
@@ -469,7 +490,10 @@ impl App {
     }
 
     fn is_shell_tab(&self, idx: usize) -> bool {
-        self.items.get(idx).map(|t| t.is_shell()).unwrap_or(false)
+        self.item_index_for_tab(idx)
+            .and_then(|i| self.items.get(i))
+            .map(|t| t.is_shell())
+            .unwrap_or(false)
     }
 
     fn handle_key(&mut self, key: KeyEvent) {
@@ -485,6 +509,15 @@ impl App {
         if self.switch_popup.is_some() {
             self.handle_switch_key(key);
             return;
+        }
+
+        // With no tabs (empty script), tab navigation would divide by zero;
+        // only quitting and opening a shell terminal remain useful.
+        if self.tabs.entries.is_empty() {
+            match key.code {
+                KeyCode::Char('q') | KeyCode::Char('t') => {}
+                _ => return,
+            }
         }
 
         if key.modifiers == KeyModifiers::CONTROL {
@@ -550,7 +583,7 @@ impl App {
             self.mode = Mode::Normal;
             return;
         }
-        if let Some(item) = self.items.get_mut(self.tabs.index)
+        if let Some(item) = self.service_tab_index().and_then(|i| self.items.get_mut(i))
             && let Some(bytes) = keybinding::key_to_bytes(key)
         {
             item.write(&bytes);
@@ -713,6 +746,13 @@ impl App {
             ));
             return;
         };
+        // Validate the dependency graph up front so a bad target script leaves
+        // the current instance untouched instead of tearing it down first.
+        let entries = script.service.clone().unwrap_or_default();
+        if let Err(e) = runtime::resolve_dep_order(&entries) {
+            self.errors.push(format!("switch worktree: {e}"));
+            return;
+        }
         let config_path = config_path.canonicalize().unwrap_or(config_path);
         let config_dir = config_path
             .parent()
@@ -721,12 +761,16 @@ impl App {
 
         // Preserve shared services: mark reuse terminals handed off so dropping
         // the old set neither kills their processes nor runs their shutdown_cmds.
+        // Adopted terminals transfer their live fd; borrowed (assumed-up)
+        // terminals are marked handed off so the successor keeps the resource.
         let mut adopted: HashMap<String, ipc::HandoffItem> = HashMap::new();
         for item in &mut self.items {
-            if item.reused
-                && let Some(handoff) = item.extract_handoff()
-            {
-                adopted.insert(handoff.name.clone(), handoff);
+            if item.reused {
+                if let Some(handoff) = item.extract_handoff() {
+                    adopted.insert(handoff.name.clone(), handoff);
+                } else {
+                    item.preserve_for_reuse();
+                }
             }
         }
 
@@ -741,13 +785,19 @@ impl App {
         self.tabs = ClickTab::new(Vec::new(), self.sidebar_min, self.sidebar_max);
         self.proxy_tab_index = None;
 
-        let built = runtime::build(
+        let built = match runtime::build(
             script,
             &config_dir,
             self.save_logs,
             self.scrollback,
             &mut adopted,
-        );
+        ) {
+            Ok(b) => b,
+            Err(e) => {
+                self.errors.push(format!("switch worktree: {e}"));
+                return;
+            }
+        };
         let (tabs, proxy_tab_index) = Self::build_tabs(
             &built.items,
             &built.pending_services,
@@ -762,7 +812,11 @@ impl App {
         self.tabs = tabs;
         self.proxy_tab_index = proxy_tab_index;
         self.config_path = config_path;
-        self.config_rx = config_watcher::spawn_config_watcher(self.config_path.clone());
+        self.config_watcher_stop.store(true, Ordering::SeqCst);
+        let config_watcher_stop = Arc::new(AtomicBool::new(false));
+        self.config_watcher_stop = config_watcher_stop.clone();
+        self.config_rx =
+            config_watcher::spawn_config_watcher(self.config_path.clone(), config_watcher_stop);
 
         self.tabs.index = 0;
         self.scroll_offset = 0;
@@ -784,7 +838,7 @@ impl App {
             }
             return;
         }
-        if let Some(item) = self.items.get_mut(self.tabs.index)
+        if let Some(item) = self.service_tab_index().and_then(|i| self.items.get_mut(i))
             && !item.is_shell()
         {
             if let Err(e) = item.restart() {
@@ -799,7 +853,7 @@ impl App {
     fn new_terminal(&mut self) {
         match Terminal::spawn_shell("bash".to_string(), self.scrollback) {
             Ok(term) => {
-                let insertion_idx = self.items.len();
+                let insertion_idx = self.tabs.entries.len();
                 self.items.push(term);
                 self.tabs
                     .insert_at(insertion_idx, "bash".to_string(), TabKind::Terminal);
@@ -820,16 +874,13 @@ impl App {
         if !self.is_shell_tab(self.tabs.index) {
             return;
         }
-        let idx = self.tabs.index;
-        if let Some(proxy_idx) = self.proxy_tab_index.as_mut()
-            && idx < *proxy_idx
-        {
-            *proxy_idx -= 1;
-        }
-        self.items.remove(idx);
-        self.tabs.remove(idx);
+        let Some(item_idx) = self.service_tab_index() else {
+            return;
+        };
+        self.items.remove(item_idx);
+        self.tabs.remove(self.tabs.index);
         self.scroll_offset = 0;
-        if self.tabs.index < self.items.len() && self.is_shell_tab(self.tabs.index) {
+        if self.is_shell_tab(self.tabs.index) {
             self.mode = Mode::TerminalInput;
         } else {
             self.mode = Mode::Normal;
@@ -852,9 +903,12 @@ impl App {
             return false;
         }
 
-        if let Some(offset) = self.scrollbar_row_to_offset(row) {
-            self.scroll_to(offset);
-        }
+        let Some(offset) = self.scrollbar_row_to_offset(row) else {
+            // No scrollbar is actually rendered (nothing to scroll): let the
+            // click fall through so drag-select can start in this column.
+            return false;
+        };
+        self.scroll_to(offset);
         true
     }
 
@@ -939,11 +993,11 @@ impl App {
                 0
             };
             match self.proxy {
-                Some(ref p) => p.get_logs().len() + 3 + filter_lines,
+                Some(ref p) => p.filtered_log_len(&self.proxy_filter) + 3 + filter_lines,
                 None => 1,
             }
         } else {
-            match self.items.get(self.tabs.index) {
+            match self.service_tab_index().and_then(|i| self.items.get(i)) {
                 Some(item) => item.total_lines(),
                 None => 0,
             }
@@ -962,9 +1016,10 @@ impl App {
 
         self.check_pending();
 
+        let proxy_offset = usize::from(self.proxy_tab_index.is_some());
         for (i, item) in self.items.iter_mut().enumerate() {
             item.refresh_status();
-            if let Some(entry) = self.tabs.entries.get_mut(i) {
+            if let Some(entry) = self.tabs.entries.get_mut(i + proxy_offset) {
                 entry.stopped = item.stopped;
                 entry.process_running = item.process_running;
                 entry.pending = item.get_health_status() == HealthStatus::Pending;
@@ -1002,7 +1057,7 @@ impl App {
                         .unwrap_or(false)
                 });
                 if dep_unhealthy
-                    && let Some(entry) = self.tabs.entries.get_mut(i)
+                    && let Some(entry) = self.tabs.entries.get_mut(i + proxy_offset)
                     && entry.health_status != HealthStatus::Unhealthy
                 {
                     entry.health_status = HealthStatus::Unhealthy;
@@ -1020,8 +1075,8 @@ impl App {
 
         let is_proxy = self.is_proxy_tab();
         let is_shell = self
-            .items
-            .get(self.tabs.index)
+            .service_tab_index()
+            .and_then(|i| self.items.get(i))
             .map(|t| t.is_shell())
             .unwrap_or(false);
         let in_terminal_input = matches!(self.mode, Mode::TerminalInput);
@@ -1045,12 +1100,13 @@ impl App {
             );
         } else {
             let total_lines = self.current_total_lines();
+            let tab_index = self.service_tab_index().unwrap_or(self.tabs.index);
             render::draw_terminal_content(
                 frame,
                 content_area,
                 block,
                 &mut self.items,
-                self.tabs.index,
+                tab_index,
                 self.scroll_offset,
                 self.select_start,
                 self.select_end,
@@ -1218,8 +1274,12 @@ impl App {
                         item.start_health_checks();
                     }
                 }
-                // Update tab entry
-                if let Some(entry) = self.tabs.entries.get_mut(tab_index) {
+                // Update tab entry (tabs include the proxy, items do not)
+                if let Some(entry) = self
+                    .tabs
+                    .entries
+                    .get_mut(tab_index + usize::from(self.proxy_tab_index.is_some()))
+                {
                     entry.pending = false;
                 }
             }
@@ -1265,6 +1325,7 @@ mod tests {
             config_rel: PathBuf::from("fog.json"),
             save_logs: false,
             config_rx: rx,
+            config_watcher_stop: Arc::new(AtomicBool::new(false)),
             ipc_state: Arc::new(IpcState::new("test".to_string(), None)),
             proxy_tab_index,
             sidebar_min: 10,
@@ -1310,6 +1371,34 @@ mod tests {
             Rect::default(),
         );
         assert!(!app.is_proxy_tab());
+    }
+
+    #[test]
+    fn test_item_index_for_tab_with_proxy_at_zero() {
+        // Mirrors build_tabs: proxy inserted at index 0, items have no proxy.
+        let mut tabs = ClickTab::new(vec!["svc_a".into(), "svc_b".into()], 10, 30);
+        tabs.insert_at(0, "proxy".into(), TabKind::Proxy);
+        let app = make_app(
+            vec![],
+            Some(ProxyInstance::new(8080, None, vec![], 1000, None, None)),
+            tabs,
+            Mode::Normal,
+            Rect::default(),
+        );
+        // proxy tab maps to no item
+        assert_eq!(app.item_index_for_tab(0), None);
+        // first service tab -> items[0]
+        assert_eq!(app.item_index_for_tab(1), Some(0));
+        // second service tab -> items[1]
+        assert_eq!(app.item_index_for_tab(2), Some(1));
+    }
+
+    #[test]
+    fn test_item_index_for_tab_without_proxy() {
+        let tabs = ClickTab::new(vec!["svc_a".into(), "svc_b".into()], 10, 30);
+        let app = make_app(vec![], None, tabs, Mode::Normal, Rect::default());
+        assert_eq!(app.item_index_for_tab(0), Some(0));
+        assert_eq!(app.item_index_for_tab(1), Some(1));
     }
 
     #[test]

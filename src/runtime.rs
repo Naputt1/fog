@@ -115,18 +115,19 @@ pub fn normalize_service_path(path: &Path) -> String {
 /// service name). Any unconsumed handoffs have their fds closed.
 ///
 /// This is shared by CLI startup and in-place worktree switches.
+///
+/// # Errors
+/// Returns an error string when the script's dependency graph is invalid (a
+/// cycle or a dependency on an unknown service).
 pub fn build(
     script: &ScriptConfig,
     config_dir: &Path,
     save_logs: bool,
     scrollback: usize,
     adopted: &mut HashMap<String, HandoffItem>,
-) -> Runtime {
+) -> Result<Runtime, String> {
     let entries = script.service.clone().unwrap_or_default();
-    let dep_order = resolve_dep_order(&entries).unwrap_or_else(|e| {
-        eprintln!("error: {}", e);
-        std::process::exit(1);
-    });
+    let dep_order = resolve_dep_order(&entries)?;
 
     let n = entries.len();
     let mut items: Vec<Option<Terminal>> = (0..n).map(|_| None).collect();
@@ -253,11 +254,11 @@ pub fn build(
         p
     });
 
-    Runtime {
+    Ok(Runtime {
         items,
         pending_services,
         proxy,
-    }
+    })
 }
 
 #[cfg(test)]

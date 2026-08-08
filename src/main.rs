@@ -1,9 +1,11 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use clap::Parser;
-use crossterm::event::EnableMouseCapture;
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::execute;
-use crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
+use crossterm::terminal::{
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+};
 use std::collections::HashMap;
 use std::io::stdout;
 use std::path::{Path, PathBuf};
@@ -162,7 +164,7 @@ fn reclaim_existing(
     reuse: &[String],
     timeout: Duration,
 ) -> HashMap<String, ipc::HandoffItem> {
-    let mut adopted = HashMap::new();
+    let mut adopted: HashMap<String, ipc::HandoffItem> = HashMap::new();
     let existing = ipc::find_instances_for(project, script);
     for (pid, path) in &existing {
         eprintln!(
@@ -181,7 +183,15 @@ fn reclaim_existing(
             eprintln!("  reusing live services: {}", names.join(", "));
         }
         for handoff in outcome.handoffs {
-            adopted.entry(handoff.name.clone()).or_insert(handoff);
+            // A duplicate service name from another old instance: close the
+            // losing fd so it is not leaked (the process itself stays up).
+            if let Some(existing) = adopted.get_mut(&handoff.name) {
+                // SAFETY: the fd was dupped for transfer and is owned by us.
+                unsafe { libc::close(existing.fd) };
+                *existing = handoff;
+            } else {
+                adopted.insert(handoff.name.clone(), handoff);
+            }
         }
         if ipc::wait_for_exit(*pid, timeout) {
             eprintln!("  old instance {pid} stopped");
@@ -323,8 +333,12 @@ fn cmd_ls() -> io::Result<()> {
                 rows.push((*pid, status.script, project, proxy, services));
             }
             Err(_) => {
-                // Stale socket: remove it and skip.
-                let _ = fs::remove_file(path);
+                // Only treat the socket as stale if the owning process is
+                // genuinely gone. A live-but-slow instance (e.g. mid-handoff)
+                // must not be hidden by deleting its socket.
+                if !fog::process::is_pid_alive(*pid) {
+                    let _ = fs::remove_file(path);
+                }
             }
         }
     }
@@ -450,15 +464,25 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
         .as_ref()
         .and_then(|s| s.max_width)
         .unwrap_or(30);
+    // A misconfigured min > max would panic in `u16::clamp` on the first draw;
+    // normalize the bounds instead.
+    let (sidebar_min, sidebar_max) = (sidebar_min.min(sidebar_max), sidebar_min.max(sidebar_max));
     let theme = Theme::from_config(config.theme.as_ref());
 
-    let runtime = fog::runtime::build(script, &config_dir, cli.save_logs, scrollback, &mut adopted);
+    let runtime = fog::runtime::build(script, &config_dir, cli.save_logs, scrollback, &mut adopted)
+        .map_err(|e| {
+            // Restore the terminal before reporting so it is usable again.
+            let _ = execute!(stdout(), LeaveAlternateScreen, DisableMouseCapture);
+            let _ = disable_raw_mode();
+            io::Error::new(io::ErrorKind::InvalidData, format!("error: {}", e))
+        })?;
 
     // Services are up: release the owner lock so a later worktree switch can
     // replace this instance.
     drop(owner_lock);
 
-    let config_rx = config_watcher::spawn_config_watcher(config_path.clone());
+    let config_rx =
+        config_watcher::spawn_config_watcher(config_path.clone(), Arc::new(AtomicBool::new(false)));
 
     ratatui::run(|terminal| {
         App::new(
