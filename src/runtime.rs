@@ -2,7 +2,7 @@ use crate::app::PendingService;
 use crate::config::{ConfigEntry, HealthCheckConfig, HealthCheckSpec, ScriptConfig};
 use crate::ipc::HandoffItem;
 use crate::proxy::{ProxyInstance, RouteEntry};
-use crate::terminal::Terminal;
+use crate::terminal::{Terminal, health_checks_pass};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -110,6 +110,32 @@ pub fn normalize_service_path(path: &Path) -> String {
     format!("/{}", parts.join("/"))
 }
 
+/// Spawns a terminal that runs `cmd` and wires up its health checks and
+/// shutdown command. Used for services that should be started directly —
+/// non-reused services, and reused services whose resource is currently down.
+fn spawn_checked_terminal(
+    path: &str,
+    cmd: &str,
+    name: &str,
+    scrollback: usize,
+    save_logs: bool,
+    health_checks: Vec<HealthCheckConfig>,
+    shutdown_cmd: Option<String>,
+) -> Terminal {
+    match Terminal::spawn_command(path, cmd, name.to_string(), scrollback) {
+        Ok(mut t) => {
+            t.save_logs = save_logs;
+            t.health_checks = health_checks;
+            t.shutdown_cmd = shutdown_cmd;
+            t.start_health_checks();
+            t
+        }
+        Err(e) => {
+            Terminal::spawn_error(name.to_string(), format!("Failed to spawn: {e}"), scrollback)
+        }
+    }
+}
+
 /// Spawns the terminals and (optional) proxy for a script, honoring dependency
 /// ordering and adopting any live services handed over in `adopted` (keyed by
 /// service name). Any unconsumed handoffs have their fds closed.
@@ -154,35 +180,71 @@ pub fn build(
         let has_deps = entry.depends_on.is_some();
 
         let terminal = if entry.reuse {
-            if health_checks.is_empty() {
-                eprintln!(
-                    "warning: service '{}' has reuse: true but no health_check; \
-                     fog cannot verify it is already running",
-                    name
-                );
-            }
-            let mut t = if let Some(handoff) = adopted.remove(&name) {
-                Terminal::adopt(
+            if let Some(handoff) = adopted.remove(&name) {
+                let mut t = Terminal::adopt(
                     service_path_str.clone(),
                     entry.cmd.clone(),
                     name.clone(),
                     scrollback,
                     handoff.fd,
                     handoff.pid,
-                )
-            } else {
-                Terminal::spawn_reused(
+                );
+                t.save_logs = save_logs;
+                t.health_checks = health_checks;
+                t.shutdown_cmd = entry.shutdown_cmd.clone();
+                t.start_health_checks();
+                t
+            } else if health_checks.is_empty() {
+                let t = spawn_checked_terminal(
+                    &service_path_str,
+                    &entry.cmd,
+                    &name,
+                    scrollback,
+                    save_logs,
+                    health_checks,
+                    entry.shutdown_cmd.clone(),
+                );
+                // build() runs while the TUI is already in raw/alternate-screen
+                // mode, so a config warning must render in the tab instead of
+                // stderr (which would corrupt the layout).
+                t.notice(&format!(
+                    "⚠ service '{name}' has reuse: true but no health_check; \
+                     fog cannot verify it is already running, starting it\n"
+                ));
+                t
+            } else if health_checks_pass(&health_checks) {
+                // The resource is genuinely up: borrow it instead of re-running
+                // the start command.
+                let mut reused = Terminal::spawn_reused(
                     name.clone(),
                     service_path_str,
                     entry.cmd.clone(),
                     scrollback,
+                );
+                reused.save_logs = save_logs;
+                reused.health_checks = health_checks;
+                reused.shutdown_cmd = entry.shutdown_cmd.clone();
+                // The probe just passed, so seed Healthy to avoid a short
+                // "stopped" flicker before the background thread's first check.
+                reused.set_health_status(crate::terminal::HealthStatus::Healthy);
+                reused.start_health_checks();
+                reused
+            } else {
+                // Nothing is running: start the service immediately instead of
+                // waiting out the reuse grace period with a misleading
+                // "reusing already-running" tab. The tab itself shows the
+                // start command output, so no stderr notice is needed (stderr
+                // would corrupt the already-active TUI).
+                spawn_checked_terminal(
+                    &service_path_str,
+                    &entry.cmd,
+                    &name,
+                    scrollback,
+                    save_logs,
+                    health_checks,
+                    entry.shutdown_cmd.clone(),
                 )
-            };
-            t.save_logs = save_logs;
-            t.health_checks = health_checks;
-            t.shutdown_cmd = entry.shutdown_cmd.clone();
-            t.start_health_checks();
-            t
+            }
         } else if has_deps {
             let deps = entry.depends_on.clone().unwrap_or_default();
             let mut t = Terminal::spawn_pending(name.clone(), scrollback, &deps);
@@ -200,19 +262,15 @@ pub fn build(
             });
             t
         } else {
-            let shutdown_cmd = entry.shutdown_cmd.clone();
-            match Terminal::spawn_command(&service_path_str, &entry.cmd, name.clone(), scrollback) {
-                Ok(mut t) => {
-                    t.save_logs = save_logs;
-                    t.health_checks = health_checks;
-                    t.shutdown_cmd = shutdown_cmd;
-                    t.start_health_checks();
-                    t
-                }
-                Err(e) => {
-                    Terminal::spawn_error(name.clone(), format!("Failed to spawn: {e}"), scrollback)
-                }
-            }
+            spawn_checked_terminal(
+                &service_path_str,
+                &entry.cmd,
+                &name,
+                scrollback,
+                save_logs,
+                health_checks,
+                entry.shutdown_cmd.clone(),
+            )
         };
         items[idx] = Some(terminal);
     }
@@ -319,5 +377,70 @@ mod tests {
     #[test]
     fn test_normalize_service_path_preserves_absolute() {
         assert_eq!(normalize_service_path(Path::new("/etc")), "/etc");
+    }
+
+    fn reuse_entry(name: &str, health: Option<HealthCheckSpec>) -> ConfigEntry {
+        ConfigEntry {
+            name: Some(name.to_string()),
+            path: ".".to_string(),
+            cmd: "true".to_string(),
+            health_check: health,
+            depends_on: None,
+            shutdown_cmd: None,
+            reuse: true,
+        }
+    }
+
+    fn script_with(entries: Vec<ConfigEntry>) -> ScriptConfig {
+        ScriptConfig {
+            service: Some(entries),
+            proxy: None,
+        }
+    }
+
+    fn tcp_health(target: &str) -> HealthCheckSpec {
+        HealthCheckSpec::Single(HealthCheckConfig {
+            kind: crate::config::HealthCheckKind::Tcp,
+            target: target.to_string(),
+            interval_ms: None,
+            timeout_ms: Some(100),
+        })
+    }
+
+    #[test]
+    fn test_build_reuse_down_resource_starts_immediately() {
+        let script = script_with(vec![reuse_entry("infra", Some(tcp_health("127.0.0.1:1")))]);
+        let mut adopted = HashMap::new();
+        let rt = build(&script, Path::new("."), false, 100, &mut adopted).unwrap();
+        assert!(
+            !rt.items[0].reused,
+            "a down reused resource must be started, not borrowed"
+        );
+    }
+
+    #[test]
+    fn test_build_reuse_up_resource_borrows() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let script = script_with(vec![reuse_entry("infra", Some(tcp_health(&addr.to_string())))]);
+        let mut adopted = HashMap::new();
+        let rt = build(&script, Path::new("."), false, 100, &mut adopted).unwrap();
+        assert!(rt.items[0].reused, "an up reused resource must be borrowed");
+        assert_eq!(
+            rt.items[0].get_health_status(),
+            crate::terminal::HealthStatus::Healthy,
+            "a passing probe seeds the reused terminal as healthy"
+        );
+    }
+
+    #[test]
+    fn test_build_reuse_without_health_check_starts() {
+        let script = script_with(vec![reuse_entry("infra", None)]);
+        let mut adopted = HashMap::new();
+        let rt = build(&script, Path::new("."), false, 100, &mut adopted).unwrap();
+        assert!(
+            !rt.items[0].reused,
+            "reuse without a health check cannot verify, so it starts"
+        );
     }
 }

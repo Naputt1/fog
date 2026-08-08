@@ -131,6 +131,43 @@ fn scrollback_len(screen: &mut vt100::Screen) -> usize {
     n
 }
 
+/// Probes a single health-check target. Both `tcp` and `http` kinds use a TCP
+/// connect, so they share this implementation.
+fn check_target(config: &HealthCheckConfig) -> bool {
+    let timeout = config.timeout_ms.unwrap_or(2000);
+    let addr = config
+        .target
+        .trim_start_matches("tcp://")
+        .trim_start_matches("http://")
+        .trim_start_matches("https://");
+    addr.to_socket_addrs()
+        .ok()
+        .and_then(|mut addrs| addrs.next())
+        .is_some_and(|sa| {
+            std::net::TcpStream::connect_timeout(&sa, std::time::Duration::from_millis(timeout))
+                .is_ok()
+        })
+}
+
+/// Evaluates health checks, returning `true` only when ALL of them pass.
+///
+/// Checks run concurrently so the result is bounded by the slowest check
+/// rather than the sum — important for the synchronous startup probe of reused
+/// services, which would otherwise add `timeout_ms` per check to startup.
+pub fn health_checks_pass(configs: &[HealthCheckConfig]) -> bool {
+    thread::scope(|s| {
+        configs
+            .iter()
+            .map(|c| {
+                let c = c.clone();
+                s.spawn(move || check_target(&c))
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .all(|h| h.join().unwrap_or(false))
+    })
+}
+
 fn cell_style(cell: &vt100::Cell) -> Style {
     let mut style = Style::default();
     style = match cell.fgcolor() {
@@ -1108,15 +1145,45 @@ impl Terminal {
         // Tear down the previous incarnation (e.g. `docker compose down`) so
         // the fresh start does not silently attach to leftover containers.
         self.run_shutdown_cmd();
-        self.reused = false;
+        // A health-checked reuse service (e.g. a one-shot `docker compose up -d`)
+        // stays health-driven after restart: its command exits after bringing
+        // the resource up, so liveness comes from the health checks. Without
+        // health checks the terminal owns the process and stays process-driven.
+        if self.health_checks.is_empty() {
+            self.reused = false;
+        }
         self.reused_since = None;
         self.stopped = false;
+        self.set_health_status(HealthStatus::Unknown);
         self.spawn_into(&path, &cmd)
     }
 
     /// Returns the current health status.
     pub fn get_health_status(&self) -> HealthStatus {
         *self.health_status.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Sets the current health status. Used to seed a reused terminal with
+    /// `Healthy` right after a successful startup probe so it does not flicker
+    /// as stopped until the first background check runs.
+    pub fn set_health_status(&self, s: HealthStatus) {
+        *self.health_status.lock().unwrap_or_else(|e| e.into_inner()) = s;
+    }
+
+    /// Appends a plain status message into this terminal's own screen buffer so
+    /// state changes are visible in the tab without writing to stderr (which
+    /// would corrupt the raw-mode TUI) or to the process PTY.
+    pub fn notice(&self, message: &str) {
+        self.write_to_screen(message);
+    }
+
+    /// Appends a plain status message into this terminal's own screen buffer so
+    /// state changes are visible in the tab without writing to stderr (which
+    /// would corrupt the raw-mode TUI) or to the process PTY.
+    fn write_to_screen(&self, message: &str) {
+        let mut parser = self.parser.lock().unwrap_or_else(|e| e.into_inner());
+        parser.process(message.as_bytes());
+        *self.line_cache.borrow_mut() = None;
     }
 
     /// Starts a background thread that periodically runs all configured health checks.
@@ -1140,33 +1207,7 @@ impl Terminal {
                 if stop.load(Ordering::SeqCst) {
                     return;
                 }
-                let mut all_healthy = true;
-                for config in &configs {
-                    let target = config.target.clone();
-                    let timeout = config.timeout_ms.unwrap_or(2000);
-                    let healthy = match config.kind {
-                        crate::config::HealthCheckKind::Tcp
-                        | crate::config::HealthCheckKind::Http => {
-                            let addr = target
-                                .trim_start_matches("tcp://")
-                                .trim_start_matches("http://")
-                                .trim_start_matches("https://");
-                            match addr.to_socket_addrs() {
-                                Ok(mut addrs) => addrs.next().is_some_and(|sa| {
-                                    std::net::TcpStream::connect_timeout(
-                                        &sa,
-                                        std::time::Duration::from_millis(timeout),
-                                    )
-                                    .is_ok()
-                                }),
-                                Err(_) => false,
-                            }
-                        }
-                    };
-                    if !healthy {
-                        all_healthy = false;
-                    }
-                }
+                let all_healthy = health_checks_pass(&configs);
                 let mut s = status.lock().expect("health status mutex poisoned");
                 *s = if all_healthy {
                     HealthStatus::Healthy
@@ -1242,7 +1283,12 @@ impl Terminal {
     }
 
     /// Starts a reused service if it has not become healthy within the grace
-    /// period, taking ownership of it.
+    /// period.
+    ///
+    /// The terminal stays health-driven: `reused` is left set so `refresh_status`
+    /// keeps deriving liveness from the health checks. A service started by a
+    /// one-shot command (e.g. `docker compose up -d`) would otherwise be marked
+    /// stopped as soon as the command exits.
     ///
     /// # Errors
     /// Returns an error if the process could not be spawned.
@@ -1268,13 +1314,13 @@ impl Terminal {
             Init::Command { path, cmd } => (path.clone(), cmd.clone()),
             Init::Shell => return Ok(()),
         };
-        self.reused = false;
+        // Clear the grace timer so this only fires once. `reused` stays set to
+        // keep the terminal health-driven (see doc comment above).
         self.reused_since = None;
-        let _ = writeln!(
-            std::io::stderr(),
-            "reused service '{}' not healthy after grace period, starting it",
+        self.write_to_screen(&format!(
+            "♻ '{}' was not reachable, starting it now\n",
             self.name
-        );
+        ));
         self.start(&path, &cmd)
     }
 
@@ -1394,9 +1440,56 @@ mod tests {
         t.start_health_checks();
         // health starts Unknown (not Healthy), so auto-start should take over.
         t.maybe_auto_start().unwrap();
-        assert!(!t.reused);
+        // The terminal stays health-driven so a one-shot start command (e.g.
+        // `docker compose up -d`) does not mark the resource stopped as soon
+        // as the command exits.
+        assert!(t.reused, "auto-started reuse service stays health-driven");
+        assert!(
+            t.reused_since.is_none(),
+            "grace timer cleared so auto-start fires only once"
+        );
         assert!(t.process_running);
         t.kill_inner();
+    }
+
+    #[test]
+    fn test_health_checks_pass_all() {
+        // A closed port never passes.
+        let closed = vec![HealthCheckConfig {
+            kind: crate::config::HealthCheckKind::Tcp,
+            target: "127.0.0.1:1".into(),
+            interval_ms: None,
+            timeout_ms: Some(100),
+        }];
+        assert!(!health_checks_pass(&closed));
+
+        // A live listener passes, and stays passing next to a reachable check.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let open = vec![HealthCheckConfig {
+            kind: crate::config::HealthCheckKind::Tcp,
+            target: addr.to_string(),
+            interval_ms: None,
+            timeout_ms: Some(200),
+        }];
+        assert!(health_checks_pass(&open));
+
+        // All checks must pass: one reachable + one closed fails.
+        let mixed = vec![
+            HealthCheckConfig {
+                kind: crate::config::HealthCheckKind::Http,
+                target: format!("http://{}", addr),
+                interval_ms: None,
+                timeout_ms: Some(200),
+            },
+            HealthCheckConfig {
+                kind: crate::config::HealthCheckKind::Tcp,
+                target: "127.0.0.1:1".into(),
+                interval_ms: None,
+                timeout_ms: Some(100),
+            },
+        ];
+        assert!(!health_checks_pass(&mixed));
     }
 
     /// Runs `shutdown_cmd` (a `touch`) and waits up to `timeout` for `marker`.

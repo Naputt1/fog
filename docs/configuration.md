@@ -117,8 +117,8 @@ If another `fog <script>` is **mid-start** for the same project when you launch 
 Services flagged with `"reuse": true` are treated specially to save time when switching worktrees:
 
 - **Handover**: the old instance's `shutdown_cmd` is skipped for that service (e.g. no `docker compose down`), and if a live process is running its PTY output is piped into the new instance's tab.
-- **No re-creation**: the new instance does not run the service's `cmd` if the resource is already reachable (verified via `health_check`); it shows a `♻ reusing already-running ...` tab instead.
-- **Auto-start fallback**: if the reused resource is down, fog starts the `cmd` itself after a grace period (~10s).
+- **Probe-first**: at startup fog probes the resource once via `health_check`. If it is already reachable, the service's `cmd` is **not** run and the tab shows a `♻ reusing already-running ...` notice instead. If it is **not** reachable, fog runs the `cmd` immediately — no misleading "reusing" tab, no delay.
+- **Mid-session fallback**: if a borrowed service later becomes unreachable (e.g. the handed-over process died), fog starts the `cmd` itself after a short grace period (~10s).
 - **Take over**: pressing `R` on a reused tab kills the borrowed process and starts the `cmd` fresh in this worktree.
 - **Persistence**: reused resources survive only as long as a live successor takes them over (handover in a reclaim/worktree switch). When the last fog instance exits — via `q`, Ctrl+C, or `fog kill <pid>` — with no successor, fog tears the service down: it kills the borrowed process (if any) and runs its `shutdown_cmd`.
 
