@@ -114,6 +114,7 @@ pub struct ScriptConfig {
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
     /// Named scripts, each defining its own services and proxy.
+    #[serde(default)]
     pub scripts: HashMap<String, ScriptConfig>,
     /// Maximum number of scrollback lines to retain per terminal (default: 2000).
     pub max_scrollback: Option<usize>,

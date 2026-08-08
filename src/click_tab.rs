@@ -160,7 +160,9 @@ impl ClickTab {
             .max()
             .unwrap_or(0);
         let computed = (max_name + 5) as u16;
-        computed.clamp(self.min_sidebar_width, self.max_sidebar_width)
+        let lo = self.min_sidebar_width.min(self.max_sidebar_width);
+        let hi = self.min_sidebar_width.max(self.max_sidebar_width);
+        computed.clamp(lo, hi)
     }
 
     /// Handles a mouse click to select a tab.
