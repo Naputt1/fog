@@ -1272,7 +1272,11 @@ impl Drop for Terminal {
             let _ = fs::write(format!("temp/{}.txt", self.name), &text);
         }
         self.kill_inner();
-        if !self.reused
+        // Run the shutdown command unless the live process was handed off to a
+        // live successor (handover in a reclaim/worktree switch). A borrowed or
+        // assumed-up reuse service with no successor must still be torn down,
+        // so the gate is `handed_off`, not `reused`.
+        if !self.handed_off
             && let Some(ref shutdown_cmd) = self.shutdown_cmd
         {
             let cwd = match &self.init {
@@ -1333,6 +1337,93 @@ mod tests {
         assert!(!t.reused);
         assert!(t.process_running);
         t.kill_inner();
+    }
+
+    /// Runs `shutdown_cmd` (a `touch`) and waits up to `timeout` for `marker`.
+    fn wait_for_marker(marker: &std::path::Path, timeout: Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        while std::time::Instant::now() < deadline {
+            if marker.exists() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        false
+    }
+
+    #[test]
+    fn test_drop_runs_shutdown_cmd_for_reused_without_handoff() {
+        let marker = std::env::temp_dir().join(format!(
+            "fog-test-drop-reused-{}.marker",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&marker);
+        let mut t = Terminal::spawn_reused("db".into(), ".".into(), "true".into(), 100);
+        assert!(t.reused);
+        t.shutdown_cmd = Some(format!("touch {}", marker.display()));
+        drop(t);
+
+        let seen = wait_for_marker(&marker, Duration::from_secs(5));
+        let _ = fs::remove_file(&marker);
+        assert!(
+            seen,
+            "a reused service with no successor must run its shutdown_cmd on drop"
+        );
+    }
+
+    #[test]
+    fn test_drop_runs_shutdown_cmd_for_adopted_without_handoff() {
+        // A borrowed (adopted) terminal is the reported bug case: it must run
+        // shutdown_cmd when no successor takes the resource over.
+        let marker = std::env::temp_dir().join(format!(
+            "fog-test-drop-adopted-{}.marker",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&marker);
+        let pty = portable_pty::native_pty_system()
+            .openpty(portable_pty::PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let master_fd = pty.master.as_raw_fd().expect("pty master fd");
+        let dup_fd = unsafe { libc::dup(master_fd) };
+        assert!(dup_fd >= 0);
+
+        let mut t = Terminal::adopt(".".into(), "true".into(), "db".into(), 100, dup_fd, 99_999);
+        assert!(t.reused);
+        t.shutdown_cmd = Some(format!("touch {}", marker.display()));
+        drop(t);
+
+        let seen = wait_for_marker(&marker, Duration::from_secs(5));
+        let _ = fs::remove_file(&marker);
+        assert!(
+            seen,
+            "a borrowed service with no successor must run its shutdown_cmd on drop"
+        );
+    }
+
+    #[test]
+    fn test_drop_skips_shutdown_cmd_when_handed_off() {
+        let marker = std::env::temp_dir().join(format!(
+            "fog-test-drop-handed-off-{}.marker",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&marker);
+        let mut t = Terminal::spawn_reused("db".into(), ".".into(), "true".into(), 100);
+        t.handed_off = true;
+        t.shutdown_cmd = Some(format!("touch {}", marker.display()));
+        drop(t);
+
+        std::thread::sleep(Duration::from_millis(500));
+        let seen = marker.exists();
+        let _ = fs::remove_file(&marker);
+        assert!(
+            !seen,
+            "a service handed off to a successor must not run its shutdown_cmd"
+        );
     }
 
     #[test]

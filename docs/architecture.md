@@ -153,7 +153,7 @@ Terminal::get_screen(visible_rows, offset)
 3. **Shutdown**: On `q` / `Ctrl+C` / SIGINT, or a replacement's `kill` request:
    - `exit` flag is set
    - On a reclaim (`kill` with `reuse` names), the App extracts the requested live services, then waits for the IPC thread to send them before dropping terminals
-   - Each `Terminal` drops → kills child process group (SIGTERM, wait 500ms, SIGKILL), kills descendants; services that were handed off are released without being killed, and reuse-flagged services skip their `shutdown_cmd` so shared resources survive
+   - Each `Terminal` drops → kills child process group (SIGTERM, wait 500ms, SIGKILL), kills descendants; services that were handed off are released without being killed, and their `shutdown_cmd` is skipped so the live successor keeps the resource. Any other service — including a borrowed/assumed-up reuse service with no successor — runs its `shutdown_cmd` on drop, so the last instance tears the resource down
    - `ProxyInstance` drops → sets shutdown flag, joins proxy thread
    - Terminal leaves raw mode, restores alternate screen, disables mouse capture
    - If `--save-logs` was passed, writes output files to `temp/<name>.txt`
