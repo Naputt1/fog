@@ -60,12 +60,30 @@ pub fn is_pid_alive(pid: u32) -> bool {
     if pid == 0 {
         return false;
     }
+    #[cfg(target_os = "linux")]
+    if is_zombie(pid) {
+        return false;
+    }
     let ret = unsafe { libc::kill(pid as libc::pid_t, 0) };
     if ret == 0 {
         return true;
     }
     // EPERM means the process exists but we lack permission to signal it.
     io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// Returns `true` if the process is a zombie. `kill(pid, 0)` reports zombies
+/// as alive, which would make fog wait forever on an unreaped child.
+#[cfg(target_os = "linux")]
+fn is_zombie(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        // The comm field may contain spaces and parens; everything after the
+        // final `)` is `state ppid pgrp ...`, with state first.
+        .and_then(|s| s.rsplit_once(')').map(|(_, rest)| rest.to_string()))
+        .and_then(|rest| rest.split_whitespace().next().map(str::to_string))
+        .map(|state| state == "Z")
+        .unwrap_or(false)
 }
 
 /// Attempts to send a signal to a process group, ignoring any errors.

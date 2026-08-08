@@ -88,6 +88,9 @@ pub struct Terminal {
     /// Set when this terminal's live process has been handed to another
     /// instance; `kill_inner` then releases resources without killing.
     handed_off: bool,
+    /// Set once the child has been reaped (`waitpid`). A reaped PID must never
+    /// be signaled again: the OS may have reused it for an unrelated process.
+    child_reaped: bool,
     parser: Arc<Mutex<vt100::Parser>>,
     health_status: Arc<Mutex<HealthStatus>>,
     /// Set when this terminal is dropped, so its health-check thread exits.
@@ -344,6 +347,7 @@ impl Terminal {
             reuse_grace: DEFAULT_REUSE_GRACE,
             stop_w: Some(stop_w),
             handed_off: false,
+            child_reaped: false,
             parser,
             health_status: Arc::new(Mutex::new(HealthStatus::Unknown)),
             health_stop: Arc::new(AtomicBool::new(false)),
@@ -394,6 +398,7 @@ impl Terminal {
             reuse_grace: DEFAULT_REUSE_GRACE,
             stop_w: None,
             handed_off: false,
+            child_reaped: false,
             parser: Arc::new(Mutex::new(vt100::Parser::new(24, 80, scrollback))),
             health_status: Arc::new(Mutex::new(HealthStatus::Unknown)),
             health_stop: Arc::new(AtomicBool::new(false)),
@@ -441,6 +446,7 @@ impl Terminal {
             reuse_grace: DEFAULT_REUSE_GRACE,
             stop_w: None,
             handed_off: false,
+            child_reaped: false,
             parser,
             health_status: Arc::new(Mutex::new(HealthStatus::Unhealthy)),
             health_stop: Arc::new(AtomicBool::new(false)),
@@ -489,6 +495,7 @@ impl Terminal {
             reuse_grace: DEFAULT_REUSE_GRACE,
             stop_w: None,
             handed_off: false,
+            child_reaped: false,
             parser,
             health_status: Arc::new(Mutex::new(HealthStatus::Pending)),
             health_stop: Arc::new(AtomicBool::new(false)),
@@ -538,6 +545,7 @@ impl Terminal {
             reuse_grace: DEFAULT_REUSE_GRACE,
             stop_w: None,
             handed_off: false,
+            child_reaped: false,
             parser,
             health_status: Arc::new(Mutex::new(HealthStatus::Unknown)),
             health_stop: Arc::new(AtomicBool::new(false)),
@@ -626,6 +634,7 @@ impl Terminal {
             reuse_grace: DEFAULT_REUSE_GRACE,
             stop_w: if stop_w >= 0 { Some(stop_w) } else { None },
             handed_off: false,
+            child_reaped: false,
             parser,
             health_status: Arc::new(Mutex::new(HealthStatus::Unknown)),
             health_stop: Arc::new(AtomicBool::new(false)),
@@ -636,6 +645,14 @@ impl Terminal {
             child: None,
             master: None,
         }
+    }
+
+    /// Marks this terminal as handed over to a successor without transferring
+    /// a live process. Used for borrowed reuse services during in-place
+    /// worktree switches: `Drop` then neither kills the resource nor runs its
+    /// `shutdown_cmd`, keeping it alive for the successor instance.
+    pub fn preserve_for_reuse(&mut self) {
+        self.handed_off = true;
     }
 
     /// Extracts this terminal's live process for transfer to another instance.
@@ -670,7 +687,13 @@ impl Terminal {
         if let Some(handler) = self.handler.take() {
             let _ = handler.join();
         }
-        self.writer = None;
+        // Leak the writer instead of dropping it: portable-pty's UnixMasterWriter
+        // writes `\n` + EOT (Ctrl-D) into the PTY on drop, which would terminate
+        // the very process being handed over to the successor. The master stays
+        // alive on the successor's dup'd fd; the OS reclaims this one on exit.
+        if let Some(w) = self.writer.take() {
+            std::mem::forget(w);
+        }
         self.reused = true;
         self.handed_off = true;
         Some(crate::ipc::HandoffItem {
@@ -761,6 +784,7 @@ impl Terminal {
         self.stop_w = Some(stop_w);
         self.writer = Some(writer);
         self.child = Some(child);
+        self.child_reaped = false;
         self.master = Some(pair.master);
         self.process_running = true;
 
@@ -1005,35 +1029,45 @@ impl Terminal {
             return;
         }
 
-        // An adopted terminal: kill the process group by the stored PID.
+        // An adopted terminal: kill the process group by the stored PID. The
+        // adopted PID is not a child, so probe liveness with `kill(pid, 0)`.
         if let Some(pid) = self.owned_pid {
-            process::try_kill_process_group(pid, SIGTERM);
-            thread::sleep(Duration::from_millis(500));
-            if let Ok(None) = process::waitpid_nohang(pid) {
-                process::try_kill_process_group(pid, SIGKILL);
+            if process::is_pid_alive(pid) {
+                process::try_kill_process_group(pid, SIGTERM);
+                thread::sleep(Duration::from_millis(500));
+                if process::is_pid_alive(pid) {
+                    process::try_kill_process_group(pid, SIGKILL);
+                }
+                process::kill_descendants(pid);
             }
-            process::kill_descendants(pid);
             self.owned_pid = None;
         }
 
-        if let Some(ref child) = self.child
+        // A real child. Once it has been reaped (or is known to be dead), its
+        // PID must not be signaled again: the OS may have reused it.
+        if !self.child_reaped
+            && let Some(ref child) = self.child
             && let Some(pid) = child.process_id()
         {
             process::try_kill_process_group(pid, SIGTERM);
             thread::sleep(Duration::from_millis(500));
-            if let Ok(None) = process::waitpid_nohang(pid) {
-                process::try_kill_process_group(pid, SIGKILL);
+            match process::waitpid_nohang(pid) {
+                Ok(Some(_)) => self.child_reaped = true,
+                Ok(None) => process::try_kill_process_group(pid, SIGKILL),
+                Err(_) => self.child_reaped = true,
             }
             process::kill_descendants(pid);
         }
 
-        if let Some(mut child) = self.child.take() {
+        if let Some(mut child) = self.child.take()
+            && !self.child_reaped
+        {
             let pid = child.process_id();
             let _ = child.kill();
             // Reap with a bounded wait. A process stuck in an uninterruptible
             // exit state can defer even SIGKILL, so a bare blocking `wait()`
-            // would freeze fog's teardown on quit or worktree switch. If it is
-            // not reaped in time, leave the zombie for the OS to reap on exit.
+            // would freeze fog's teardown on quit or worktree switch. If it
+            // is not reaped in time, leave the zombie for the OS to reap.
             if let Some(pid) = pid
                 && !wait_reaped(pid, Duration::from_secs(2))
             {
@@ -1071,6 +1105,9 @@ impl Terminal {
             }
         };
         self.kill_inner();
+        // Tear down the previous incarnation (e.g. `docker compose down`) so
+        // the fresh start does not silently attach to leftover containers.
+        self.run_shutdown_cmd();
         self.reused = false;
         self.reused_since = None;
         self.stopped = false;
@@ -1152,12 +1189,17 @@ impl Terminal {
         }
         // An adopted terminal whose transferred process has already exited
         // (e.g. a one-shot `docker compose up`) falls back to plain reuse:
-        // drop the dead fd and rely on health checks.
+        // drop the dead fd and rely on health checks. The adopted PID is not a
+        // child of this process, so `waitpid` would return ECHILD; use
+        // `kill(pid, 0)` to probe liveness instead.
         if let Some(pid) = self.owned_pid
-            && process::waitpid_nohang(pid).unwrap_or(Some(0)).is_some()
+            && !process::is_pid_alive(pid)
         {
             self.owned_pid = None;
-            self.raw_fd = None;
+            if let Some(fd) = self.raw_fd.take() {
+                // SAFETY: fd was received via SCM_RIGHTS and is owned by us.
+                unsafe { libc::close(fd) };
+            }
             self.process_running = false;
         }
         // Reused services have no owned process; their state is driven by
@@ -1178,14 +1220,22 @@ impl Terminal {
         {
             self.stopped = true;
             self.process_running = false;
+            // Reap the exited child so it does not linger as a zombie.
+            if let Some(ref child) = self.child
+                && let Some(pid) = child.process_id()
+                && process::waitpid_nohang(pid).is_ok_and(|r| r.is_some())
+            {
+                self.child_reaped = true;
+            }
             return;
         }
         if let Some(ref child) = self.child
             && let Some(pid) = child.process_id()
-            && process::waitpid_nohang(pid).unwrap_or(Some(0)).is_some()
+            && process::waitpid_nohang(pid).is_ok_and(|r| r.is_some())
         {
             self.stopped = true;
             self.process_running = false;
+            self.child_reaped = true;
             return;
         }
         self.update_process_running();
@@ -1259,6 +1309,38 @@ impl Terminal {
     }
 }
 
+impl Terminal {
+    /// Runs the service's `shutdown_cmd` in a fresh session, in the service's
+    /// working directory. Used both at teardown (`Drop`) and on restart so a
+    /// restarted compose-style service does not leave its old containers up.
+    fn run_shutdown_cmd(&self) {
+        let Some(ref shutdown_cmd) = self.shutdown_cmd else {
+            return;
+        };
+        let cwd = match &self.init {
+            Init::Command { path, .. } if !path.is_empty() => Some(path.as_str()),
+            _ => None,
+        };
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", shutdown_cmd])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        if let Some(dir) = cwd {
+            cmd.current_dir(dir);
+        }
+        #[cfg(unix)]
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+        let _ = cmd.spawn();
+    }
+}
+
 impl Drop for Terminal {
     fn drop(&mut self) {
         // Stop the health-check thread so it does not outlive this terminal
@@ -1276,30 +1358,8 @@ impl Drop for Terminal {
         // live successor (handover in a reclaim/worktree switch). A borrowed or
         // assumed-up reuse service with no successor must still be torn down,
         // so the gate is `handed_off`, not `reused`.
-        if !self.handed_off
-            && let Some(ref shutdown_cmd) = self.shutdown_cmd
-        {
-            let cwd = match &self.init {
-                Init::Command { path, .. } if !path.is_empty() => Some(path.as_str()),
-                _ => None,
-            };
-            let mut cmd = std::process::Command::new("sh");
-            cmd.args(["-c", shutdown_cmd])
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null());
-            if let Some(dir) = cwd {
-                cmd.current_dir(dir);
-            }
-            #[cfg(unix)]
-            unsafe {
-                use std::os::unix::process::CommandExt;
-                cmd.pre_exec(|| {
-                    libc::setsid();
-                    Ok(())
-                });
-            }
-            let _ = cmd.spawn();
+        if !self.handed_off {
+            self.run_shutdown_cmd();
         }
     }
 }
