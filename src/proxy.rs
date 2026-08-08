@@ -1,3 +1,4 @@
+use http_body_util::combinators::UnsyncBoxBody;
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
 use hyper::server::conn::http1;
@@ -6,18 +7,34 @@ use hyper::upgrade::Upgraded;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
-use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use rustls::ServerConfig;
-use rustls_pemfile::{certs, pkcs8_private_keys};
+use rustls_pemfile::{certs, private_key};
 use std::collections::VecDeque;
 use std::fs;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
-use tokio::io::AsyncWriteExt;
-use tokio::net::TcpListener;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::TlsAcceptor;
+
+/// Response body type used by the proxy service.
+type BoxedBody = UnsyncBoxBody<Bytes, hyper::Error>;
+
+/// Parsed status code and headers of an HTTP/1.1 response head.
+type ResponseHead = (u16, Vec<(String, Vec<u8>)>);
+
+/// Wraps a fully-buffered byte body for the proxy service.
+fn body_full(bytes: Bytes) -> BoxedBody {
+    Full::new(bytes)
+        .map_err(|never| match never {})
+        .boxed_unsync()
+}
+
+/// Upstream connect/handshake timeout for WebSocket and HTTP upstreams.
+const UPSTREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 const WS_HOP_BY_HOP: &[&str] = &[
     "host",
@@ -42,6 +59,24 @@ const HOP_BY_HOP: &[&str] = &[
     "upgrade",
 ];
 
+/// Hop-by-hop headers a proxy must not forward to the client (RFC 7230 §6.1).
+const RESPONSE_HOP_BY_HOP: &[&str] = &[
+    "connection",
+    "keep-alive",
+    "transfer-encoding",
+    "te",
+    "trailer",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "upgrade",
+];
+
+/// Returns `true` for headers that apply only to a single connection and must
+/// be stripped when relaying an upstream response to the client.
+fn is_hop_by_hop_response(name: &hyper::header::HeaderName) -> bool {
+    RESPONSE_HOP_BY_HOP.contains(&name.as_str().to_ascii_lowercase().as_str())
+}
+
 trait IoBox: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
 impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> IoBox for T {}
 
@@ -54,18 +89,15 @@ fn load_tls_config(
 
     let cert_chain: Vec<rustls::pki_types::CertificateDer<'_>> =
         certs(cert_file).filter_map(Result::ok).collect();
-    let mut keys: Vec<rustls::pki_types::PrivateKeyDer<'_>> = pkcs8_private_keys(key_file)
-        .filter_map(Result::ok)
-        .map(|k| k.into())
-        .collect();
-
-    if keys.is_empty() {
-        return Err("no private keys found".into());
+    if cert_chain.is_empty() {
+        return Err("no certificates found".into());
     }
+    // `private_key` accepts PKCS#8, PKCS#1 (RSA), and SEC1 (EC) encodings.
+    let key = private_key(key_file)?.ok_or_else(|| "no private keys found".to_string())?;
 
     let config = ServerConfig::builder()
         .with_no_client_auth()
-        .with_single_cert(cert_chain, keys.remove(0))?;
+        .with_single_cert(cert_chain, key)?;
 
     Ok(TlsAcceptor::from(Arc::new(config)))
 }
@@ -99,6 +131,8 @@ struct HttpRequestContext<'a> {
     max_log_entries: usize,
     method: String,
     path: String,
+    peer_ip: String,
+    is_tls: bool,
 }
 
 pub struct ProxyInstance {
@@ -110,7 +144,8 @@ pub struct ProxyInstance {
     shutdown: Arc<AtomicBool>,
     handle: Option<thread::JoinHandle<()>>,
     pub max_log_entries: usize,
-    tls_acceptor: Option<TlsAcceptor>,
+    tls_cert: Option<String>,
+    tls_key: Option<String>,
 }
 
 impl ProxyInstance {
@@ -122,17 +157,6 @@ impl ProxyInstance {
         tls_cert: Option<String>,
         tls_key: Option<String>,
     ) -> Self {
-        let tls_acceptor = match (tls_cert, tls_key) {
-            (Some(cert), Some(key)) => match load_tls_config(&cert, &key) {
-                Ok(a) => Some(a),
-                Err(e) => {
-                    eprintln!("warning: failed to load TLS config: {}", e);
-                    None
-                }
-            },
-            _ => None,
-        };
-
         Self {
             port,
             host: host.unwrap_or_else(|| "0.0.0.0".to_string()),
@@ -142,7 +166,8 @@ impl ProxyInstance {
             shutdown: Arc::new(AtomicBool::new(false)),
             handle: None,
             max_log_entries,
-            tls_acceptor,
+            tls_cert,
+            tls_key,
         }
     }
 
@@ -151,9 +176,6 @@ impl ProxyInstance {
             return;
         }
 
-        self.running.store(true, Ordering::SeqCst);
-        self.shutdown.store(false, Ordering::SeqCst);
-
         let port = self.port;
         let host = self.host.clone();
         let routes = self.routes.clone();
@@ -161,7 +183,36 @@ impl ProxyInstance {
         let max_entries = self.max_log_entries;
         let running = self.running.clone();
         let shutdown = self.shutdown.clone();
-        let tls_acceptor = self.tls_acceptor.clone();
+
+        // Load TLS config every start so cert rotation is picked up on
+        // `restart()`. A TLS misconfiguration is fatal for the proxy: it must
+        // not silently downgrade to plaintext on a TLS-configured port.
+        let tls_acceptor = match (&self.tls_cert, &self.tls_key) {
+            (Some(cert), Some(key)) => match load_tls_config(cert, key) {
+                Ok(a) => Some(a),
+                Err(e) => {
+                    let mut lk = logs.lock().expect("mutex poisoned");
+                    lk.push_back(LogEntry {
+                        method: "ERR".into(),
+                        path: format!("TLS config failed: {}", e),
+                        upstream: String::new(),
+                        status: 0,
+                        latency_ms: 0,
+                        ws: false,
+                    });
+                    if lk.len() > max_entries {
+                        lk.pop_front();
+                    }
+                    running.store(false, Ordering::SeqCst);
+                    return;
+                }
+            },
+            _ => None,
+        };
+
+        self.running.store(true, Ordering::SeqCst);
+        self.shutdown.store(false, Ordering::SeqCst);
+
         let handle = thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_io()
@@ -191,8 +242,15 @@ impl ProxyInstance {
                     }
                 };
 
+                // Configure the upstream client with a connect timeout and a
+                // pool idle timeout so hung upstreams cannot leak connections.
+                let mut connector = HttpConnector::new();
+                connector.set_connect_timeout(Some(UPSTREAM_TIMEOUT));
                 let client: Client<HttpConnector, Full<Bytes>> =
-                    Client::builder(TokioExecutor::new()).build_http();
+                    Client::builder(TokioExecutor::new())
+                        .timer(TokioTimer::new())
+                        .pool_idle_timeout(std::time::Duration::from_secs(90))
+                        .build(connector);
 
                 loop {
                     if shutdown.load(Ordering::SeqCst) {
@@ -205,10 +263,16 @@ impl ProxyInstance {
 
                     match accept {
                         Ok(Ok((stream, _))) => {
+                            let peer_ip = stream
+                                .peer_addr()
+                                .ok()
+                                .map(|a| a.ip().to_string())
+                                .unwrap_or_default();
                             let client = client.clone();
                             let logs_for_svc = logs.clone();
                             let routes_for_svc = routes.clone();
                             let acceptor = tls_acceptor.clone();
+                            let is_tls = tls_acceptor.is_some();
 
                             tokio::spawn(async move {
                                 let io = if let Some(ref acceptor) = acceptor {
@@ -244,10 +308,14 @@ impl ProxyInstance {
                                         routes_for_svc.clone(),
                                         logs_for_svc.clone(),
                                         max_entries,
+                                        peer_ip.clone(),
+                                        is_tls,
                                     )
                                 });
-                                if let Err(e) =
-                                    http1::Builder::new().serve_connection(io, svc).await
+                                if let Err(e) = http1::Builder::new()
+                                    .serve_connection(io, svc)
+                                    .with_upgrades()
+                                    .await
                                 {
                                     let _ = e;
                                 }
@@ -286,6 +354,24 @@ impl ProxyInstance {
     pub fn get_logs(&self) -> Vec<LogEntry> {
         let lk = self.logs.lock().unwrap_or_else(|e| e.into_inner());
         lk.iter().cloned().collect()
+    }
+
+    /// Number of log entries matching the given filter (empty filter = all),
+    /// used to keep the scrollbar in sync with what the renderer displays.
+    pub fn filtered_log_len(&self, filter: &str) -> usize {
+        let lk = self.logs.lock().unwrap_or_else(|e| e.into_inner());
+        if filter.is_empty() {
+            return lk.len();
+        }
+        let filter_lower = filter.to_lowercase();
+        lk.iter()
+            .filter(|entry| {
+                entry.method.to_lowercase().contains(&filter_lower)
+                    || entry.path.to_lowercase().contains(&filter_lower)
+                    || entry.status.to_string().contains(&filter_lower)
+                    || entry.upstream.to_lowercase().contains(&filter_lower)
+            })
+            .count()
     }
 }
 
@@ -370,18 +456,19 @@ fn match_host(incoming_host: Option<&str>, route_host: &Option<String>) -> bool 
     }
 }
 
-fn build_upstream_uri(upstream: &str, suffix: &str, query: Option<&str>) -> hyper::Uri {
+fn build_upstream_uri(
+    upstream: &str,
+    suffix: &str,
+    query: Option<&str>,
+) -> Result<hyper::Uri, String> {
     let base = upstream.trim_end_matches('/');
     let path = format!("{}{}", base, suffix);
     let s = match query {
         Some(q) if !q.is_empty() => format!("{}?{}", path, q),
         _ => path,
     };
-    s.parse().unwrap_or_else(|_| {
-        format!("{}/", base)
-            .parse()
-            .expect("built URI should parse")
-    })
+    s.parse()
+        .map_err(|_| format!("invalid upstream URI: {}", s))
 }
 
 fn forward_headers(incoming: &hyper::HeaderMap) -> hyper::HeaderMap {
@@ -389,10 +476,40 @@ fn forward_headers(incoming: &hyper::HeaderMap) -> hyper::HeaderMap {
     for (key, value) in incoming.iter() {
         let k = key.as_str().to_lowercase();
         if !HOP_BY_HOP.contains(&k.as_str()) {
-            out.insert(key.clone(), value.clone());
+            // `append` preserves multi-value headers (e.g. duplicate cookies),
+            // unlike `insert` which would collapse them to the last value.
+            out.append(key.clone(), value.clone());
         }
     }
     out
+}
+
+/// Adds X-Forwarded-* headers so upstreams can see the original host, scheme,
+/// and client address. The forwarding Host header is rewritten to the upstream
+/// host by the client, so these are the only way the original host survives.
+fn add_forwarded_headers(
+    headers: &mut hyper::HeaderMap,
+    peer_ip: &str,
+    incoming_host: Option<&str>,
+    is_tls: bool,
+) {
+    const X_FORWARDED_PROTO: &str = "x-forwarded-proto";
+    const X_FORWARDED_HOST: &str = "x-forwarded-host";
+    const X_FORWARDED_FOR: &str = "x-forwarded-for";
+    headers.append(
+        hyper::header::HeaderName::from_static(X_FORWARDED_PROTO),
+        hyper::header::HeaderValue::from_static(if is_tls { "https" } else { "http" }),
+    );
+    if let Some(host) = incoming_host
+        && let Ok(v) = hyper::header::HeaderValue::from_str(host)
+    {
+        headers.append(hyper::header::HeaderName::from_static(X_FORWARDED_HOST), v);
+    }
+    if !peer_ip.is_empty()
+        && let Ok(v) = hyper::header::HeaderValue::from_str(peer_ip)
+    {
+        headers.append(hyper::header::HeaderName::from_static(X_FORWARDED_FOR), v);
+    }
 }
 
 fn is_ws_upgrade(req: &Request<impl hyper::body::Body>) -> bool {
@@ -443,47 +560,100 @@ fn build_ws_request(
     bytes
 }
 
+/// Connects to the upstream and completes the WebSocket handshake.
+///
+/// Returns the live TCP stream plus the parsed status code and headers of the
+/// upstream's response. The stream is handed back so bytes can be piped once
+/// the client upgrade completes.
+async fn connect_ws_upstream(
+    upstream_host: &str,
+    request_bytes: &[u8],
+) -> Result<(tokio::net::TcpStream, ResponseHead), String> {
+    let connect = tokio::time::timeout(UPSTREAM_TIMEOUT, TcpStream::connect(upstream_host)).await;
+    let mut stream = match connect {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => return Err(format!("connect: {}", e)),
+        Err(_) => return Err("connect timed out".to_string()),
+    };
+    let write = tokio::time::timeout(UPSTREAM_TIMEOUT, stream.write_all(request_bytes)).await;
+    match write {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => return Err(format!("write: {}", e)),
+        Err(_) => return Err("write timed out".to_string()),
+    }
+    let read = tokio::time::timeout(UPSTREAM_TIMEOUT, read_ws_handshake(&mut stream)).await;
+    match read {
+        Ok(Ok(Some(head))) => Ok((stream, head)),
+        Ok(Ok(None)) => Err("upstream closed the connection".to_string()),
+        Ok(Err(e)) => Err(format!("read: {}", e)),
+        Err(_) => Err("handshake timed out".to_string()),
+    }
+}
+
+/// Reads an HTTP/1.1 response head (status line + headers) from a stream.
+///
+/// Returns `None` if the connection closed before the head was complete.
+async fn read_ws_handshake(stream: &mut TcpStream) -> std::io::Result<Option<ResponseHead>> {
+    let mut buf: Vec<u8> = Vec::new();
+    let mut byte = [0u8; 1];
+    while buf.len() < 8192 {
+        let n = stream.read(&mut byte).await?;
+        if n == 0 {
+            return Ok(None);
+        }
+        buf.push(byte[0]);
+        if buf.len() >= 4 && &buf[buf.len() - 4..] == b"\r\n\r\n" {
+            break;
+        }
+    }
+    Ok(parse_http_response_head(&buf))
+}
+
+/// Parses the status line and headers of an HTTP/1.1 response head.
+fn parse_http_response_head(buf: &[u8]) -> Option<ResponseHead> {
+    let head_end = buf.windows(4).position(|w| w == b"\r\n\r\n")?;
+    let head = &buf[..head_end];
+    let mut lines = head.split(|b| *b == b'\n').filter(|l| !l.is_empty());
+    let status_line = lines.next()?;
+    let status: u16 = String::from_utf8_lossy(status_line)
+        .split(' ')
+        .nth(1)?
+        .trim()
+        .parse()
+        .ok()?;
+    let mut headers = Vec::new();
+    for line in lines {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        if let Some(idx) = line.iter().position(|b| *b == b':') {
+            let key = String::from_utf8_lossy(&line[..idx]).trim().to_lowercase();
+            let value: Vec<u8> = line[idx + 1..]
+                .iter()
+                .copied()
+                .skip_while(|b| *b == b' ')
+                .collect();
+            headers.push((key, value));
+        }
+    }
+    Some((status, headers))
+}
+
 async fn proxy_ws_pipe(
     mut client: TokioIo<Upgraded>,
-    upstream_host: String,
-    request_bytes: Vec<u8>,
+    mut upstream: TcpStream,
     log_entry: LogEntry,
     logs: Arc<Mutex<VecDeque<LogEntry>>>,
     max_log_entries: usize,
 ) {
     let start = Instant::now();
-    match tokio::net::TcpStream::connect(&upstream_host).await {
-        Ok(mut upstream) => {
-            if upstream.write_all(&request_bytes).await.is_err() {
-                return;
-            }
+    let (mut cr, mut cw) = tokio::io::split(&mut client);
+    let (mut ur, mut uw) = upstream.split();
 
-            let (mut cr, mut cw) = tokio::io::split(&mut client);
-            let (mut ur, mut uw) = upstream.split();
+    let c2u = tokio::io::copy(&mut cr, &mut uw);
+    let u2c = tokio::io::copy(&mut ur, &mut cw);
 
-            let c2u = tokio::io::copy(&mut cr, &mut uw);
-            let u2c = tokio::io::copy(&mut ur, &mut cw);
-
-            tokio::select! {
-                _ = c2u => {},
-                _ = u2c => {},
-            }
-        }
-        Err(e) => {
-            let mut lk = logs.lock().expect("mutex poisoned");
-            lk.push_back(LogEntry {
-                method: log_entry.method.clone(),
-                path: log_entry.path.clone(),
-                upstream: format!("ws connect error: {}", e),
-                status: 502,
-                latency_ms: start.elapsed().as_millis() as u64,
-                ws: true,
-            });
-            if lk.len() > max_log_entries {
-                lk.pop_front();
-            }
-            return;
-        }
+    tokio::select! {
+        _ = c2u => {},
+        _ = u2c => {},
     }
 
     let ms = start.elapsed().as_millis() as u64;
@@ -511,7 +681,7 @@ async fn handle_ws(
     max_log_entries: usize,
     method: String,
     path: String,
-) -> Result<Response<Full<Bytes>>, std::convert::Infallible> {
+) -> Result<Response<BoxedBody>, std::convert::Infallible> {
     let upstream_host = route
         .upstream
         .trim_start_matches("http://")
@@ -533,39 +703,89 @@ async fn handle_ws(
         ws: true,
     };
 
-    match hyper::upgrade::on(&mut req).await {
-        Ok(upgraded) => {
-            let l = logs.clone();
-            let le = log_entry.clone();
-            let uh = upstream_host.clone();
+    // Complete the upstream handshake before accepting the client's upgrade so
+    // failures surface as a 502 instead of a half-open tunnel.
+    match connect_ws_upstream(&upstream_host, &request_bytes).await {
+        Ok((upstream, (status, headers))) => {
+            if status != 101 {
+                let mut lk = logs.lock().expect("mutex poisoned");
+                lk.push_back(LogEntry {
+                    status: 502,
+                    ..log_entry
+                });
+                if lk.len() > max_log_entries {
+                    lk.pop_front();
+                }
+                return Ok(Response::builder()
+                    .status(StatusCode::BAD_GATEWAY)
+                    .body(body_full(Bytes::from(format!(
+                        "upstream rejected websocket upgrade (HTTP {status})"
+                    ))))
+                    .expect("response builder failed"));
+            }
 
+            // Relay the upstream's handshake headers (Sec-WebSocket-Accept,
+            // subprotocol, extensions) back to the client.
+            let mut builder = Response::builder()
+                .status(StatusCode::SWITCHING_PROTOCOLS)
+                .header(hyper::header::CONNECTION, "Upgrade")
+                .header(hyper::header::UPGRADE, "websocket");
+            for (key, value) in headers {
+                if key != "sec-websocket-accept"
+                    && key != "sec-websocket-protocol"
+                    && key != "sec-websocket-extensions"
+                {
+                    continue;
+                }
+                if let (Ok(k), Ok(v)) = (
+                    hyper::header::HeaderName::from_bytes(key.as_bytes()),
+                    hyper::header::HeaderValue::from_bytes(&value),
+                ) {
+                    builder = builder.header(k, v);
+                }
+            }
+
+            // Request the connection upgrade first; it resolves once this
+            // response has been written to the client.
+            let on_upgrade = hyper::upgrade::on(&mut req);
+            let le = log_entry.clone();
+            let l = logs.clone();
             tokio::spawn(async move {
-                proxy_ws_pipe(
-                    TokioIo::new(upgraded),
-                    uh,
-                    request_bytes,
-                    le,
-                    l,
-                    max_log_entries,
-                )
-                .await;
+                match on_upgrade.await {
+                    Ok(upgraded) => {
+                        proxy_ws_pipe(TokioIo::new(upgraded), upstream, le, l, max_log_entries)
+                            .await;
+                    }
+                    Err(_) => {
+                        // Client disconnected before the upgrade completed.
+                        let mut lk = l.lock().expect("mutex poisoned");
+                        lk.push_back(LogEntry { status: 502, ..le });
+                        if lk.len() > max_log_entries {
+                            lk.pop_front();
+                        }
+                    }
+                }
             });
 
-            Ok(Response::new(Full::new(Bytes::new())))
+            Ok(builder
+                .body(body_full(Bytes::new()))
+                .expect("response builder failed"))
         }
-        Err(_) => {
+        Err(e) => {
             let mut lk = logs.lock().expect("mutex poisoned");
             lk.push_back(LogEntry {
+                upstream: format!("ws connect error: {}", e),
                 status: 502,
                 ..log_entry
             });
             if lk.len() > max_log_entries {
                 lk.pop_front();
             }
-
             Ok(Response::builder()
                 .status(StatusCode::BAD_GATEWAY)
-                .body(Full::new(Bytes::from("websocket upgrade failed")))
+                .body(body_full(Bytes::from(format!(
+                    "websocket connect failed: {e}"
+                ))))
                 .expect("response builder failed"))
         }
     }
@@ -573,9 +793,15 @@ async fn handle_ws(
 
 async fn handle_http(
     ctx: HttpRequestContext<'_>,
-) -> Result<Response<Full<Bytes>>, std::convert::Infallible> {
+) -> Result<Response<BoxedBody>, std::convert::Infallible> {
     let start = Instant::now();
     let incoming_headers = ctx.req.headers().clone();
+    let incoming_host = ctx
+        .req
+        .headers()
+        .get(hyper::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
 
     let body_bytes = match ctx.req.collect().await {
         Ok(collected) => collected.to_bytes(),
@@ -595,19 +821,45 @@ async fn handle_http(
             }
             return Ok(Response::builder()
                 .status(StatusCode::BAD_REQUEST)
-                .body(Full::new(Bytes::from("bad request")))
+                .body(body_full(Bytes::from("bad request")))
                 .expect("response builder failed"));
         }
     };
 
     let upstream_str = format!("{}{}", ctx.route.upstream.trim_end_matches('/'), ctx.suffix);
-    let upstream_uri = build_upstream_uri(&ctx.route.upstream, ctx.suffix, ctx.query);
+    let upstream_uri = match build_upstream_uri(&ctx.route.upstream, ctx.suffix, ctx.query) {
+        Ok(uri) => uri,
+        Err(e) => {
+            let mut lk = ctx.logs.lock().expect("mutex poisoned");
+            lk.push_back(LogEntry {
+                method: ctx.method,
+                path: ctx.path,
+                upstream: upstream_str.clone(),
+                status: 502,
+                latency_ms: start.elapsed().as_millis() as u64,
+                ws: false,
+            });
+            if lk.len() > ctx.max_log_entries {
+                lk.pop_front();
+            }
+            return Ok(Response::builder()
+                .status(StatusCode::BAD_GATEWAY)
+                .body(body_full(Bytes::from(e)))
+                .expect("response builder failed"));
+        }
+    };
 
-    let forwarded_headers = forward_headers(&incoming_headers);
+    let mut forwarded_headers = forward_headers(&incoming_headers);
+    add_forwarded_headers(
+        &mut forwarded_headers,
+        &ctx.peer_ip,
+        incoming_host.as_deref(),
+        ctx.is_tls,
+    );
 
     let mut builder = Request::builder()
         .method(&ctx.method as &str)
-        .uri(upstream_uri.clone());
+        .uri(upstream_uri);
     for (k, v) in &forwarded_headers {
         builder = builder.header(k, v);
     }
@@ -618,19 +870,19 @@ async fn handle_http(
     match ctx.client.request(forward_req).await {
         Ok(upstream_resp) => {
             let (parts, body) = upstream_resp.into_parts();
-            let resp_body = match body.collect().await {
-                Ok(c) => c.to_bytes(),
-                Err(_) => Bytes::new(),
-            };
             let status = parts.status.as_u16();
             let ms = start.elapsed().as_millis() as u64;
 
+            // Stream the upstream body through unchanged (SSE, long-polling and
+            // large downloads work) and strip hop-by-hop response headers.
             let mut resp_builder = Response::builder().status(parts.status);
             for (k, v) in &parts.headers {
-                resp_builder = resp_builder.header(k, v);
+                if !is_hop_by_hop_response(k) {
+                    resp_builder = resp_builder.header(k.clone(), v.clone());
+                }
             }
             let resp = resp_builder
-                .body(Full::new(resp_body))
+                .body(body.boxed_unsync())
                 .expect("response builder failed");
 
             let mut lk = ctx.logs.lock().expect("mutex poisoned");
@@ -665,7 +917,7 @@ async fn handle_http(
 
             Ok(Response::builder()
                 .status(StatusCode::BAD_GATEWAY)
-                .body(Full::new(Bytes::from(format!("upstream error: {}", e))))
+                .body(body_full(Bytes::from(format!("upstream error: {}", e))))
                 .expect("response builder failed"))
         }
     }
@@ -677,7 +929,9 @@ async fn handle_request(
     routes: Vec<RouteEntry>,
     logs: Arc<Mutex<VecDeque<LogEntry>>>,
     max_log_entries: usize,
-) -> Result<Response<Full<Bytes>>, std::convert::Infallible> {
+    peer_ip: String,
+    is_tls: bool,
+) -> Result<Response<BoxedBody>, std::convert::Infallible> {
     let method = req.method().to_string();
     let path = req.uri().path().to_string();
     let query = req.uri().query().map(|q| q.to_string());
@@ -692,7 +946,7 @@ async fn handle_request(
         .find_map(|r| match_route(&path, &r.path).map(|suffix| (r, suffix.clone())));
 
     match matched {
-        Some((route, suffix)) if route.ws || is_ws_upgrade(&req) => {
+        Some((route, suffix)) if is_ws_upgrade(&req) => {
             handle_ws(
                 req,
                 route,
@@ -716,26 +970,34 @@ async fn handle_request(
                 max_log_entries,
                 method,
                 path,
+                peer_ip,
+                is_tls,
             };
             handle_http(ctx).await
         }
         None => {
-            let mut lk = logs.lock().expect("mutex poisoned");
-            lk.push_back(LogEntry {
-                method,
-                path,
-                upstream: "-".into(),
-                status: 404,
-                latency_ms: 0,
-                ws: false,
-            });
-            if lk.len() > max_log_entries {
-                lk.pop_front();
+            {
+                let mut lk = logs.lock().expect("mutex poisoned");
+                lk.push_back(LogEntry {
+                    method,
+                    path,
+                    upstream: "-".into(),
+                    status: 404,
+                    latency_ms: 0,
+                    ws: false,
+                });
+                if lk.len() > max_log_entries {
+                    lk.pop_front();
+                }
             }
+
+            // Drain the request body so hyper can keep the connection alive for
+            // the next request instead of dropping it.
+            let _ = req.collect().await;
 
             Ok(Response::builder()
                 .status(StatusCode::NOT_FOUND)
-                .body(Full::new(Bytes::from("no matching route")))
+                .body(body_full(Bytes::from("no matching route")))
                 .expect("response builder failed"))
         }
     }
@@ -1014,31 +1276,37 @@ mod tests {
 
     #[test]
     fn test_build_upstream_uri_no_query() {
-        let uri = build_upstream_uri("http://localhost:8080", "/api/test", None);
+        let uri = build_upstream_uri("http://localhost:8080", "/api/test", None).unwrap();
         assert_eq!(uri.to_string(), "http://localhost:8080/api/test");
     }
 
     #[test]
     fn test_build_upstream_uri_with_query() {
-        let uri = build_upstream_uri("http://localhost:8080", "/api/test", Some("key=value"));
+        let uri =
+            build_upstream_uri("http://localhost:8080", "/api/test", Some("key=value")).unwrap();
         assert_eq!(uri.to_string(), "http://localhost:8080/api/test?key=value");
     }
 
     #[test]
     fn test_build_upstream_uri_trailing_slash() {
-        let uri = build_upstream_uri("http://localhost:8080/", "/api/test", None);
+        let uri = build_upstream_uri("http://localhost:8080/", "/api/test", None).unwrap();
         assert_eq!(uri.to_string(), "http://localhost:8080/api/test");
     }
 
     #[test]
     fn test_build_upstream_uri_empty_query() {
-        let uri = build_upstream_uri("http://localhost:8080", "/api/test", Some(""));
+        let uri = build_upstream_uri("http://localhost:8080", "/api/test", Some("")).unwrap();
         assert_eq!(uri.to_string(), "http://localhost:8080/api/test");
     }
 
     #[test]
     fn test_build_upstream_uri_suffix_root() {
-        let uri = build_upstream_uri("http://localhost:8080", "/", None);
+        let uri = build_upstream_uri("http://localhost:8080", "/", None).unwrap();
         assert_eq!(uri.to_string(), "http://localhost:8080/");
+    }
+
+    #[test]
+    fn test_build_upstream_uri_invalid_fails() {
+        assert!(build_upstream_uri("http://", "/x", None).is_err());
     }
 }
