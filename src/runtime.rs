@@ -192,6 +192,10 @@ pub fn build(
                 t.save_logs = save_logs;
                 t.health_checks = health_checks;
                 t.shutdown_cmd = entry.shutdown_cmd.clone();
+                // Verify the borrowed resource immediately instead of waiting
+                // for the periodic thread's first check, so the tab and its
+                // dependents learn its true state right away.
+                t.probe_health();
                 t.start_health_checks();
                 t
             } else if health_checks.is_empty() {

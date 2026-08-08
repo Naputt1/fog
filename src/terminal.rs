@@ -1170,6 +1170,23 @@ impl Terminal {
         *self.health_status.lock().unwrap_or_else(|e| e.into_inner()) = s;
     }
 
+    /// Runs the configured health checks once, immediately, and updates the
+    /// current health status. Used right after adopting a service so its tab
+    /// (and anything depending on it) knows right away whether the borrowed
+    /// resource is actually up, instead of waiting for the first periodic
+    /// check to run. No-op when no health checks are configured.
+    pub fn probe_health(&self) {
+        if self.health_checks.is_empty() {
+            return;
+        }
+        let healthy = health_checks_pass(&self.health_checks);
+        self.set_health_status(if healthy {
+            HealthStatus::Healthy
+        } else {
+            HealthStatus::Unhealthy
+        });
+    }
+
     /// Appends a plain status message into this terminal's own screen buffer so
     /// state changes are visible in the tab without writing to stderr (which
     /// would corrupt the raw-mode TUI) or to the process PTY.
@@ -1490,6 +1507,46 @@ mod tests {
             },
         ];
         assert!(!health_checks_pass(&mixed));
+    }
+
+    #[test]
+    fn test_adopted_probe_health_runs_immediately() {
+        let pty = portable_pty::native_pty_system()
+            .openpty(portable_pty::PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let master_fd = pty.master.as_raw_fd().expect("pty master fd");
+        let dup_fd = unsafe { libc::dup(master_fd) };
+        assert!(dup_fd >= 0);
+        let mut t = Terminal::adopt(".".into(), "true".into(), "db".into(), 100, dup_fd, 99_999);
+
+        // A live listener flips an adopted terminal to Healthy immediately.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        t.health_checks.push(HealthCheckConfig {
+            kind: crate::config::HealthCheckKind::Tcp,
+            target: addr.to_string(),
+            interval_ms: None,
+            timeout_ms: Some(200),
+        });
+        t.probe_health();
+        assert_eq!(t.get_health_status(), HealthStatus::Healthy);
+
+        // A closed port flips it to Unhealthy immediately.
+        t.health_checks.push(HealthCheckConfig {
+            kind: crate::config::HealthCheckKind::Tcp,
+            target: "127.0.0.1:1".into(),
+            interval_ms: None,
+            timeout_ms: Some(100),
+        });
+        t.probe_health();
+        assert_eq!(t.get_health_status(), HealthStatus::Unhealthy);
+
+        t.kill_inner();
     }
 
     /// Runs `shutdown_cmd` (a `touch`) and waits up to `timeout` for `marker`.
