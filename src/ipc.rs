@@ -14,6 +14,8 @@ const READ_TIMEOUT_SECS: u64 = 5;
 /// How long the reclaiming side waits for the replaced instance to prepare
 /// and send its handoffs before giving up.
 const HANDOFF_PREPARE_TIMEOUT_SECS: u64 = 30;
+/// Maximum accepted length for a single IPC request line.
+const MAX_IPC_LINE_LEN: usize = 8192;
 
 /// Status snapshot of a single service.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -184,15 +186,28 @@ pub fn cleanup_socket() {
 /// Handles a single IPC connection: reads one request line and writes a response.
 fn handle_connection(mut stream: UnixStream, state: Arc<IpcState>) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(READ_TIMEOUT_SECS)));
-    let mut line = String::new();
     let mut reader = match stream.try_clone() {
         Ok(r) => BufReader::new(r),
         Err(_) => return,
     };
-    if reader.read_line(&mut line).is_err() {
-        return;
+    // Cap the request line so a local client cannot inflate memory; a
+    // malformed/oversized request is simply ignored.
+    let mut line_buf = Vec::with_capacity(256);
+    let mut byte = [0u8; 1];
+    while line_buf.len() < MAX_IPC_LINE_LEN {
+        match reader.read(&mut byte) {
+            Ok(0) => break,
+            Ok(_) => {
+                if byte[0] == b'\n' {
+                    break;
+                }
+                line_buf.push(byte[0]);
+            }
+            Err(_) => return,
+        }
     }
     drop(reader);
+    let line = String::from_utf8_lossy(&line_buf);
 
     let req: Request = match serde_json::from_str(line.trim()) {
         Ok(r) => r,
@@ -224,10 +239,10 @@ fn handle_connection(mut stream: UnixStream, state: Arc<IpcState>) {
             let _ = writeln!(writer, "{resp}");
         }
         Request::Kill { reuse } => {
-            state.kill_flag.store(true, Ordering::SeqCst);
             if reuse.is_empty() {
                 // Plain kill: acknowledge immediately and never touch handoff
                 // state, so it cannot steal a handoff in flight.
+                state.kill_flag.store(true, Ordering::SeqCst);
                 let resp = serde_json::to_string(&KillResponse {
                     ok: true,
                     reason: String::new(),
@@ -248,8 +263,12 @@ fn handle_connection(mut stream: UnixStream, state: Arc<IpcState>) {
                 let _ = writeln!(stream, "{resp}");
                 return;
             }
+            // Publish the handoff request BEFORE raising the kill flag: the app
+            // loop acts as soon as it sees `kill_flag`, so the request must
+            // already be visible for it to prepare and send the handoffs.
             *state.reuse_skip.lock().unwrap_or_else(|e| e.into_inner()) = reuse.clone();
             *state.handoff_req.lock().unwrap_or_else(|e| e.into_inner()) = Some(reuse);
+            state.kill_flag.store(true, Ordering::SeqCst);
             send_handoffs(stream, state);
         }
     };
@@ -276,7 +295,7 @@ fn send_handoffs(mut stream: UnixStream, state: Arc<IpcState>) {
         thread::sleep(Duration::from_millis(20));
     }
 
-    let results = mem::take(
+    let mut results = mem::take(
         &mut *state
             .handoff_results
             .lock()
@@ -284,7 +303,7 @@ fn send_handoffs(mut stream: UnixStream, state: Arc<IpcState>) {
     );
 
     let mut ok = true;
-    for item in results {
+    while let Some(item) = results.pop() {
         let msg = HandoffMsg {
             r#type: "handoff".to_string(),
             name: item.name,
@@ -308,6 +327,11 @@ fn send_handoffs(mut stream: UnixStream, state: Arc<IpcState>) {
             unsafe { libc::close(item.fd) };
             break;
         }
+    }
+    // Close any fds that were never sent (transfer aborted mid-way).
+    for item in results {
+        // SAFETY: the fds were dupped for transfer and are owned by us.
+        unsafe { libc::close(item.fd) };
     }
 
     let reason = if ok {
@@ -462,8 +486,12 @@ pub fn reclaim(path: &Path, reuse: &[String]) -> ReclaimOutcome {
         Ok(s) => s,
         Err(e) => return ReclaimOutcome::failed(format!("connection failed: {e}")),
     };
+    // The replaced instance may take up to HANDOFF_PREPARE_TIMEOUT_SECS to
+    // prepare and send its handoffs before replying, so the client's read
+    // timeout must cover that window; using the shorter READ_TIMEOUT_SECS
+    // would fail the reclaim while the old instance is still mid-handoff.
     if stream
-        .set_read_timeout(Some(Duration::from_secs(READ_TIMEOUT_SECS)))
+        .set_read_timeout(Some(Duration::from_secs(HANDOFF_PREPARE_TIMEOUT_SECS)))
         .is_err()
     {
         return ReclaimOutcome::failed("could not set read timeout");
@@ -612,13 +640,14 @@ mod tests {
     }
 
     #[test]
-    fn test_find_instances_empty() {
+    fn test_find_instances_sorted() {
+        // Not asserting the temp dir is empty: other running `fog` instances
+        // may legitimately have sockets there. Just verify the scan returns a
+        // sorted list (and does not choke on unrelated files).
         let instances = find_instances().unwrap();
-        assert!(!instances.iter().any(|(_, p)| {
-            p.file_name()
-                .map(|n| n.to_string_lossy().starts_with("fog-"))
-                .unwrap_or(false)
-        }));
+        for w in instances.windows(2) {
+            assert!(w[0].0 <= w[1].0, "instances must be sorted by pid");
+        }
     }
 
     #[test]
