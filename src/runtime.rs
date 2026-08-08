@@ -130,9 +130,11 @@ fn spawn_checked_terminal(
             t.start_health_checks();
             t
         }
-        Err(e) => {
-            Terminal::spawn_error(name.to_string(), format!("Failed to spawn: {e}"), scrollback)
-        }
+        Err(e) => Terminal::spawn_error(
+            name.to_string(),
+            format!("Failed to spawn: {e}"),
+            scrollback,
+        ),
     }
 }
 
@@ -426,7 +428,10 @@ mod tests {
     fn test_build_reuse_up_resource_borrows() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
-        let script = script_with(vec![reuse_entry("infra", Some(tcp_health(&addr.to_string())))]);
+        let script = script_with(vec![reuse_entry(
+            "infra",
+            Some(tcp_health(&addr.to_string())),
+        )]);
         let mut adopted = HashMap::new();
         let rt = build(&script, Path::new("."), false, 100, &mut adopted).unwrap();
         assert!(rt.items[0].reused, "an up reused resource must be borrowed");
