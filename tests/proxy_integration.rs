@@ -52,9 +52,8 @@ fn test_proxy_returns_502_for_unreachable_upstream() {
         .build()
         .unwrap();
     let resp = client.get("http://127.0.0.1:19996/test").send();
-    match resp {
-        Ok(r) => assert_eq!(r.status(), 502),
-        Err(_) => {}
+    if let Ok(r) = resp {
+        assert_eq!(r.status(), 502);
     }
 
     proxy.stop();

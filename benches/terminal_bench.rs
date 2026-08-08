@@ -18,7 +18,6 @@ fn make_ansi_term(content_lines: usize) -> Terminal {
 }
 
 /// Warm benchmarks: reuse the same Terminal across iterations (measures cache-hit path after first call).
-
 fn bench_get_screen_empty(c: &mut Criterion) {
     let term = Terminal::spawn_error("test".to_string(), String::new(), 2000);
     c.bench_function("get_screen/empty", |b| {
@@ -91,7 +90,6 @@ fn bench_get_screen_cache_hit(c: &mut Criterion) {
 }
 
 /// Cold benchmarks: fresh Terminal per iteration (always a cache miss, measures the true render cost).
-
 fn bench_get_screen_cold_small(c: &mut Criterion) {
     c.bench_function("get_screen/cold_10_lines", |b| {
         b.iter_batched(
