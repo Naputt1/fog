@@ -30,8 +30,7 @@ pub fn send_fd(stream: &UnixStream, fd: RawFd) -> io::Result<()> {
     msg.msg_iov = &mut iovec;
     msg.msg_iovlen = 1;
     msg.msg_control = cmsg.0.as_mut_ptr().cast();
-    msg.msg_controllen =
-        unsafe { libc::CMSG_SPACE(mem::size_of::<RawFd>() as u32) as _ };
+    msg.msg_controllen = unsafe { libc::CMSG_SPACE(mem::size_of::<RawFd>() as u32) as _ };
 
     let cmsg_ptr = unsafe { libc::CMSG_FIRSTHDR(&msg) };
     if cmsg_ptr.is_null() {
@@ -68,8 +67,7 @@ pub fn recv_fd(stream: &UnixStream) -> io::Result<RawFd> {
     msg.msg_iov = &mut iovec;
     msg.msg_iovlen = 1;
     msg.msg_control = cmsg.0.as_mut_ptr().cast();
-    msg.msg_controllen =
-        unsafe { libc::CMSG_SPACE(mem::size_of::<RawFd>() as u32) as _ };
+    msg.msg_controllen = unsafe { libc::CMSG_SPACE(mem::size_of::<RawFd>() as u32) as _ };
 
     let ret = unsafe { libc::recvmsg(stream.as_raw_fd(), &mut msg, 0) };
     if ret < 0 {
