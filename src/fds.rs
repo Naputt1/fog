@@ -31,7 +31,7 @@ pub fn send_fd(stream: &UnixStream, fd: RawFd) -> io::Result<()> {
     msg.msg_iovlen = 1;
     msg.msg_control = cmsg.0.as_mut_ptr().cast();
     msg.msg_controllen =
-        unsafe { libc::CMSG_SPACE(mem::size_of::<RawFd>() as u32) as libc::socklen_t };
+        unsafe { libc::CMSG_SPACE(mem::size_of::<RawFd>() as u32) as _ };
 
     let cmsg_ptr = unsafe { libc::CMSG_FIRSTHDR(&msg) };
     if cmsg_ptr.is_null() {
@@ -40,7 +40,7 @@ pub fn send_fd(stream: &UnixStream, fd: RawFd) -> io::Result<()> {
     unsafe {
         (*cmsg_ptr).cmsg_level = libc::SOL_SOCKET;
         (*cmsg_ptr).cmsg_type = libc::SCM_RIGHTS;
-        (*cmsg_ptr).cmsg_len = libc::CMSG_LEN(mem::size_of::<RawFd>() as u32);
+        (*cmsg_ptr).cmsg_len = libc::CMSG_LEN(mem::size_of::<RawFd>() as u32) as _;
         *(libc::CMSG_DATA(cmsg_ptr).cast::<RawFd>()) = fd;
     }
 
@@ -69,7 +69,7 @@ pub fn recv_fd(stream: &UnixStream) -> io::Result<RawFd> {
     msg.msg_iovlen = 1;
     msg.msg_control = cmsg.0.as_mut_ptr().cast();
     msg.msg_controllen =
-        unsafe { libc::CMSG_SPACE(mem::size_of::<RawFd>() as u32) as libc::socklen_t };
+        unsafe { libc::CMSG_SPACE(mem::size_of::<RawFd>() as u32) as _ };
 
     let ret = unsafe { libc::recvmsg(stream.as_raw_fd(), &mut msg, 0) };
     if ret < 0 {
