@@ -81,7 +81,7 @@ fog runs three concurrent threads:
 ```
 main.rs
   │
-  ├── Parses CLI args (clap): `fog <script>` | `fog ls` | `fog kill [pid]`
+  ├── Parses CLI args (clap): `fog <script>` | `fog ls` | `fog kill [pid]` | `fog logs [pid]`; `-d` runs headlessly as a daemon
   ├── Loads config, looks up the named script's services & proxy
   ├── Acquires per-(project, script) owner lock, coordinates with/reclaims
   │   any existing instance of the same script in the same project
@@ -89,8 +89,8 @@ main.rs
   ├── Spawns Terminal for each service entry
   ├── Releases the owner lock (services are up)
   ├── Creates ProxyInstance (if the script configures one)
-  ├── Spawns config watcher
-  └── Runs App::run() in ratatui terminal
+  ├── Spawns config watcher (TUI runs only; detached daemons skip it)
+  └── Runs App::run() in ratatui terminal, or App::run_headless() when detached
        │
        └── App
             ├── items: Vec<Terminal>      ← service terminals

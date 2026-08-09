@@ -7,8 +7,11 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::io::stdout;
+use std::os::unix::io::IntoRawFd;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -28,15 +31,18 @@ const DEFAULT_SCROLLBACK: usize = 2000;
 const LOCK_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a replacer waits for the old instance to fully exit.
 const RECLAIM_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long the parent of a detached run waits for the daemon to start serving
+/// before reporting failure. Covers the owner-lock wait plus the reclaim.
+const DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Command-line interface arguments parsed via clap.
 #[derive(Parser)]
 #[command(name = "fog", version = env!("CARGO_PKG_VERSION"))]
 struct Cli {
-    /// Script to run (e.g. `fog dev`), or a built-in command (`ls`, `kill`).
+    /// Script to run (e.g. `fog dev`), or a built-in command (`ls`, `kill`, `logs`).
     script: Option<String>,
 
-    /// PID of a running fog instance (used with `fog kill <pid>`).
+    /// PID of a running fog instance (used with `fog kill <pid>`, `fog logs <pid>`).
     pid: Option<u32>,
 
     /// Path to the configuration file (or a directory containing `fog.json`).
@@ -55,6 +61,12 @@ struct Cli {
     /// Print a shell completion script to stdout and exit.
     #[arg(long, value_name = "SHELL")]
     completions: Option<CompletionShell>,
+
+    /// Run the script in the background without the TUI: services keep their
+    /// PTYs, health checks and proxy, and their output is captured to
+    /// `$TMPDIR/fog-<pid>.logs/` for inspection with `fog logs <pid>`.
+    #[arg(short, long)]
+    detach: bool,
 }
 
 /// Resolves the config file to use, honoring `--branch`:
@@ -378,9 +390,25 @@ fn cmd_kill(pid: Option<u32>) -> io::Result<()> {
         std::process::exit(1);
     }
 
-    let target = match pid {
+    let (_target_pid, path) = resolve_instance(&instances, pid, "kill");
+    ipc::send_kill(path)?;
+    println!("sent kill request to fog instance");
+    Ok(())
+}
+
+/// Resolves the instance `pid` refers to, returning its PID and socket path.
+///
+/// With no `pid`, the single running instance is chosen; multiple instances
+/// produce an error listing each (`cmd` names the command in the hint, e.g.
+/// `fog kill <pid>`). Exits with an error when nothing matches.
+fn resolve_instance<'a>(
+    instances: &'a [(u32, PathBuf)],
+    pid: Option<u32>,
+    cmd: &str,
+) -> (u32, &'a PathBuf) {
+    match pid {
         Some(pid) => match instances.iter().find(|(p, _)| *p == pid) {
-            Some((_, path)) => Some(path),
+            Some((_, path)) => (pid, path),
             None => {
                 eprintln!("error: no fog instance with pid {pid}");
                 std::process::exit(1);
@@ -388,31 +416,157 @@ fn cmd_kill(pid: Option<u32>) -> io::Result<()> {
         },
         None => {
             if instances.len() == 1 {
-                Some(&instances[0].1)
+                (instances[0].0, &instances[0].1)
             } else {
                 eprintln!("error: multiple fog instances running, specify a pid:");
-                for (p, _) in &instances {
-                    eprintln!("  fog kill {p}");
+                for (p, _) in instances {
+                    eprintln!("  fog {cmd} {p}");
                 }
                 std::process::exit(1);
             }
         }
+    }
+}
+
+/// Directory holding a detached instance's captured logs: `$TMPDIR/fog-<pid>.logs/`.
+fn detached_log_dir(pid: u32) -> PathBuf {
+    std::env::temp_dir().join(format!("fog-{pid}.logs"))
+}
+
+/// Strips ANSI escape sequences from `s`, producing plain text. Used to render
+/// the raw PTY output captured in detached log files.
+fn strip_ansi(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '\x1b' => {
+                if i + 1 >= chars.len() {
+                    break;
+                }
+                match chars[i + 1] {
+                    // CSI: consume until the final byte (0x40–0x7e).
+                    '[' => {
+                        i += 2;
+                        while i < chars.len() && !('\u{40}'..='\u{7e}').contains(&chars[i]) {
+                            i += 1;
+                        }
+                        i += 1;
+                    }
+                    // OSC: consume until BEL or ST (`ESC \`).
+                    ']' => {
+                        i += 2;
+                        loop {
+                            if i >= chars.len() {
+                                break;
+                            }
+                            if chars[i] == '\u{07}' {
+                                i += 1;
+                                break;
+                            }
+                            if chars[i] == '\x1b' && i + 1 < chars.len() && chars[i + 1] == '\\' {
+                                i += 2;
+                                break;
+                            }
+                            i += 1;
+                        }
+                    }
+                    // Two-character escape (e.g. ESC M): skip the second char.
+                    _ => i += 2,
+                }
+            }
+            // Drop lone carriage returns so `\r\n` renders as clean lines.
+            '\r' => i += 1,
+            c => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// Prints the captured logs of a running instance, one section per service.
+fn cmd_logs(pid: Option<u32>) -> io::Result<()> {
+    let instances = ipc::find_instances()?;
+
+    if instances.is_empty() {
+        eprintln!("error: no running fog instances");
+        std::process::exit(1);
+    }
+
+    let (target_pid, path) = resolve_instance(&instances, pid, "logs");
+
+    let status = match ipc::query_status(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: could not query instance {target_pid}: {e}");
+            std::process::exit(1);
+        }
     };
 
-    match target {
-        Some(path) => {
-            ipc::send_kill(path)?;
-            println!("sent kill request to fog instance");
-        }
-        None => {
-            eprintln!("error: no fog instance to kill");
-            std::process::exit(1);
+    let dir = detached_log_dir(target_pid);
+    if !dir.is_dir() {
+        eprintln!(
+            "error: instance {target_pid} has no captured logs (only instances \
+             started with `fog <script> -d` write log files)"
+        );
+        std::process::exit(1);
+    }
+
+    let mut files: Vec<PathBuf> = fs::read_dir(&dir)?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|ext| ext == "log"))
+        .collect();
+    files.sort();
+
+    if files.is_empty() {
+        println!("(no log files for instance {target_pid})");
+        return Ok(());
+    }
+
+    for file in files {
+        let name = file
+            .file_stem()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        println!("==== {} ({}) ====", status.script, name);
+        match fs::read_to_string(&file) {
+            Ok(content) => {
+                print!("{}", strip_ansi(&content));
+                if !content.ends_with('\n') {
+                    println!();
+                }
+            }
+            Err(e) => eprintln!("error: could not read {}: {e}", file.display()),
         }
     }
     Ok(())
 }
 
 fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
+    // A `-d` run executes as a background daemon (re-executed by `main` with
+    // `FOG_DAEMON_CHILD` set); the daemon child skips the TUI and runs a
+    // headless service loop instead.
+    let detached = cli.detach || std::env::var_os("FOG_DAEMON_CHILD").is_some();
+
+    // Drop the daemon marker so it does not leak into spawned services. No
+    // threads have been spawned yet, so mutating the environment is race-free.
+    if detached {
+        // SAFETY: the process is still single-threaded at this point.
+        unsafe { std::env::remove_var("FOG_DAEMON_CHILD") };
+    }
+
+    // Detached daemons redirect their own diagnostics into a per-instance log
+    // directory early (so startup/reclaim messages are captured too); each
+    // service's raw PTY output is teed into its own file there.
+    let log_dir = if detached {
+        Some(init_daemon_logs()?)
+    } else {
+        None
+    };
+
     let config_path = resolve_config_path(&resolve_run_config(cli));
     let config = load_config(&config_path);
     let script = match config.scripts.get(name) {
@@ -450,8 +604,10 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
     let ipc_state = Arc::new(ipc::IpcState::new(name.to_string(), project));
     ipc::spawn_server(ipc_state.clone())?;
 
-    enable_raw_mode()?;
-    execute!(stdout(), EnterAlternateScreen, EnableMouseCapture)?;
+    if !detached {
+        enable_raw_mode()?;
+        execute!(stdout(), EnterAlternateScreen, EnableMouseCapture)?;
+    }
 
     let scrollback = config.max_scrollback.unwrap_or(DEFAULT_SCROLLBACK);
     let sidebar_min = config
@@ -469,42 +625,138 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
     let (sidebar_min, sidebar_max) = (sidebar_min.min(sidebar_max), sidebar_min.max(sidebar_max));
     let theme = Theme::from_config(config.theme.as_ref());
 
-    let runtime = fog::runtime::build(script, &config_dir, cli.save_logs, scrollback, &mut adopted)
-        .map_err(|e| {
-            // Restore the terminal before reporting so it is usable again.
+    let runtime = fog::runtime::build(
+        script,
+        &config_dir,
+        cli.save_logs,
+        scrollback,
+        log_dir.clone(),
+        &mut adopted,
+    )
+    .map_err(|e| {
+        // Restore the terminal before reporting so it is usable again.
+        if !detached {
             let _ = execute!(stdout(), LeaveAlternateScreen, DisableMouseCapture);
             let _ = disable_raw_mode();
-            io::Error::new(io::ErrorKind::InvalidData, format!("error: {}", e))
-        })?;
+        }
+        io::Error::new(io::ErrorKind::InvalidData, format!("error: {}", e))
+    })?;
 
     // Services are up: release the owner lock so a later worktree switch can
     // replace this instance.
     drop(owner_lock);
 
-    let config_rx =
-        config_watcher::spawn_config_watcher(config_path.clone(), Arc::new(AtomicBool::new(false)));
+    // A detached daemon has no UI to hot-reload, so the config watcher is skipped.
+    let config_rx = if detached {
+        std::sync::mpsc::channel().1
+    } else {
+        config_watcher::spawn_config_watcher(config_path.clone(), Arc::new(AtomicBool::new(false)))
+    };
 
-    ratatui::run(|terminal| {
-        App::new(
-            runtime.items,
-            runtime.pending_services,
-            runtime.proxy,
-            sigint,
-            scrollback,
-            sidebar_min,
-            sidebar_max,
-            theme,
-            config_path,
-            config_rx,
-            ipc_state,
-            cli.config.clone(),
-            cli.save_logs,
-        )
-        .run(terminal)
-    })?;
+    let mut app = App::new(
+        runtime.items,
+        runtime.pending_services,
+        runtime.proxy,
+        sigint,
+        scrollback,
+        sidebar_min,
+        sidebar_max,
+        theme,
+        config_path,
+        config_rx,
+        ipc_state,
+        cli.config.clone(),
+        cli.save_logs,
+    );
+    if detached {
+        app.run_headless()?;
+    } else {
+        ratatui::run(|terminal| app.run(terminal))?;
+    }
 
     ipc::cleanup_socket();
 
+    Ok(())
+}
+
+/// Creates the per-instance log directory for the current process and redirects
+/// stdout/stderr to `daemon.log` inside it. Returns the log directory.
+fn init_daemon_logs() -> io::Result<PathBuf> {
+    let dir = detached_log_dir(std::process::id());
+    fs::create_dir_all(&dir)?;
+    let log = fs::File::create(dir.join("daemon.log"))?;
+    // SAFETY: dup2 onto the standard fds is always valid, and the original fd
+    // is ours to close.
+    let fd = log.into_raw_fd();
+    unsafe {
+        libc::dup2(fd, 1);
+        libc::dup2(fd, 2);
+        libc::close(fd);
+    }
+    Ok(dir)
+}
+
+/// Detach mode entry point: re-executes `fog <script>` as a background daemon
+/// and waits until it is serving, printing the PID once `fog ls` can see it.
+fn daemonize(script: &str) -> io::Result<()> {
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("fog"));
+    let args: Vec<OsString> = std::env::args_os()
+        .skip(1)
+        .filter(|a| {
+            let s = a.to_string_lossy();
+            s != "-d" && s != "--detach" && !s.starts_with("--detach=")
+        })
+        .collect();
+
+    let mut cmd = Command::new(&exe);
+    cmd.args(&args)
+        .env("FOG_DAEMON_CHILD", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| io::Error::other(format!("could not start detached fog: {e}")))?;
+    let pid = child.id();
+
+    // Wait until the daemon's socket serves a status reply (created only after
+    // the reconcile/reclaim window), so we report success exactly when
+    // `fog ls` / `fog kill` / `fog logs` will work.
+    let socket = ipc::socket_path(pid);
+    let deadline = std::time::Instant::now() + DAEMON_READY_TIMEOUT;
+    loop {
+        if ipc::query_status(&socket).is_ok() {
+            break;
+        }
+        if child.try_wait().ok().flatten().is_some() {
+            eprintln!("error: detached fog '{script}' (pid {pid}) exited during startup");
+            eprintln!("  logs: {}", detached_log_dir(pid).display());
+            std::process::exit(1);
+        }
+        if std::time::Instant::now() >= deadline {
+            eprintln!(
+                "error: detached fog '{script}' (pid {pid}) did not become ready within {}s",
+                DAEMON_READY_TIMEOUT.as_secs()
+            );
+            eprintln!("  logs: {}", detached_log_dir(pid).display());
+            std::process::exit(1);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    println!("fog '{script}' started in background (pid {pid})");
+    println!("  status: fog ls {pid}");
+    println!("  stop:   fog kill {pid}");
+    println!("  logs:   fog logs {pid}");
+    println!("  log dir: {}", detached_log_dir(pid).display());
     Ok(())
 }
 
@@ -516,9 +768,27 @@ fn main() -> io::Result<()> {
         return Ok(());
     }
 
+    // Detach: run the script in the background and return once it is serving.
+    // The daemon child (re-executed with FOG_DAEMON_CHILD=1) takes the
+    // headless path in run_script and must not re-daemonize.
+    if cli.detach && std::env::var_os("FOG_DAEMON_CHILD").is_none() {
+        match cli.script.as_deref() {
+            Some(name) if !matches!(name, "ls" | "kill" | "logs") => return daemonize(name),
+            Some(_) => {
+                eprintln!("error: --detach only applies to running a script (e.g. `fog dev -d`)");
+                std::process::exit(1);
+            }
+            None => {
+                eprintln!("error: --detach requires a script (e.g. `fog dev -d`)");
+                std::process::exit(1);
+            }
+        }
+    }
+
     match cli.script.as_deref() {
         Some("ls") => cmd_ls(),
         Some("kill") => cmd_kill(cli.pid),
+        Some("logs") => cmd_logs(cli.pid),
         Some(name) => run_script(name, &cli),
         None => {
             let config_path = resolve_config_path(&resolve_run_config(&cli));
@@ -572,5 +842,34 @@ mod tests {
         let missing = dir.join("missing.json");
         assert_eq!(resolve_config_path(&missing), missing);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_detached_log_dir_naming() {
+        assert_eq!(
+            detached_log_dir(1234),
+            std::env::temp_dir().join("fog-1234.logs")
+        );
+    }
+
+    #[test]
+    fn test_strip_ansi_removes_escape_sequences() {
+        let input = "\x1b[1;31merror\x1b[0m \x1b[38;2;255;128;0mok\r\nplain";
+        let out = strip_ansi(input);
+        assert_eq!(out, "error ok\nplain");
+    }
+
+    #[test]
+    fn test_strip_ansi_handles_osc() {
+        // OSC 52 clipboard / OSC title sequences must be consumed entirely.
+        let input = "\x1b]52;c;QUJD\x07title\x1b]0;fog\x1b\\rest";
+        let out = strip_ansi(input);
+        assert_eq!(out, "titlerest");
+    }
+
+    #[test]
+    fn test_strip_ansi_preserves_plain_text() {
+        assert_eq!(strip_ansi("hello world"), "hello world");
+        assert_eq!(strip_ansi(""), "");
     }
 }

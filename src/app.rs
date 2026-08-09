@@ -75,6 +75,9 @@ pub struct PendingService {
     pub scrollback: usize,
     /// Whether to save logs on exit.
     pub save_logs: bool,
+    /// Directory to tee this service's raw PTY output into (`<name>.log`),
+    /// used by detached (`-d`) runs so an external agent can tail it.
+    pub log_dir: Option<PathBuf>,
     /// Names of services this depends on.
     pub dep_names: Vec<String>,
     /// Health check configurations for this service.
@@ -302,49 +305,10 @@ impl App {
             if self.config_rx.try_recv().is_ok() {
                 self.reload_config();
             }
-            if self.sigint.load(Ordering::SeqCst) || self.ipc_state.kill_flag.load(Ordering::SeqCst)
+            if (self.sigint.load(Ordering::SeqCst)
+                || self.ipc_state.kill_flag.load(Ordering::SeqCst))
+                && self.prepare_exit()
             {
-                self.perform_handoff();
-                // Give the IPC thread a moment to send any handoffs before we
-                // drop our terminals.
-                if self
-                    .ipc_state
-                    .handoff_req
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .is_some()
-                {
-                    let deadline = std::time::Instant::now() + Duration::from_secs(30);
-                    while std::time::Instant::now() < deadline
-                        && !self.ipc_state.handoff_done.load(Ordering::SeqCst)
-                    {
-                        thread::sleep(Duration::from_millis(20));
-                    }
-                    // If the transfer never completed (e.g. the connection
-                    // dropped), close any prepared-but-unsent fds so they are
-                    // not leaked. Reuse services themselves survive: they were
-                    // marked handed-off and are not killed on teardown.
-                    if !self.ipc_state.handoff_done.load(Ordering::SeqCst) {
-                        let fds: Vec<_> = std::mem::take(
-                            &mut *self
-                                .ipc_state
-                                .handoff_results
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner()),
-                        )
-                        .into_iter()
-                        .map(|h| h.fd)
-                        .collect();
-                        for fd in fds {
-                            // SAFETY: these fds were dupped for transfer and
-                            // are owned by this instance until sent.
-                            unsafe {
-                                libc::close(fd);
-                            }
-                        }
-                    }
-                }
-                self.exit = true;
                 break;
             }
             for i in 0..self.items.len() {
@@ -358,19 +322,7 @@ impl App {
             }
             self.handle_auto_scroll();
         }
-        // Services a replacing instance asked to reuse survive the handoff:
-        // skip their shutdown_cmd so the shared resource stays up.
-        let reuse_skip = self
-            .ipc_state
-            .reuse_skip
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        for item in &mut self.items {
-            if reuse_skip.contains(&item.name) {
-                item.shutdown_cmd = None;
-            }
-        }
+        self.clear_reuse_skip_shutdown_cmds();
         let _ = execute!(std::io::stdout(), DisableMouseCapture);
         let _ = event::poll(Duration::from_millis(20));
         while event::poll(Duration::from_millis(0)).unwrap_or(false) {
@@ -382,6 +334,103 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    /// Prepares any requested handoffs, waits for the IPC thread to send them,
+    /// and marks the app as exiting. Returns `true` when the caller should
+    /// break out of its run loop.
+    fn prepare_exit(&mut self) -> bool {
+        self.perform_handoff();
+        // Give the IPC thread a moment to send any handoffs before we
+        // drop our terminals.
+        if self
+            .ipc_state
+            .handoff_req
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+        {
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            while std::time::Instant::now() < deadline
+                && !self.ipc_state.handoff_done.load(Ordering::SeqCst)
+            {
+                thread::sleep(Duration::from_millis(20));
+            }
+            // If the transfer never completed (e.g. the connection
+            // dropped), close any prepared-but-unsent fds so they are
+            // not leaked. Reuse services themselves survive: they were
+            // marked handed-off and are not killed on teardown.
+            if !self.ipc_state.handoff_done.load(Ordering::SeqCst) {
+                let fds: Vec<_> = std::mem::take(
+                    &mut *self
+                        .ipc_state
+                        .handoff_results
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner()),
+                )
+                .into_iter()
+                .map(|h| h.fd)
+                .collect();
+                for fd in fds {
+                    // SAFETY: these fds were dupped for transfer and
+                    // are owned by this instance until sent.
+                    unsafe {
+                        libc::close(fd);
+                    }
+                }
+            }
+        }
+        self.exit = true;
+        true
+    }
+
+    /// Runs the script headlessly, without a TUI. Used by detached (`-d`)
+    /// runs: services keep their PTYs, health checks, dependency ordering and
+    /// IPC socket, so `fog ls` / `fog kill` / `fog logs` behave exactly as
+    /// with the TUI, but nothing is drawn and the loop never blocks on input.
+    pub fn run_headless(&mut self) -> io::Result<()> {
+        while !self.exit {
+            if (self.sigint.load(Ordering::SeqCst)
+                || self.ipc_state.kill_flag.load(Ordering::SeqCst))
+                && self.prepare_exit()
+            {
+                break;
+            }
+            for i in 0..self.items.len() {
+                if let Err(e) = self.items[i].maybe_auto_start() {
+                    self.errors.push(format!("auto-start error: {}", e));
+                }
+            }
+            self.check_pending();
+            for item in &mut self.items {
+                item.refresh_status();
+            }
+            self.update_shared_state();
+            thread::sleep(Duration::from_millis(50));
+        }
+        self.clear_reuse_skip_shutdown_cmds();
+        if !self.errors.is_empty() {
+            for err in &self.errors {
+                let _ = writeln!(std::io::stderr(), "{}", err);
+            }
+        }
+        Ok(())
+    }
+
+    /// Skips the `shutdown_cmd` of services a replacing instance asked to
+    /// reuse, so the shared resource stays up across the handoff.
+    fn clear_reuse_skip_shutdown_cmds(&mut self) {
+        let reuse_skip = self
+            .ipc_state
+            .reuse_skip
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        for item in &mut self.items {
+            if reuse_skip.contains(&item.name) {
+                item.shutdown_cmd = None;
+            }
+        }
     }
 
     fn handle_events(&mut self) -> io::Result<()> {
@@ -790,6 +839,7 @@ impl App {
             &config_dir,
             self.save_logs,
             self.scrollback,
+            None,
             &mut adopted,
         ) {
             Ok(b) => b,
@@ -1265,6 +1315,7 @@ impl App {
             let ps = self.pending_services.remove(idx);
 
             if let Some(item) = self.items.get_mut(tab_index) {
+                item.log_dir = ps.log_dir.clone();
                 if item.start(&ps.path, &ps.cmd).is_ok() {
                     item.health_checks = ps.health_checks;
                     item.shutdown_cmd = ps.shutdown_cmd;

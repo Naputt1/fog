@@ -26,5 +26,6 @@ to them, all in a single terminal interface.
 - **Keyboard navigation** — Vim-style `j`/`k` tab switching, terminal input mode (`i`), restart services (`R`), open shell tabs (`t`).
 - **Configuration hot-reload** — Edit your config at runtime to update themes and proxy settings without restarting.
 - **Instance management** — `fog ls` lists running instances and their service status; `fog kill` gracefully shuts one down.
+- **Detached runs** — `fog <script> -d` starts a script in the background without the TUI (ideal for CI and AI agents), tees each service's output to `$TMPDIR/fog-<pid>.logs/`, and returns immediately; `fog logs <pid>` prints the captured output.
 - **TLS support** — Terminate TLS connections directly in the proxy using PEM certificates.
 - **Health checks** — Periodic TCP health checks per service with sidebar status indicators.

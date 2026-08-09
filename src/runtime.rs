@@ -113,16 +113,18 @@ pub fn normalize_service_path(path: &Path) -> String {
 /// Spawns a terminal that runs `cmd` and wires up its health checks and
 /// shutdown command. Used for services that should be started directly —
 /// non-reused services, and reused services whose resource is currently down.
+#[allow(clippy::too_many_arguments)]
 fn spawn_checked_terminal(
     path: &str,
     cmd: &str,
     name: &str,
     scrollback: usize,
     save_logs: bool,
+    log_dir: Option<std::path::PathBuf>,
     health_checks: Vec<HealthCheckConfig>,
     shutdown_cmd: Option<String>,
 ) -> Terminal {
-    match Terminal::spawn_command(path, cmd, name.to_string(), scrollback) {
+    match Terminal::spawn_command(path, cmd, name.to_string(), scrollback, log_dir) {
         Ok(mut t) => {
             t.save_logs = save_logs;
             t.health_checks = health_checks;
@@ -152,6 +154,7 @@ pub fn build(
     config_dir: &Path,
     save_logs: bool,
     scrollback: usize,
+    log_dir: Option<std::path::PathBuf>,
     adopted: &mut HashMap<String, HandoffItem>,
 ) -> Result<Runtime, String> {
     let entries = script.service.clone().unwrap_or_default();
@@ -190,6 +193,7 @@ pub fn build(
                     scrollback,
                     handoff.fd,
                     handoff.pid,
+                    log_dir.clone(),
                 );
                 t.save_logs = save_logs;
                 t.health_checks = health_checks;
@@ -207,6 +211,7 @@ pub fn build(
                     &name,
                     scrollback,
                     save_logs,
+                    log_dir.clone(),
                     health_checks,
                     entry.shutdown_cmd.clone(),
                 );
@@ -247,6 +252,7 @@ pub fn build(
                     &name,
                     scrollback,
                     save_logs,
+                    log_dir.clone(),
                     health_checks,
                     entry.shutdown_cmd.clone(),
                 )
@@ -261,6 +267,7 @@ pub fn build(
                 path: service_path_str,
                 scrollback,
                 save_logs,
+                log_dir: log_dir.clone(),
                 dep_names: deps,
                 health_checks,
                 shutdown_cmd: entry.shutdown_cmd.clone(),
@@ -274,6 +281,7 @@ pub fn build(
                 &name,
                 scrollback,
                 save_logs,
+                log_dir.clone(),
                 health_checks,
                 entry.shutdown_cmd.clone(),
             )
@@ -417,7 +425,7 @@ mod tests {
     fn test_build_reuse_down_resource_starts_immediately() {
         let script = script_with(vec![reuse_entry("infra", Some(tcp_health("127.0.0.1:1")))]);
         let mut adopted = HashMap::new();
-        let rt = build(&script, Path::new("."), false, 100, &mut adopted).unwrap();
+        let rt = build(&script, Path::new("."), false, 100, None, &mut adopted).unwrap();
         assert!(
             !rt.items[0].reused,
             "a down reused resource must be started, not borrowed"
@@ -433,7 +441,7 @@ mod tests {
             Some(tcp_health(&addr.to_string())),
         )]);
         let mut adopted = HashMap::new();
-        let rt = build(&script, Path::new("."), false, 100, &mut adopted).unwrap();
+        let rt = build(&script, Path::new("."), false, 100, None, &mut adopted).unwrap();
         assert!(rt.items[0].reused, "an up reused resource must be borrowed");
         assert_eq!(
             rt.items[0].get_health_status(),
@@ -446,7 +454,7 @@ mod tests {
     fn test_build_reuse_without_health_check_starts() {
         let script = script_with(vec![reuse_entry("infra", None)]);
         let mut adopted = HashMap::new();
-        let rt = build(&script, Path::new("."), false, 100, &mut adopted).unwrap();
+        let rt = build(&script, Path::new("."), false, 100, None, &mut adopted).unwrap();
         assert!(
             !rt.items[0].reused,
             "reuse without a health check cannot verify, so it starts"

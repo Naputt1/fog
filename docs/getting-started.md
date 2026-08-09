@@ -61,11 +61,13 @@ fog dev
 fog <script> [OPTIONS]    # Run a script in the TUI (e.g. `fog dev`)
 fog ls [pid]              # List running instances and service status
 fog kill [pid]            # Gracefully shut down a running instance
+fog logs [pid]            # Print captured output of a detached instance
 ```
 
 | Option | Description |
 |--------|-------------|
 | `-c`, `--config <PATH>` | Path to config file, or a directory containing `fog.json` (default: `fog.json`) |
+| `-d`, `--detach` | Run the script in the background without the TUI; returns once the instance is serving |
 | `--save-logs` | Save service output to `temp/<name>.txt` on exit |
 
 ### Managing instances
@@ -84,6 +86,19 @@ fog kill 1234 # shut down the instance with PID 1234
 pid   script  proxy   services
 1234  dev     :3000   api:healthy db:healthy
 ```
+
+### Detached runs
+
+`fog <script> -d` runs a script in the background without the TUI — useful for CI pipelines and AI agents that cannot drive an interactive terminal. Services keep their PTYs, health checks, dependency ordering, and reverse proxy, so management works exactly as with the TUI:
+
+```bash
+fog dev -d            # start in the background; prints the PID and returns
+fog ls 1234           # check the instance's service status
+fog logs 1234         # print the captured output of each service
+fog kill 1234         # gracefully shut it down
+```
+
+Each detached instance tees every service's raw PTY output into `$TMPDIR/fog-<pid>.logs/<name>.log` (the daemon's own diagnostics go to `daemon.log`), and `fog logs <pid>` prints them with ANSI escape sequences stripped. The log files persist after the instance exits.
 
 ## Configuration
 

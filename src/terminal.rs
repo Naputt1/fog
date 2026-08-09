@@ -61,6 +61,9 @@ pub struct Terminal {
     pub process_running: bool,
     /// Whether to save terminal output to a file on drop.
     pub save_logs: bool,
+    /// Directory to tee this terminal's raw PTY output into (`<name>.log`),
+    /// used by detached (`-d`) runs so an external agent can tail it.
+    pub log_dir: Option<std::path::PathBuf>,
     /// Number of scrollback lines in the parser.
     pub scrollback: usize,
     /// Health check configurations (empty if none).
@@ -113,6 +116,7 @@ impl std::fmt::Debug for Terminal {
             .field("process_running", &self.process_running)
             .field("scrollback", &self.scrollback)
             .field("health_checks", &self.health_checks)
+            .field("log_dir", &self.log_dir)
             .field("shutdown_cmd", &self.shutdown_cmd)
             .field("reused", &self.reused)
             .field("owned_pid", &self.owned_pid)
@@ -198,6 +202,17 @@ fn cell_style(cell: &vt100::Cell) -> Style {
     style
 }
 
+/// Opens a tee file for a service's raw PTY output inside `log_dir`, if set.
+/// The service name is sanitized so a name containing a `/` cannot escape the
+/// directory.
+fn open_log_file(log_dir: &std::path::Path, name: &str) -> io::Result<fs::File> {
+    let safe_name: String = name
+        .chars()
+        .map(|c| if c == '/' { '_' } else { c })
+        .collect();
+    fs::File::create(log_dir.join(format!("{safe_name}.log")))
+}
+
 /// Creates a pipe used to signal a reader thread to stop. Returns
 /// `(read_end, write_end)`.
 fn make_stop_pipe() -> io::Result<(RawFd, RawFd)> {
@@ -213,12 +228,16 @@ fn make_stop_pipe() -> io::Result<(RawFd, RawFd)> {
 /// Spawns a thread that reads PTY output from `fd` and feeds the parser,
 /// stopping when the PTY reaches EOF or the `stop` pipe becomes readable.
 ///
-/// The thread owns `fd` and `stop` and closes them on exit.
+/// When `tee` is `Some`, each raw chunk read is also appended to it (used by
+/// detached runs to capture service output to `<log_dir>/<name>.log`).
+///
+/// The thread owns `fd`, `stop`, and `tee` and closes them on exit.
 fn spawn_reader(
     parser: Arc<Mutex<vt100::Parser>>,
     generation: Arc<AtomicUsize>,
     fd: RawFd,
     stop: RawFd,
+    mut tee: Option<fs::File>,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
         let mut buf = [0u8; 4096];
@@ -253,6 +272,9 @@ fn spawn_reader(
                     p.process(&buf[..n as usize]);
                 }
                 generation.fetch_add(1, Ordering::Relaxed);
+                if let Some(file) = tee.as_mut() {
+                    let _ = file.write_all(&buf[..n as usize]);
+                }
             } else if pfds[0].revents != 0 {
                 break;
             }
@@ -365,7 +387,13 @@ impl Terminal {
 
         let parser = Arc::new(Mutex::new(vt100::Parser::new(24, 80, scrollback)));
         let screen_generation = Arc::new(AtomicUsize::new(0));
-        let handler = spawn_reader(parser.clone(), screen_generation.clone(), reader_fd, stop_r);
+        let handler = spawn_reader(
+            parser.clone(),
+            screen_generation.clone(),
+            reader_fd,
+            stop_r,
+            None,
+        );
 
         Ok(Self {
             init: Init::Shell,
@@ -373,6 +401,7 @@ impl Terminal {
             stopped: false,
             process_running: false,
             save_logs: false,
+            log_dir: None,
             scrollback,
             health_checks: vec![],
             shutdown_cmd: None,
@@ -403,6 +432,9 @@ impl Terminal {
     /// * `path` - The working directory for the command.
     /// * `cmd` - The shell command to execute.
     /// * `name` - The display name for the terminal tab.
+    /// * `scrollback` - Number of scrollback lines.
+    /// * `log_dir` - If set, raw PTY output is teed into
+    ///   `<log_dir>/<name>.log` while the service runs.
     ///
     /// # Returns
     /// A new [`Terminal`] with the command running inside.
@@ -414,6 +446,7 @@ impl Terminal {
         cmd: &str,
         name: String,
         scrollback: usize,
+        log_dir: Option<std::path::PathBuf>,
     ) -> io::Result<Self> {
         let mut t = Self {
             init: Init::Command {
@@ -424,6 +457,7 @@ impl Terminal {
             stopped: false,
             process_running: true,
             save_logs: false,
+            log_dir,
             scrollback,
             health_checks: vec![],
             shutdown_cmd: None,
@@ -472,6 +506,7 @@ impl Terminal {
             stopped: true,
             process_running: false,
             save_logs: false,
+            log_dir: None,
             scrollback,
             health_checks: vec![],
             shutdown_cmd: None,
@@ -521,6 +556,7 @@ impl Terminal {
             stopped: false,
             process_running: false,
             save_logs: false,
+            log_dir: None,
             scrollback,
             health_checks: vec![],
             shutdown_cmd: None,
@@ -571,6 +607,7 @@ impl Terminal {
             stopped: false,
             process_running: true,
             save_logs: false,
+            log_dir: None,
             scrollback,
             health_checks: vec![],
             shutdown_cmd: None,
@@ -608,6 +645,8 @@ impl Terminal {
     /// * `scrollback` - Number of scrollback lines.
     /// * `fd` - The PTY master fd received via SCM_RIGHTS (now owned by us).
     /// * `pid` - The process group leader of the running service.
+    /// * `log_dir` - If set, raw PTY output is teed into
+    ///   `<log_dir>/<name>.log` while the service runs.
     pub fn adopt(
         path: String,
         cmd: String,
@@ -615,7 +654,11 @@ impl Terminal {
         scrollback: usize,
         fd: RawFd,
         pid: u32,
+        log_dir: Option<std::path::PathBuf>,
     ) -> Self {
+        let tee = log_dir
+            .as_deref()
+            .and_then(|dir| open_log_file(dir, &name).ok());
         let parser = Arc::new(Mutex::new(vt100::Parser::new(24, INITIAL_COLS, scrollback)));
         {
             let mut p = parser.lock().unwrap_or_else(|e| e.into_inner());
@@ -634,6 +677,7 @@ impl Terminal {
                 screen_generation.clone(),
                 reader_fd,
                 stop_r,
+                tee,
             ))
         } else {
             if reader_fd >= 0 {
@@ -660,6 +704,7 @@ impl Terminal {
             stopped: false,
             process_running: true,
             save_logs: false,
+            log_dir,
             scrollback,
             health_checks: vec![],
             shutdown_cmd: None,
@@ -805,6 +850,11 @@ impl Terminal {
 
         let _ = writeln!(writer, "cd {} && {}", path, cmd);
 
+        let tee = self
+            .log_dir
+            .as_deref()
+            .and_then(|dir| open_log_file(dir, &self.name).ok());
+
         self.parser = Arc::new(Mutex::new(vt100::Parser::new(
             24,
             INITIAL_COLS,
@@ -817,6 +867,7 @@ impl Terminal {
             self.screen_generation.clone(),
             reader_fd,
             stop_r,
+            tee,
         ));
         self.stop_w = Some(stop_w);
         self.writer = Some(writer);
@@ -1522,7 +1573,15 @@ mod tests {
         let master_fd = pty.master.as_raw_fd().expect("pty master fd");
         let dup_fd = unsafe { libc::dup(master_fd) };
         assert!(dup_fd >= 0);
-        let mut t = Terminal::adopt(".".into(), "true".into(), "db".into(), 100, dup_fd, 99_999);
+        let mut t = Terminal::adopt(
+            ".".into(),
+            "true".into(),
+            "db".into(),
+            100,
+            dup_fd,
+            99_999,
+            None,
+        );
 
         // A live listener flips an adopted terminal to Healthy immediately.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1602,7 +1661,15 @@ mod tests {
         let dup_fd = unsafe { libc::dup(master_fd) };
         assert!(dup_fd >= 0);
 
-        let mut t = Terminal::adopt(".".into(), "true".into(), "db".into(), 100, dup_fd, 99_999);
+        let mut t = Terminal::adopt(
+            ".".into(),
+            "true".into(),
+            "db".into(),
+            100,
+            dup_fd,
+            99_999,
+            None,
+        );
         assert!(t.reused);
         t.shutdown_cmd = Some(format!("touch {}", marker.display()));
         drop(t);
@@ -1638,7 +1705,8 @@ mod tests {
 
     #[test]
     fn test_extract_handoff_live_process() {
-        let mut t = Terminal::spawn_command(".", "echo hello-fog", "svc".into(), 100).unwrap();
+        let mut t =
+            Terminal::spawn_command(".", "echo hello-fog", "svc".into(), 100, None).unwrap();
         let handoff = t.extract_handoff().expect("live process should hand off");
         assert_eq!(handoff.name, "svc");
         assert!(handoff.pid > 0);
@@ -1708,6 +1776,7 @@ mod tests {
             100,
             fd,
             99_999,
+            None,
         );
         let lines: Vec<String> = t
             .get_all_lines()
@@ -1903,5 +1972,88 @@ mod tests {
             .size();
         assert_eq!(rows, 20, "height must track the visible area");
         assert_eq!(cols, 80, "width must never shrink");
+    }
+
+    #[test]
+    fn test_log_dir_tees_output_to_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "fog-test-log-dir-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut t = Terminal::spawn_command(
+            ".",
+            "echo fog-tee-marker",
+            "svc".into(),
+            100,
+            Some(dir.clone()),
+        )
+        .unwrap();
+
+        // The reader thread tees output asynchronously; poll for the marker.
+        let path = dir.join("svc.log");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut content = String::new();
+        while std::time::Instant::now() < deadline {
+            if let Ok(c) = fs::read_to_string(&path)
+                && c.contains("fog-tee-marker")
+            {
+                content = c;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        t.kill_inner();
+        let _ = fs::remove_dir_all(&dir);
+        assert!(
+            content.contains("fog-tee-marker"),
+            "raw PTY output must be teed into the service log file, got: {:?}",
+            content
+        );
+    }
+
+    #[test]
+    fn test_log_file_name_sanitizes_slashes() {
+        let dir = std::env::temp_dir().join(format!(
+            "fog-test-log-sanitize-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let pty = portable_pty::native_pty_system()
+            .openpty(portable_pty::PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let master_fd = pty.master.as_raw_fd().unwrap();
+        let fd = unsafe { libc::dup(master_fd) };
+        assert!(fd >= 0);
+        let mut t = Terminal::adopt(
+            ".".into(),
+            "true".into(),
+            "a/b".into(),
+            100,
+            fd,
+            99_999,
+            Some(dir.clone()),
+        );
+        assert!(dir.join("a_b.log").exists());
+        assert!(!dir.join("a/b.log").exists());
+        t.kill_inner();
+        // SAFETY: fd is owned by the test.
+        unsafe { libc::close(fd) };
+        let _ = fs::remove_dir_all(&dir);
     }
 }

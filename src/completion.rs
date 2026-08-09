@@ -44,11 +44,11 @@ _fog() {{
         return 0
     fi
 
-    opts="--config --save-logs --branch --completions -h --help -V --version"
+    opts="--config --save-logs --branch --detach --completions -d -h --help -V --version"
     if [[ "$cur" == -* ]]; then
         COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
     else
-        COMPREPLY=( $(compgen -W "ls kill" -- "$cur") )
+        COMPREPLY=( $(compgen -W "ls kill logs" -- "$cur") )
     fi
     return 0
 }}
@@ -69,10 +69,11 @@ _fog() {{
         '(-c --config)'{{-c,--config}}'[Path to config file]:file:_files' \
         '--save-logs[Save service output]' \
         '--branch=[Run in the worktree of a branch]:branch:->branches' \
+        '(-d --detach)'{{-d,--detach}}'[Run in the background without the TUI]' \
         '--completions=[Generate a completion script]:shell:(bash zsh fish)' \
         '(-h --help)'{{-h,--help}}'[Print help]' \
         '(-V --version)'{{-V,--version}}'[Print version]' \
-        '1:command:(ls kill)' \
+        '1:command:(ls kill logs)' \
         '*:pid:'
     case $state in
         branches)
@@ -94,10 +95,11 @@ fn fish_script() -> String {
 complete -c fog -s c -l config -d 'Path to config file' -r
 complete -c fog -l save-logs -d 'Save service output to temp/ on exit'
 complete -c fog -l branch -d 'Run in the worktree of a branch' -a '({branches})'
+complete -c fog -s d -l detach -d 'Run in the background without the TUI'
 complete -c fog -l completions -d 'Generate a completion script' -a 'bash zsh fish'
 complete -c fog -s h -l help -d 'Print help'
 complete -c fog -s V -l version -d 'Print version'
-complete -c fog -f -a 'ls kill'
+complete -c fog -f -a 'ls kill logs'
 "##,
     )
 }
