@@ -72,6 +72,10 @@ pub struct Terminal {
     pub shutdown_cmd: Option<String>,
     /// Names of services this service depends on.
     pub dep_names: Vec<String>,
+    /// Git branch of the worktree this service runs in, if any. Exposed to the
+    /// spawned process as `FOG_BRANCH` so compose files can derive per-branch
+    /// project names, hostnames, and ports.
+    pub branch: Option<String>,
     /// Whether this service is borrowed from another instance (reuse mode):
     /// no process is spawned, health checks verify the resource, and it is
     /// not torn down on exit.
@@ -136,21 +140,112 @@ fn scrollback_len(screen: &mut vt100::Screen) -> usize {
 }
 
 /// Probes a single health-check target. Both `tcp` and `http` kinds use a TCP
-/// connect, so they share this implementation.
+/// connect, so they share this implementation. The `docker` kind checks the
+/// actual container from the configured compose file.
 fn check_target(config: &HealthCheckConfig) -> bool {
+    match config.kind {
+        crate::config::HealthCheckKind::Docker => check_docker_target(config),
+        _ => {
+            let timeout = config.timeout_ms.unwrap_or(2000);
+            let addr = config
+                .target
+                .trim_start_matches("tcp://")
+                .trim_start_matches("http://")
+                .trim_start_matches("https://");
+            addr.to_socket_addrs()
+                .ok()
+                .and_then(|mut addrs| addrs.next())
+                .is_some_and(|sa| {
+                    std::net::TcpStream::connect_timeout(
+                        &sa,
+                        std::time::Duration::from_millis(timeout),
+                    )
+                    .is_ok()
+                })
+        }
+    }
+}
+
+/// Verifies a compose service is running (and, when the compose file defines a
+/// healthcheck for it, reports `healthy`) by inspecting `docker compose ps`.
+///
+/// The compose file is resolved relative to the service's working directory at
+/// build time, so `config.compose_file` is already absolute here.
+fn check_docker_target(config: &HealthCheckConfig) -> bool {
     let timeout = config.timeout_ms.unwrap_or(2000);
-    let addr = config
-        .target
-        .trim_start_matches("tcp://")
-        .trim_start_matches("http://")
-        .trim_start_matches("https://");
-    addr.to_socket_addrs()
-        .ok()
-        .and_then(|mut addrs| addrs.next())
-        .is_some_and(|sa| {
-            std::net::TcpStream::connect_timeout(&sa, std::time::Duration::from_millis(timeout))
-                .is_ok()
-        })
+    let compose_file = config
+        .compose_file
+        .clone()
+        .unwrap_or_else(|| "docker-compose.yml".to_string());
+
+    let mut child = match std::process::Command::new("docker")
+        .args(["compose", "-f", &compose_file, "ps", "--format", "json"])
+        .arg(&config.target)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+
+    let deadline = Instant::now() + Duration::from_millis(timeout);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    break None;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            Err(_) => break None,
+        }
+    };
+
+    let Some(status) = status else {
+        return false;
+    };
+    if !status.success() {
+        return false;
+    }
+
+    let Ok(out) = child.wait_with_output() else {
+        return false;
+    };
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    docker_ps_is_healthy(&stdout)
+}
+
+/// Parses the JSON output of `docker compose ps --format json <service>`.
+/// Passes when the service is running; when a `Health` field is present and
+/// non-empty it must equal `healthy`.
+fn docker_ps_is_healthy(stdout: &str) -> bool {
+    let value: serde_json::Value = match serde_json::from_str(stdout) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+
+    let entries: Vec<&serde_json::Value> = match &value {
+        serde_json::Value::Array(items) => items.iter().collect(),
+        serde_json::Value::Object(_) => vec![&value],
+        _ => return false,
+    };
+
+    entries.into_iter().any(|entry| {
+        let running = entry
+            .get("State")
+            .and_then(|s| s.as_str())
+            .is_some_and(|s| s == "running");
+        if !running {
+            return false;
+        }
+        match entry.get("Health").and_then(|h| h.as_str()) {
+            Some(h) if !h.is_empty() => h == "healthy",
+            _ => true,
+        }
+    })
 }
 
 /// Evaluates health checks, returning `true` only when ALL of them pass.
@@ -406,6 +501,7 @@ impl Terminal {
             health_checks: vec![],
             shutdown_cmd: None,
             dep_names: vec![],
+            branch: None,
             reused: false,
             owned_pid: None,
             raw_fd: None,
@@ -447,6 +543,7 @@ impl Terminal {
         name: String,
         scrollback: usize,
         log_dir: Option<std::path::PathBuf>,
+        branch: Option<String>,
     ) -> io::Result<Self> {
         let mut t = Self {
             init: Init::Command {
@@ -462,6 +559,7 @@ impl Terminal {
             health_checks: vec![],
             shutdown_cmd: None,
             dep_names: vec![],
+            branch,
             reused: false,
             owned_pid: None,
             raw_fd: None,
@@ -511,6 +609,7 @@ impl Terminal {
             health_checks: vec![],
             shutdown_cmd: None,
             dep_names: vec![],
+            branch: None,
             reused: false,
             owned_pid: None,
             raw_fd: None,
@@ -561,6 +660,7 @@ impl Terminal {
             health_checks: vec![],
             shutdown_cmd: None,
             dep_names: deps.to_vec(),
+            branch: None,
             reused: false,
             owned_pid: None,
             raw_fd: None,
@@ -612,6 +712,7 @@ impl Terminal {
             health_checks: vec![],
             shutdown_cmd: None,
             dep_names: vec![],
+            branch: None,
             reused: true,
             owned_pid: None,
             raw_fd: None,
@@ -709,6 +810,7 @@ impl Terminal {
             health_checks: vec![],
             shutdown_cmd: None,
             dep_names: vec![],
+            branch: None,
             reused: true,
             owned_pid: Some(pid),
             raw_fd: Some(fd),
@@ -826,6 +928,9 @@ impl Terminal {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "bash".to_string());
         let mut cmd_builder = CommandBuilder::new(&shell);
         cmd_builder.cwd(path);
+        if let Some(branch) = &self.branch {
+            cmd_builder.env("FOG_BRANCH", branch);
+        }
 
         let child = pair
             .slave
@@ -1440,6 +1545,9 @@ impl Terminal {
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
+        if let Some(branch) = &self.branch {
+            cmd.env("FOG_BRANCH", branch);
+        }
         if let Some(dir) = cwd {
             cmd.current_dir(dir);
         }
@@ -1501,6 +1609,7 @@ mod tests {
         t.health_checks.push(HealthCheckConfig {
             kind: crate::config::HealthCheckKind::Tcp,
             target: "127.0.0.1:1".into(),
+            compose_file: None,
             interval_ms: Some(50),
             timeout_ms: Some(50),
         });
@@ -1526,6 +1635,7 @@ mod tests {
         let closed = vec![HealthCheckConfig {
             kind: crate::config::HealthCheckKind::Tcp,
             target: "127.0.0.1:1".into(),
+            compose_file: None,
             interval_ms: None,
             timeout_ms: Some(100),
         }];
@@ -1537,6 +1647,7 @@ mod tests {
         let open = vec![HealthCheckConfig {
             kind: crate::config::HealthCheckKind::Tcp,
             target: addr.to_string(),
+            compose_file: None,
             interval_ms: None,
             timeout_ms: Some(200),
         }];
@@ -1547,17 +1658,68 @@ mod tests {
             HealthCheckConfig {
                 kind: crate::config::HealthCheckKind::Http,
                 target: format!("http://{}", addr),
+                compose_file: None,
                 interval_ms: None,
                 timeout_ms: Some(200),
             },
             HealthCheckConfig {
                 kind: crate::config::HealthCheckKind::Tcp,
                 target: "127.0.0.1:1".into(),
+                compose_file: None,
                 interval_ms: None,
                 timeout_ms: Some(100),
             },
         ];
         assert!(!health_checks_pass(&mixed));
+    }
+
+    #[test]
+    fn test_docker_ps_is_healthy_running() {
+        let out = r#"[{"Service":"postgres","State":"running","Health":"healthy"}]"#;
+        assert!(docker_ps_is_healthy(out), "running + healthy passes");
+    }
+
+    #[test]
+    fn test_docker_ps_is_healthy_running_without_healthcheck() {
+        let out = r#"[{"Service":"postgres","State":"running","Health":""}]"#;
+        assert!(
+            docker_ps_is_healthy(out),
+            "running with no healthcheck passes (health ignored when empty)"
+        );
+    }
+
+    #[test]
+    fn test_docker_ps_is_healthy_running_absent_health_field() {
+        let out = r#"[{"Service":"postgres","State":"running"}]"#;
+        assert!(
+            docker_ps_is_healthy(out),
+            "running with no Health field passes"
+        );
+    }
+
+    #[test]
+    fn test_docker_ps_is_healthy_unhealthy() {
+        let out = r#"[{"Service":"postgres","State":"running","Health":"unhealthy"}]"#;
+        assert!(
+            !docker_ps_is_healthy(out),
+            "running but unhealthy must fail"
+        );
+    }
+
+    #[test]
+    fn test_docker_ps_is_healthy_exited() {
+        let out = r#"[{"Service":"postgres","State":"exited","Health":""}]"#;
+        assert!(!docker_ps_is_healthy(out), "exited service must fail");
+    }
+
+    #[test]
+    fn test_docker_ps_is_healthy_empty_output() {
+        assert!(!docker_ps_is_healthy(""), "empty output must fail");
+    }
+
+    #[test]
+    fn test_docker_ps_is_healthy_not_json() {
+        assert!(!docker_ps_is_healthy("garbage"), "non-JSON must fail");
     }
 
     #[test]
@@ -1589,6 +1751,7 @@ mod tests {
         t.health_checks.push(HealthCheckConfig {
             kind: crate::config::HealthCheckKind::Tcp,
             target: addr.to_string(),
+            compose_file: None,
             interval_ms: None,
             timeout_ms: Some(200),
         });
@@ -1599,6 +1762,7 @@ mod tests {
         t.health_checks.push(HealthCheckConfig {
             kind: crate::config::HealthCheckKind::Tcp,
             target: "127.0.0.1:1".into(),
+            compose_file: None,
             interval_ms: None,
             timeout_ms: Some(100),
         });
@@ -1706,7 +1870,7 @@ mod tests {
     #[test]
     fn test_extract_handoff_live_process() {
         let mut t =
-            Terminal::spawn_command(".", "echo hello-fog", "svc".into(), 100, None).unwrap();
+            Terminal::spawn_command(".", "echo hello-fog", "svc".into(), 100, None, None).unwrap();
         let handoff = t.extract_handoff().expect("live process should hand off");
         assert_eq!(handoff.name, "svc");
         assert!(handoff.pid > 0);
@@ -1992,6 +2156,7 @@ mod tests {
             "svc".into(),
             100,
             Some(dir.clone()),
+            None,
         )
         .unwrap();
 

@@ -7,12 +7,20 @@ use std::path::Path;
 pub enum HealthCheckKind {
     Tcp,
     Http,
+    /// Verifies a container/service from a docker compose file is running and
+    /// (when the compose defines a healthcheck) reports "healthy".
+    Docker,
 }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct HealthCheckConfig {
     pub kind: HealthCheckKind,
+    /// For `tcp`/`http`: the address to check (e.g. `localhost:8080`).
+    /// For `docker`: the compose service name to check.
     pub target: String,
+    /// For `docker`: compose file to use, relative to the service `path`.
+    /// Defaults to `docker-compose.yml`. Ignored by `tcp`/`http`.
+    pub compose_file: Option<String>,
     pub interval_ms: Option<u64>,
     pub timeout_ms: Option<u64>,
 }

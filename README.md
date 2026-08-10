@@ -23,7 +23,8 @@ fog lets you define named *scripts* — each a set of local services and an opti
 - **Detached runs** — `fog <script> -d` starts a script in the background without the TUI (ideal for CI and AI agents), tees each service's output to `$TMPDIR/fog-<pid>.logs/`, and returns immediately with the PID; `fog logs <pid>` prints the captured output.
 - **Worktree-aware runs** — Starting a script that is already running in another worktree of the same git repo shuts the old instance down first (and only once it has fully exited, so ports don't collide). Services flagged `reuse: true` (e.g. a shared `docker compose` database) are handed over instead of torn down, so switching worktrees doesn't restart your infra. A per-project owner lock makes concurrent starts deterministic. Start directly on a branch with `fog <script> --branch <name>`, or switch worktrees from inside the TUI with `s`.
 - **TLS support** — Terminate TLS connections directly in the proxy using PEM certificates.
-- **Health checks** — Periodic TCP health checks per service with sidebar status indicators.
+- **Health checks** — Periodic health checks per service with sidebar status indicators. `tcp`/`http` probe an address; `docker` verifies the actual container from the service's compose file is running (and, when a compose healthcheck is defined, `healthy`).
+- **Per-branch env** — Services started in a git worktree get `FOG_BRANCH`, so compose files can derive per-branch project names, hostnames, and ports.
 
 ## Installation
 

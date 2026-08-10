@@ -115,7 +115,6 @@ fog identifies the git repository a script runs in via `git rev-parse --git-comm
 If another `fog <script>` is **mid-start** for the same project when you launch one (two worktrees starting at the same moment, or a human racing an agent), fog waits up to 30s for it to finish. If that instance started after you did, fog backs off with an error message rather than fighting over ports — use `fog kill <pid>` to replace it.
 
 Services flagged with `"reuse": true` are treated specially to save time when switching worktrees:
-
 - **Handover**: the old instance's `shutdown_cmd` is skipped for that service (e.g. no `docker compose down`), and if a live process is running its PTY output is piped into the new instance's tab.
 - **Probe-first**: at startup fog probes the resource once via `health_check`. If it is already reachable, the service's `cmd` is **not** run and the tab shows a `♻ reusing already-running ...` notice instead. If it is **not** reachable, fog runs the `cmd` immediately — no misleading "reusing" tab, no delay.
 - **Mid-session fallback**: if a borrowed service later becomes unreachable (e.g. the handed-over process died), fog starts the `cmd` itself after a short grace period (~10s).
@@ -137,18 +136,50 @@ Services flagged with `"reuse": true` are treated specially to save time when sw
 
 > `reuse` works best **with** a `health_check` — fog needs it to verify the resource is already up. If `reuse` is set without one, fog warns and starts the `cmd` normally.
 
+### `FOG_BRANCH` environment variable
+
+When fog runs a script in a git worktree (via `--branch` or an in-place worktree switch), it injects a `FOG_BRANCH` environment variable naming the checked-out branch into every service process. This lets a compose file derive per-branch names — compose project, container hostnames, and host ports — so multiple branches of the same repo never collide:
+
+```json
+{
+  "name": "api",
+  "path": ".",
+  "cmd": "docker compose -p redfox-${FOG_BRANCH:-main} up -d"
+}
+```
+
+When the script is not in a git worktree (or the worktree is detached), `FOG_BRANCH` is unset; use `:-` fallbacks (e.g. `${FOG_BRANCH:-main}`) in compose files to keep them usable outside fog.
+
 ### Health check
 
 Once configured, a background thread periodically checks the service health and updates the sidebar indicator.
 
 | Field | Required | Type | Default | Description |
 |-------|----------|------|---------|-------------|
-| `kind` | **Yes** | `string` | — | `"tcp"` or `"http"` (both use TCP connect) |
-| `target` | **Yes** | `string` | — | Address to check (e.g. `"localhost:8080"`) |
+| `kind` | **Yes** | `string` | — | `"tcp"`, `"http"`, or `"docker"` |
+| `target` | **Yes** | `string` | — | Address to check (e.g. `"localhost:8080"`), or the compose service name for `"docker"` |
+| `compose_file` | No | `string` | `"docker-compose.yml"` | Compose file used by the `"docker"` kind, relative to the service `path` |
 | `interval_ms` | No | `integer` | `5000` | Check interval in milliseconds (min: 100) |
-| `timeout_ms` | No | `integer` | `2000` | Connection timeout in milliseconds (min: 100) |
+| `timeout_ms` | No | `integer` | `2000` | Connection/subprocess timeout in milliseconds (min: 100) |
 
 Both `"tcp"` and `"http"` health checks work the same way: they attempt a TCP connection to the target address. The `target` field can be prefixed with `tcp://`, `http://`, or `https://` — the prefix is stripped before connecting.
+
+The `"docker"` kind checks the actual container from the service's compose file instead of a port: it runs `docker compose -f <compose_file> ps --format json <service>` and passes when the service is **running** and, when the compose file defines a healthcheck for it, reports **healthy**. This is more robust than a TCP probe (e.g. it fails when the container is up on a recycled port but actually unhealthy), and pairs well with `"reuse": true` services.
+
+```json
+{
+  "name": "infra",
+  "path": "./infra",
+  "cmd": "docker compose up -d",
+  "shutdown_cmd": "docker compose down",
+  "reuse": true,
+  "health_check": {
+    "kind": "docker",
+    "target": "postgres",
+    "compose_file": "docker-compose.yml"
+  }
+}
+```
 
 ## Proxy configuration
 

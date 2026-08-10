@@ -110,6 +110,43 @@ pub fn normalize_service_path(path: &Path) -> String {
     format!("/{}", parts.join("/"))
 }
 
+/// Resolves the git branch of the worktree containing `config_dir`, if any.
+/// Returns `None` when the directory is not inside a git worktree (or the
+/// worktree is detached).
+fn resolve_branch(config_dir: &Path) -> Option<String> {
+    crate::worktree::list(config_dir)?
+        .into_iter()
+        .find(|w| w.contains(config_dir))
+        .and_then(|w| w.branch)
+}
+
+/// Resolves the `compose_file` of any `docker`-kind health checks against the
+/// service's working directory, so the background check thread can locate the
+/// compose file without any working-directory context. Non-docker checks (and
+/// docker checks without an explicit `compose_file`) are left unchanged.
+fn resolve_docker_compose_paths(
+    checks: Vec<HealthCheckConfig>,
+    service_path: &Path,
+) -> Vec<HealthCheckConfig> {
+    checks
+        .into_iter()
+        .map(|mut c| {
+            if matches!(c.kind, crate::config::HealthCheckKind::Docker)
+                && let Some(file) = c.compose_file.take()
+            {
+                let absolute = Path::new(&file);
+                let absolute = if absolute.is_absolute() {
+                    absolute.to_path_buf()
+                } else {
+                    service_path.join(&file)
+                };
+                c.compose_file = Some(normalize_service_path(&absolute));
+            }
+            c
+        })
+        .collect()
+}
+
 /// Spawns a terminal that runs `cmd` and wires up its health checks and
 /// shutdown command. Used for services that should be started directly —
 /// non-reused services, and reused services whose resource is currently down.
@@ -123,8 +160,9 @@ fn spawn_checked_terminal(
     log_dir: Option<std::path::PathBuf>,
     health_checks: Vec<HealthCheckConfig>,
     shutdown_cmd: Option<String>,
+    branch: Option<String>,
 ) -> Terminal {
-    match Terminal::spawn_command(path, cmd, name.to_string(), scrollback, log_dir) {
+    match Terminal::spawn_command(path, cmd, name.to_string(), scrollback, log_dir, branch) {
         Ok(mut t) => {
             t.save_logs = save_logs;
             t.health_checks = health_checks;
@@ -160,6 +198,11 @@ pub fn build(
     let entries = script.service.clone().unwrap_or_default();
     let dep_order = resolve_dep_order(&entries)?;
 
+    // The branch of the worktree this script runs in, exposed to services as
+    // `FOG_BRANCH`. Resolved from git so it stays correct across in-place
+    // worktree switches as well as `--branch` startup.
+    let branch = resolve_branch(config_dir);
+
     let n = entries.len();
     let mut items: Vec<Option<Terminal>> = (0..n).map(|_| None).collect();
     let mut pending_services: Vec<PendingService> = Vec::new();
@@ -181,6 +224,10 @@ pub fn build(
             Some(HealthCheckSpec::Multiple(v)) => v.clone(),
             None => vec![],
         };
+        // The `docker` health kind needs an absolute compose path so the
+        // background check thread (which has no working-directory context) can
+        // find the file. Resolve it against the service's directory now.
+        let health_checks = resolve_docker_compose_paths(health_checks, &service_path);
 
         let has_deps = entry.depends_on.is_some();
 
@@ -198,6 +245,7 @@ pub fn build(
                 t.save_logs = save_logs;
                 t.health_checks = health_checks;
                 t.shutdown_cmd = entry.shutdown_cmd.clone();
+                t.branch = branch.clone();
                 // Verify the borrowed resource immediately instead of waiting
                 // for the periodic thread's first check, so the tab and its
                 // dependents learn its true state right away.
@@ -214,6 +262,7 @@ pub fn build(
                     log_dir.clone(),
                     health_checks,
                     entry.shutdown_cmd.clone(),
+                    branch.clone(),
                 );
                 // build() runs while the TUI is already in raw/alternate-screen
                 // mode, so a config warning must render in the tab instead of
@@ -235,6 +284,7 @@ pub fn build(
                 reused.save_logs = save_logs;
                 reused.health_checks = health_checks;
                 reused.shutdown_cmd = entry.shutdown_cmd.clone();
+                reused.branch = branch.clone();
                 // The probe just passed, so seed Healthy to avoid a short
                 // "stopped" flicker before the background thread's first check.
                 reused.set_health_status(crate::terminal::HealthStatus::Healthy);
@@ -255,12 +305,14 @@ pub fn build(
                     log_dir.clone(),
                     health_checks,
                     entry.shutdown_cmd.clone(),
+                    branch.clone(),
                 )
             }
         } else if has_deps {
             let deps = entry.depends_on.clone().unwrap_or_default();
             let mut t = Terminal::spawn_pending(name.clone(), scrollback, &deps);
             t.save_logs = save_logs;
+            t.branch = branch.clone();
             pending_services.push(PendingService {
                 name: name.clone(),
                 cmd: entry.cmd.clone(),
@@ -284,6 +336,7 @@ pub fn build(
                 log_dir.clone(),
                 health_checks,
                 entry.shutdown_cmd.clone(),
+                branch.clone(),
             )
         };
         items[idx] = Some(terminal);
@@ -416,6 +469,7 @@ mod tests {
         HealthCheckSpec::Single(HealthCheckConfig {
             kind: crate::config::HealthCheckKind::Tcp,
             target: target.to_string(),
+            compose_file: None,
             interval_ms: None,
             timeout_ms: Some(100),
         })
@@ -459,5 +513,47 @@ mod tests {
             !rt.items[0].reused,
             "reuse without a health check cannot verify, so it starts"
         );
+    }
+
+    #[test]
+    fn test_resolve_docker_compose_paths_relative() {
+        let checks = vec![HealthCheckConfig {
+            kind: crate::config::HealthCheckKind::Docker,
+            target: "postgres".into(),
+            compose_file: Some("docker-compose.yml".into()),
+            interval_ms: None,
+            timeout_ms: None,
+        }];
+        let resolved = resolve_docker_compose_paths(checks, Path::new("/repo/app/infra"));
+        assert_eq!(
+            resolved[0].compose_file.as_deref(),
+            Some("/repo/app/infra/docker-compose.yml")
+        );
+    }
+
+    #[test]
+    fn test_resolve_docker_compose_paths_defaults_untouched() {
+        let checks = vec![HealthCheckConfig {
+            kind: crate::config::HealthCheckKind::Docker,
+            target: "postgres".into(),
+            compose_file: None,
+            interval_ms: None,
+            timeout_ms: None,
+        }];
+        let resolved = resolve_docker_compose_paths(checks, Path::new("/repo/app/infra"));
+        assert_eq!(resolved[0].compose_file, None);
+    }
+
+    #[test]
+    fn test_resolve_docker_compose_paths_ignores_non_docker() {
+        let checks = vec![HealthCheckConfig {
+            kind: crate::config::HealthCheckKind::Tcp,
+            target: "localhost:5432".into(),
+            compose_file: None,
+            interval_ms: None,
+            timeout_ms: None,
+        }];
+        let resolved = resolve_docker_compose_paths(checks, Path::new("/repo/app/infra"));
+        assert_eq!(resolved[0].compose_file, None);
     }
 }

@@ -37,8 +37,12 @@
                       "type": "object",
                       "required": ["kind", "target"],
                       "properties": {
-                        "kind": { "type": "string", "enum": ["tcp", "http"] },
+                        "kind": { "type": "string", "enum": ["tcp", "http", "docker"] },
                         "target": { "type": "string" },
+                        "compose_file": {
+                          "type": "string",
+                          "description": "Compose file used by the `docker` health kind, relative to the service path (default: docker-compose.yml)"
+                        },
                         "interval_ms": { "type": "integer", "minimum": 100, "default": 5000 },
                         "timeout_ms": { "type": "integer", "minimum": 100, "default": 2000 }
                       }
@@ -49,8 +53,12 @@
                         "type": "object",
                         "required": ["kind", "target"],
                         "properties": {
-                          "kind": { "type": "string", "enum": ["tcp", "http"] },
+                          "kind": { "type": "string", "enum": ["tcp", "http", "docker"] },
                           "target": { "type": "string" },
+                          "compose_file": {
+                            "type": "string",
+                            "description": "Compose file used by the `docker` health kind, relative to the service path (default: docker-compose.yml)"
+                          },
                           "interval_ms": { "type": "integer", "minimum": 100, "default": 5000 },
                           "timeout_ms": { "type": "integer", "minimum": 100, "default": 2000 }
                         }
