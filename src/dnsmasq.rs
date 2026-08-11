@@ -265,6 +265,7 @@ fn command_exists(name: &str) -> bool {
 
 /// Reads a file, treating a missing file as empty content. Used by the
 /// idempotency checks so a first run writes the config instead of erroring.
+#[cfg(target_os = "macos")]
 fn read_optional(path: &Path) -> Result<String, String> {
     match fs::read_to_string(path) {
         Ok(s) => Ok(s),
@@ -273,10 +274,12 @@ fn read_optional(path: &Path) -> Result<String, String> {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn write_file(path: &Path, content: &str) -> Result<(), String> {
     fs::write(path, content).map_err(|e| format!("could not write {}: {}", path.display(), e))
 }
 
+#[cfg(target_os = "macos")]
 fn append_line(path: &Path, line: &str) -> Result<(), String> {
     let mut f = fs::OpenOptions::new()
         .create(true)
@@ -334,10 +337,7 @@ fn sudo_write(path: &Path, content: &str, non_interactive: bool) -> Result<(), S
 fn sudo_read_contains(path: &Path, needle: &str, non_interactive: bool) -> Result<bool, String> {
     // A missing file means "route not configured yet" — the caller will write
     // it, rather than this being treated as an error.
-    let exists = match run_sudo_output(&["test", "-e", &path.to_string_lossy()], non_interactive) {
-        Ok(_) => true,
-        Err(_) => false,
-    };
+    let exists = run_sudo_output(&["test", "-e", &path.to_string_lossy()], non_interactive).is_ok();
     if exists {
         let out = run_sudo_output(&["cat", &path.to_string_lossy()], non_interactive)?;
         return Ok(out.lines().any(|l| l.trim() == needle));
@@ -444,7 +444,6 @@ fn service_dnsmasq(action: &str, non_interactive: bool, messages: &mut Vec<Strin
                 ));
             }
         }
-        return;
     }
 
     #[cfg(target_os = "macos")]
@@ -584,6 +583,7 @@ mod tests {
         assert_eq!(line, "address=/.red-fox/127.0.0.1");
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn test_read_optional_missing_is_empty() {
         let missing = std::env::temp_dir().join(format!(
@@ -597,6 +597,7 @@ mod tests {
         assert_eq!(read_optional(&missing).unwrap(), "");
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn test_read_optional_present_returns_content() {
         let file =
