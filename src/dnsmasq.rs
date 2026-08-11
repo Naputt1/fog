@@ -1,5 +1,6 @@
 use crate::config::DnsmasqConfig;
 use std::fs;
+#[cfg(target_os = "macos")]
 use std::io::Write;
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
