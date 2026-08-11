@@ -106,20 +106,22 @@ The command is executed inside a shell (`$SHELL` or `bash`) using `cd <path> && 
 
 ## Worktree-aware runs & service reuse
 
-fog identifies the git repository a script runs in via `git rev-parse --git-common-dir`, which is shared by every worktree of the same repo. When you start `fog <script>` while another instance of the **same script in the same project** is already running (e.g. from a different worktree), fog:
+fog identifies the git repository a script runs in via `git rev-parse --git-common-dir`, which is shared by every worktree of the same repo. The instance identity is `(project, script, branch)`: two worktrees on **different branches** run concurrently, while starting the **same script on the same branch** while another instance is already running (e.g. a human plus an agent) makes fog:
 
-1. Acquires a per-(project, script) owner lock (`flock`, in the temp directory) so concurrent startups are decided deterministically.
-2. Asks the old instance to shut down — killing its non-reused services and tearing down its proxy — and **waits until it has fully exited** (socket gone) before starting its own services, so there is no port conflict during the switch.
-3. Starts its own services.
+1. Acquire a per-(project, script, branch) owner lock (`flock`, in the temp directory) so concurrent startups are decided deterministically.
+2. Ask the old instance (on the same branch) to shut down — killing its non-reused services and tearing down its proxy — and **wait until it has fully exited** (socket gone) before starting its own services, so there is no port conflict during the switch.
+3. Start its own services.
 
-If another `fog <script>` is **mid-start** for the same project when you launch one (two worktrees starting at the same moment, or a human racing an agent), fog waits up to 30s for it to finish. If that instance started after you did, fog backs off with an error message rather than fighting over ports — use `fog kill <pid>` to replace it.
+Instances on a **different branch** are never reclaimed, so `fog dev --branch feature-x` and `fog dev --branch main` can run side by side.
+
+If another `fog <script>` is **mid-start** for the same project+branch when you launch one (two worktrees starting at the same moment, or a human racing an agent), fog waits up to 30s for it to finish. If that instance started after you did, fog backs off with an error message rather than fighting over ports — use `fog kill <pid>` to replace it.
 
 Services flagged with `"reuse": true` are treated specially to save time when switching worktrees:
 - **Handover**: the old instance's `shutdown_cmd` is skipped for that service (e.g. no `docker compose down`), and if a live process is running its PTY output is piped into the new instance's tab.
 - **Probe-first**: at startup fog probes the resource once via `health_check`. If it is already reachable, the service's `cmd` is **not** run and the tab shows a `♻ reusing already-running ...` notice instead. If it is **not** reachable, fog runs the `cmd` immediately — no misleading "reusing" tab, no delay.
 - **Mid-session fallback**: if a borrowed service later becomes unreachable (e.g. the handed-over process died), fog starts the `cmd` itself after a short grace period (~10s).
 - **Take over**: pressing `R` on a reused tab kills the borrowed process and starts the `cmd` fresh in this worktree.
-- **Persistence**: reused resources survive only as long as a live successor takes them over (handover in a reclaim/worktree switch). When the last fog instance exits — via `q`, Ctrl+C, or `fog kill <pid>` — with no successor, fog tears the service down: it kills the borrowed process (if any) and runs its `shutdown_cmd`.
+- **Persistence**: reused resources survive only as long as a live successor takes them over (handover in a reclaim/worktree switch). With concurrent branches, a shared resource is torn down only when the **last** instance serving that (project, script) exits — a sibling branch's `fog dev` keeps it alive. When the very last instance exits — via `q`, Ctrl+C, or `fog kill <pid>` — with no successor, fog kills the borrowed process (if any) and runs its `shutdown_cmd`.
 
 ```json
 {
@@ -245,6 +247,104 @@ For details on route matching, see the [Proxy docs](/proxy).
 | `max_width` | `integer` | `30` | Maximum sidebar width in columns (8–50) |
 
 The sidebar width is computed dynamically: `max(name_length + 5, min_width)` clamped to `max_width`.
+
+## dnsmasq
+
+Optional wildcard-DNS setup applied automatically on startup. Each domain is
+mapped so any `*.<domain>` hostname resolves to `address` — handy for per-branch
+dev URLs like `main.acme` or `feature-x.acme`.
+
+```json
+{
+  "dnsmasq": {
+    "domains": ["acme"],
+    "address": "127.0.0.1",
+    "port": 53
+  }
+}
+```
+
+| Field | Required | Type | Default | Description |
+|-------|----------|------|---------|-------------|
+| `domains` | **Yes** | `array` | — | Domains to wildcard-map (e.g. `["acme"]` → `*.acme`) |
+| `address` | No | `string` | `"127.0.0.1"` | Address that `*.<domain>` resolves to |
+| `port` | No | `integer` | `53` | Port dnsmasq listens on. On macOS the daemon runs as a root LaunchDaemon so it can bind this (privileged) port |
+
+When `fog <script>` starts and a `dnsmasq` section is configured, fog:
+
+1. Verifies `dnsmasq` is installed; if not, it **warns and continues** (install it with `brew install dnsmasq`).
+2. On **macOS** (Homebrew): writes `address=/.<domain>/<address>` into
+   `$prefix/etc/dnsmasq.d/fog-<domain>.conf`, pins the listener to
+   `address:port` via `fog-port.conf` (`port`, `listen-address`,
+   `bind-interfaces`), ensures `conf-dir` is enabled in `dnsmasq.conf`, creates
+   `/etc/resolver/<domain>` (via `sudo`) with a plain `nameserver <address>`
+   line, then **starts** dnsmasq as a **root LaunchDaemon** via
+   `sudo brew services start dnsmasq` (which registers
+   `/Library/LaunchDaemons/homebrew.mxcl.dnsmasq.plist` and survives reboots).
+   Any stale user-level `homebrew.mxcl.dnsmasq` LaunchAgent is booted out first.
+3. On **Linux**: writes `/etc/dnsmasq.d/fog-<domain>.conf` and `fog-port.conf`
+   (via `sudo`) and starts dnsmasq via `sudo systemctl start dnsmasq`.
+4. On other platforms it warns that the setup is unsupported.
+
+The setup is **idempotent**: existing files are left untouched and dnsmasq is
+only restarted when something changed — and if the daemon is already running it
+is left alone. If dnsmasq is **not** running, fog starts it automatically (the
+"fog starts the DNS too" behavior), and verifies it actually came up on
+`address:port`. Detached (`-d`) runs use `sudo -n` so a password prompt cannot
+hang them; if a privileged step is needed but cannot run headless, fog prints a
+warning telling you to run `fog <script>` interactively once. Any failure is a
+warning, never a hard error.
+
+> **Why root?** macOS `26`+ restricts binding to privileged ports (<1024) to
+> root, and macOS renders (*but ignores*) the `port` directive in
+> `/etc/resolver/<domain>` files. dnsmasq therefore must listen on the standard
+> :53 as a **root LaunchDaemon** — running `brew services` under `sudo`
+> installs exactly that. fog only ever binds it to `127.0.0.1`
+> (`bind-interfaces`), so the daemon is not exposed to the LAN.
+
+## router
+
+Optional **central reverse proxy** (Traefik) setup applied automatically on
+startup, sharing dnsmasq's philosophy: the router is a host-global resource that
+fog starts **once** and every project/branch reuses, so no app runs its own
+speculative instance (which would collide on the published `:80` port).
+
+Apps opt into routing by attaching a service to the shared network and
+declaring standard Traefik container labels:
+
+```json
+{
+  "router": {
+    "image": "traefik:v3",
+    "hostname": "router.acme",
+    "dashboard_port": 8080,
+    "shared_network": "fog-router"
+  }
+}
+```
+
+| Field | Required | Type | Default | Description |
+|-------|----------|------|---------|-------------|
+| `image` | No | `string` | `"traefik:v3"` | Traefik image to run |
+| `hostname` | No | `string` | — | Traefik dashboard hostname (e.g. `router.acme`); must be covered by `dnsmasq.domains` |
+| `dashboard_port` | No | `integer` | `8080` | Host port for the Traefik dashboard |
+| `shared_network` | No | `string` | `"fog-router"` | External Docker network shared with app services |
+
+When `fog <script>` starts and a `router` section is configured, fog:
+
+1. Creates the shared Docker network (`shared_network`) if it does not exist.
+2. Starts a single `fog-router-<image>` Traefik container on it, publishing `:80`
+   (web) and `dashboard_port:8080` (dashboard), with the Docker provider enabled
+   (`exposedByDefault=false`) so only label-opted-in services are routed.
+3. Assumes the network is already attached by app services — an app that does
+   not declare the network is simply not routed.
+
+The setup is **idempotent**: an existing/healthy router is left running and the
+network is created only once. Traefik auto-discovers per-branch services from
+their labels, so branches appearing and disappearing are routed and untouted
+automatically. The router is **never** torn down when a project or branch exits
+(it is a host-global resource, like dnsmasq); stopping it is a manual
+`docker rm -f fog-router-traefik`. Any failure is a warning, never a hard error.
 
 ## Theme
 

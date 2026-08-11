@@ -169,15 +169,19 @@ fn reuse_names(script: &fog::config::ScriptConfig) -> Vec<String> {
 /// project, so a new instance can take their place. Returns any live services
 /// handed over, keyed by service name, together with their PTY master fd.
 ///
-/// The caller is expected to hold the per-(project, script) owner lock.
+/// Only instances serving the same `branch` are reclaimed; instances on a
+/// different branch (concurrent multi-branch runs) are left untouched.
+///
+/// The caller is expected to hold the per-(project, script, branch) owner lock.
 fn reclaim_existing(
     project: &str,
     script: &str,
+    branch: Option<&str>,
     reuse: &[String],
     timeout: Duration,
 ) -> HashMap<String, ipc::HandoffItem> {
     let mut adopted: HashMap<String, ipc::HandoffItem> = HashMap::new();
-    let existing = ipc::find_instances_for(project, script);
+    let existing = ipc::find_instances_for(project, script, branch);
     for (pid, path) in &existing {
         eprintln!(
             "replacing existing fog instance (pid {pid}, script {script}, project {project})"
@@ -238,6 +242,7 @@ fn wait_for_socket_gone(path: &std::path::Path) {
 fn reconcile_instance(
     project: &str,
     script: &str,
+    branch: Option<&str>,
     reuse: &[String],
 ) -> (
     HashMap<String, ipc::HandoffItem>,
@@ -245,7 +250,7 @@ fn reconcile_instance(
 ) {
     let attempt_started = fog::lock::now_ms();
 
-    let lock = match fog::lock::OwnerLock::try_acquire(project, script) {
+    let lock = match fog::lock::OwnerLock::try_acquire(project, script, branch) {
         Ok(fog::lock::AcquireResult::Locked(lock)) => lock,
         Ok(fog::lock::AcquireResult::HeldBy(holder)) => {
             let pid = holder
@@ -255,7 +260,12 @@ fn reconcile_instance(
             eprintln!(
                 "another fog instance{pid} is starting script '{script}' for this project; waiting up to 30s"
             );
-            match fog::lock::OwnerLock::acquire_with_timeout(project, script, LOCK_WAIT_TIMEOUT) {
+            match fog::lock::OwnerLock::acquire_with_timeout(
+                project,
+                script,
+                branch,
+                LOCK_WAIT_TIMEOUT,
+            ) {
                 Ok(Some(lock)) => lock,
                 Ok(None) => {
                     eprintln!(
@@ -269,7 +279,7 @@ fn reconcile_instance(
                         "  warning: could not lock project: {e}, proceeding without coordination"
                     );
                     return (
-                        reclaim_existing(project, script, reuse, RECLAIM_WAIT_TIMEOUT),
+                        reclaim_existing(project, script, branch, reuse, RECLAIM_WAIT_TIMEOUT),
                         None,
                     );
                 }
@@ -278,7 +288,7 @@ fn reconcile_instance(
         Err(e) => {
             eprintln!("  warning: could not lock project: {e}, proceeding without coordination");
             return (
-                reclaim_existing(project, script, reuse, RECLAIM_WAIT_TIMEOUT),
+                reclaim_existing(project, script, branch, reuse, RECLAIM_WAIT_TIMEOUT),
                 None,
             );
         }
@@ -287,7 +297,7 @@ fn reconcile_instance(
     // We now hold the owner lock. An instance that started after we began our
     // startup is a concurrent starter that beat us and is now serving: back
     // off rather than kill a freshly-started instance.
-    let instances = ipc::find_instances_with_status(project, script);
+    let instances = ipc::find_instances_with_status(project, script, branch);
     if let Some((pid, _, _)) = instances
         .iter()
         .find(|(_, _, s)| s.started_at > attempt_started)
@@ -299,7 +309,7 @@ fn reconcile_instance(
         std::process::exit(1);
     }
 
-    let adopted = reclaim_existing(project, script, reuse, RECLAIM_WAIT_TIMEOUT);
+    let adopted = reclaim_existing(project, script, branch, reuse, RECLAIM_WAIT_TIMEOUT);
     (adopted, Some(lock))
 }
 
@@ -311,7 +321,7 @@ fn cmd_ls() -> io::Result<()> {
         return Ok(());
     }
 
-    let mut rows: Vec<(u32, String, String, String, String)> = Vec::new();
+    let mut rows: Vec<(u32, String, String, String, String, String)> = Vec::new();
     for (pid, path) in &instances {
         match ipc::query_status(path) {
             Ok(status) => {
@@ -342,7 +352,8 @@ fn cmd_ls() -> io::Result<()> {
                             .unwrap_or(p)
                     })
                     .unwrap_or_else(|| "-".to_string());
-                rows.push((*pid, status.script, project, proxy, services));
+                let branch = status.branch.unwrap_or_else(|| "-".to_string());
+                rows.push((*pid, status.script, project, branch, proxy, services));
             }
             Err(_) => {
                 // Only treat the socket as stale if the owning process is
@@ -367,16 +378,17 @@ fn cmd_ls() -> io::Result<()> {
         .unwrap_or(3);
     let w_script = rows.iter().map(|r| r.1.len()).max().unwrap_or(6);
     let w_project = rows.iter().map(|r| r.2.len()).max().unwrap_or(7);
-    let w_proxy = rows.iter().map(|r| r.3.len()).max().unwrap_or(5);
+    let w_branch = rows.iter().map(|r| r.3.len()).max().unwrap_or(6);
+    let w_proxy = rows.iter().map(|r| r.4.len()).max().unwrap_or(5);
 
     println!(
-        "{:<w_pid$}  {:<w_script$}  {:<w_project$}  {:<w_proxy$}  services",
-        "pid", "script", "project", "proxy"
+        "{:<w_pid$}  {:<w_script$}  {:<w_project$}  {:<w_branch$}  {:<w_proxy$}  services",
+        "pid", "script", "project", "branch", "proxy"
     );
-    for (pid, script, project, proxy, services) in rows {
+    for (pid, script, project, branch, proxy, services) in rows {
         println!(
-            "{:<w_pid$}  {:<w_script$}  {:<w_project$}  {:<w_proxy$}  {}",
-            pid, script, project, proxy, services
+            "{:<w_pid$}  {:<w_script$}  {:<w_project$}  {:<w_branch$}  {:<w_proxy$}  {}",
+            pid, script, project, branch, proxy, services
         );
     }
     Ok(())
@@ -574,6 +586,24 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
         None => list_scripts_and_exit(&config, &format!("error: unknown script '{}'", name)),
     };
 
+    // Apply the configured dnsmasq wildcard-DNS routes before the TUI enters
+    // raw mode, so sudo can prompt on a normal terminal. Best-effort: failures
+    // only warn and never block the run.
+    if let Some(dnsmasq) = config.dnsmasq.as_ref() {
+        for msg in fog::dnsmasq::ensure(dnsmasq, detached) {
+            eprintln!("{msg}");
+        }
+    }
+
+    // Bring up the central reverse-proxy router (Traefik), mirroring the
+    // dnsmasq pattern: a host-global resource applied once that every project
+    // and branch shares, so no app runs its own conflicting instance.
+    if let Some(router) = config.router.as_ref() {
+        for msg in fog::router::ensure(router) {
+            eprintln!("{msg}");
+        }
+    }
+
     let config_path = config_path
         .canonicalize()
         .unwrap_or_else(|_| config_path.clone());
@@ -584,11 +614,18 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
 
     let project =
         fog::project::detect(&config_dir).or_else(|| fog::project::fallback_identity(&config_dir));
+    // Branch for instance identity: an explicit `--branch` wins; otherwise it
+    // is resolved from the worktree containing the config (so a plain
+    // `fog dev` in a worktree gets that worktree's branch).
+    let branch = cli
+        .branch
+        .clone()
+        .or_else(|| fog::runtime::resolve_branch(&config_dir));
     let mut adopted: HashMap<String, ipc::HandoffItem> = HashMap::new();
     let mut owner_lock: Option<fog::lock::OwnerLock> = None;
     if let Some(ref project) = project {
         let reuse = reuse_names(script);
-        (adopted, owner_lock) = reconcile_instance(project, name, &reuse);
+        (adopted, owner_lock) = reconcile_instance(project, name, branch.as_deref(), &reuse);
     }
 
     let sigint = Arc::new(AtomicBool::new(false));
@@ -601,7 +638,11 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
         eprintln!("warning: could not set Ctrl+C handler");
     }
 
-    let ipc_state = Arc::new(ipc::IpcState::new(name.to_string(), project));
+    let ipc_state = Arc::new(ipc::IpcState::new(
+        name.to_string(),
+        project.clone(),
+        branch.clone(),
+    ));
     ipc::spawn_server(ipc_state.clone())?;
 
     if !detached {
@@ -627,7 +668,9 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
 
     let runtime = fog::runtime::build(
         script,
+        name,
         &config_dir,
+        project.clone(),
         cli.save_logs,
         scrollback,
         log_dir.clone(),

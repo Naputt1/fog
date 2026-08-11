@@ -113,7 +113,7 @@ pub fn normalize_service_path(path: &Path) -> String {
 /// Resolves the git branch of the worktree containing `config_dir`, if any.
 /// Returns `None` when the directory is not inside a git worktree (or the
 /// worktree is detached).
-fn resolve_branch(config_dir: &Path) -> Option<String> {
+pub fn resolve_branch(config_dir: &Path) -> Option<String> {
     crate::worktree::list(config_dir)?
         .into_iter()
         .find(|w| w.contains(config_dir))
@@ -161,12 +161,16 @@ fn spawn_checked_terminal(
     health_checks: Vec<HealthCheckConfig>,
     shutdown_cmd: Option<String>,
     branch: Option<String>,
+    project: Option<String>,
+    script: &str,
 ) -> Terminal {
     match Terminal::spawn_command(path, cmd, name.to_string(), scrollback, log_dir, branch) {
         Ok(mut t) => {
             t.save_logs = save_logs;
             t.health_checks = health_checks;
             t.shutdown_cmd = shutdown_cmd;
+            t.project = project;
+            t.script = script.to_string();
             t.start_health_checks();
             t
         }
@@ -187,9 +191,12 @@ fn spawn_checked_terminal(
 /// # Errors
 /// Returns an error string when the script's dependency graph is invalid (a
 /// cycle or a dependency on an unknown service).
+#[allow(clippy::too_many_arguments)]
 pub fn build(
     script: &ScriptConfig,
+    script_name: &str,
     config_dir: &Path,
+    project: Option<String>,
     save_logs: bool,
     scrollback: usize,
     log_dir: Option<std::path::PathBuf>,
@@ -231,6 +238,11 @@ pub fn build(
 
         let has_deps = entry.depends_on.is_some();
 
+        // Identity metadata carried on every terminal so reuse teardown can ask
+        // "are any other instances still serving this (project, script)?".
+        let project = project.clone();
+        let script_name = script_name.to_string();
+
         let terminal = if entry.reuse {
             if let Some(handoff) = adopted.remove(&name) {
                 let mut t = Terminal::adopt(
@@ -246,6 +258,8 @@ pub fn build(
                 t.health_checks = health_checks;
                 t.shutdown_cmd = entry.shutdown_cmd.clone();
                 t.branch = branch.clone();
+                t.project = project;
+                t.script = script_name;
                 // Verify the borrowed resource immediately instead of waiting
                 // for the periodic thread's first check, so the tab and its
                 // dependents learn its true state right away.
@@ -263,6 +277,8 @@ pub fn build(
                     health_checks,
                     entry.shutdown_cmd.clone(),
                     branch.clone(),
+                    project,
+                    &script_name,
                 );
                 // build() runs while the TUI is already in raw/alternate-screen
                 // mode, so a config warning must render in the tab instead of
@@ -285,6 +301,8 @@ pub fn build(
                 reused.health_checks = health_checks;
                 reused.shutdown_cmd = entry.shutdown_cmd.clone();
                 reused.branch = branch.clone();
+                reused.project = project;
+                reused.script = script_name;
                 // The probe just passed, so seed Healthy to avoid a short
                 // "stopped" flicker before the background thread's first check.
                 reused.set_health_status(crate::terminal::HealthStatus::Healthy);
@@ -306,6 +324,8 @@ pub fn build(
                     health_checks,
                     entry.shutdown_cmd.clone(),
                     branch.clone(),
+                    project,
+                    &script_name,
                 )
             }
         } else if has_deps {
@@ -313,6 +333,8 @@ pub fn build(
             let mut t = Terminal::spawn_pending(name.clone(), scrollback, &deps);
             t.save_logs = save_logs;
             t.branch = branch.clone();
+            t.project = project;
+            t.script = script_name;
             pending_services.push(PendingService {
                 name: name.clone(),
                 cmd: entry.cmd.clone(),
@@ -337,6 +359,8 @@ pub fn build(
                 health_checks,
                 entry.shutdown_cmd.clone(),
                 branch.clone(),
+                project,
+                &script_name,
             )
         };
         items[idx] = Some(terminal);
@@ -479,7 +503,17 @@ mod tests {
     fn test_build_reuse_down_resource_starts_immediately() {
         let script = script_with(vec![reuse_entry("infra", Some(tcp_health("127.0.0.1:1")))]);
         let mut adopted = HashMap::new();
-        let rt = build(&script, Path::new("."), false, 100, None, &mut adopted).unwrap();
+        let rt = build(
+            &script,
+            "dev",
+            Path::new("."),
+            None,
+            false,
+            100,
+            None,
+            &mut adopted,
+        )
+        .unwrap();
         assert!(
             !rt.items[0].reused,
             "a down reused resource must be started, not borrowed"
@@ -495,7 +529,17 @@ mod tests {
             Some(tcp_health(&addr.to_string())),
         )]);
         let mut adopted = HashMap::new();
-        let rt = build(&script, Path::new("."), false, 100, None, &mut adopted).unwrap();
+        let rt = build(
+            &script,
+            "dev",
+            Path::new("."),
+            None,
+            false,
+            100,
+            None,
+            &mut adopted,
+        )
+        .unwrap();
         assert!(rt.items[0].reused, "an up reused resource must be borrowed");
         assert_eq!(
             rt.items[0].get_health_status(),
@@ -508,7 +552,17 @@ mod tests {
     fn test_build_reuse_without_health_check_starts() {
         let script = script_with(vec![reuse_entry("infra", None)]);
         let mut adopted = HashMap::new();
-        let rt = build(&script, Path::new("."), false, 100, None, &mut adopted).unwrap();
+        let rt = build(
+            &script,
+            "dev",
+            Path::new("."),
+            None,
+            false,
+            100,
+            None,
+            &mut adopted,
+        )
+        .unwrap();
         assert!(
             !rt.items[0].reused,
             "reuse without a health check cannot verify, so it starts"

@@ -836,7 +836,9 @@ impl App {
 
         let built = match runtime::build(
             script,
+            &script_name,
             &config_dir,
+            self.ipc_state.project.clone(),
             self.save_logs,
             self.scrollback,
             None,
@@ -1377,7 +1379,7 @@ mod tests {
             save_logs: false,
             config_rx: rx,
             config_watcher_stop: Arc::new(AtomicBool::new(false)),
-            ipc_state: Arc::new(IpcState::new("test".to_string(), None)),
+            ipc_state: Arc::new(IpcState::new("test".to_string(), None, None)),
             proxy_tab_index,
             sidebar_min: 10,
             sidebar_max: 30,

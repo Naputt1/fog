@@ -109,6 +109,38 @@ pub struct SidebarConfig {
     pub max_width: Option<u16>,
 }
 
+fn default_dnsmasq_address() -> String {
+    "127.0.0.1".to_string()
+}
+
+fn default_dnsmasq_port() -> u16 {
+    53
+}
+
+/// Wildcard DNS routing set up through dnsmasq automatically on startup.
+///
+/// Each domain in `domains` is mapped so that `*.<domain>` resolves to
+/// `address` (e.g. `["red-fox"]` with the default address makes
+/// `main.red-fox`, `feature-x.red-fox`, ... resolve to `127.0.0.1`).
+///
+/// The port defaults to 53 (the DNS standard). On macOS the daemon is run as
+/// a root LaunchDaemon (via `sudo brew services start`) so it can bind the
+/// privileged port; the per-zone `/etc/resolver/<domain>` file then only
+/// needs a plain `nameserver` line.
+#[derive(Debug, Deserialize, Clone)]
+pub struct DnsmasqConfig {
+    /// Domains to wildcard-map to `address`.
+    #[serde(default)]
+    pub domains: Vec<String>,
+    /// Address that `*.<domain>` resolves to (default: 127.0.0.1).
+    #[serde(default = "default_dnsmasq_address")]
+    pub address: String,
+    /// Port dnsmasq listens on (default: 53). Run as root on macOS so the
+    /// privileged port can be bound.
+    #[serde(default = "default_dnsmasq_port")]
+    pub port: u16,
+}
+
 /// A named script: a full set of services and optional proxy configuration.
 #[derive(Debug, Deserialize, Clone)]
 pub struct ScriptConfig {
@@ -116,6 +148,38 @@ pub struct ScriptConfig {
     pub service: Option<Vec<ConfigEntry>>,
     /// Optional reverse proxy configuration.
     pub proxy: Option<ProxyConfig>,
+}
+
+fn default_router_image() -> String {
+    "traefik:v3".to_string()
+}
+
+fn default_router_network() -> String {
+    "fog-router".to_string()
+}
+
+/// Host-global reverse proxy (Traefik) setup applied automatically on startup.
+///
+/// This mirrors [`DnsmasqConfig`]: the router is a shared, host-level resource
+/// that must exist exactly once across every project and branch, so fog manages
+/// its lifecycle directly rather than letting each app's compose file run its
+/// own instance (which would collide on the published port).
+///
+/// Apps opt into routing by placing Traefik container labels on their services
+/// and attaching them to the shared network named by `shared_network`.
+#[derive(Debug, Deserialize, Clone)]
+pub struct RouterConfig {
+    /// Traefik image to run (default: `traefik:v3`).
+    #[serde(default = "default_router_image")]
+    pub image: String,
+    /// Hostname for the Traefik dashboard (e.g. `router.red-fox`). The
+    /// wildcard-DNS mapping must already cover it (via `dnsmasq.domains`).
+    pub hostname: Option<String>,
+    /// Host port on which the Traefik dashboard listens (default: 8080).
+    pub dashboard_port: Option<u16>,
+    /// Name of the external Docker network shared with app services.
+    #[serde(default = "default_router_network")]
+    pub shared_network: String,
 }
 
 /// Top-level application configuration loaded from `fog.json`.
@@ -130,6 +194,10 @@ pub struct Config {
     pub sidebar: Option<SidebarConfig>,
     /// Optional color theme overrides.
     pub theme: Option<ThemeConfig>,
+    /// Optional dnsmasq wildcard-DNS setup applied automatically on startup.
+    pub dnsmasq: Option<DnsmasqConfig>,
+    /// Optional central reverse-proxy (Traefik) setup applied on startup.
+    pub router: Option<RouterConfig>,
 }
 
 /// Loads and parses a config file, returning a human-readable error on failure.
@@ -169,6 +237,40 @@ mod tests {
         std::fs::write(&path, r#"{"scripts":{"dev":{}}}"#).unwrap();
         let config = load(&path).unwrap();
         assert!(config.scripts.contains_key("dev"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_load_dnsmasq_config() {
+        let path =
+            std::env::temp_dir().join(format!("fog-config-dnsmasq-{}.json", std::process::id()));
+        std::fs::write(
+            &path,
+            r#"{"scripts":{},"dnsmasq":{"domains":["red-fox","dev"],"address":"127.0.0.1"}}"#,
+        )
+        .unwrap();
+        let config = load(&path).unwrap();
+        let d = config.dnsmasq.expect("dnsmasq section present");
+        assert_eq!(d.domains, vec!["red-fox", "dev"]);
+        assert_eq!(d.address, "127.0.0.1");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_load_dnsmasq_config_defaults() {
+        let path = std::env::temp_dir().join(format!(
+            "fog-config-dnsmasq-defaults-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(&path, r#"{"scripts":{},"dnsmasq":{"domains":["red-fox"]}}"#).unwrap();
+        let config = load(&path).unwrap();
+        let d = config.dnsmasq.expect("dnsmasq section present");
+        assert_eq!(d.domains, vec!["red-fox"]);
+        assert_eq!(d.address, "127.0.0.1", "address defaults to loopback");
+        assert_eq!(
+            d.port, 53,
+            "port defaults to 53 (DNS standard; root daemon on macOS)"
+        );
         let _ = std::fs::remove_file(&path);
     }
 }

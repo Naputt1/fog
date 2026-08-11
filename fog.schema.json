@@ -106,6 +106,57 @@
       "minimum": 100,
       "default": 2000
     },
+    "dnsmasq": {
+      "type": "object",
+      "description": "Wildcard DNS routes set up through dnsmasq automatically on startup. Each domain is mapped so any *.<domain> hostname resolves to the configured address.",
+      "properties": {
+        "domains": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Domains to wildcard-map, e.g. ['red-fox'] makes main.red-fox resolve to 127.0.0.1"
+        },
+        "address": {
+          "type": "string",
+          "default": "127.0.0.1",
+          "description": "Address that *.<domain> resolves to"
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "default": 53,
+          "description": "Port dnsmasq listens on (default: 53). On macOS the daemon runs as a root LaunchDaemon so it can bind this privileged port; the /etc/resolver zone file uses a plain nameserver line."
+        }
+      },
+      "required": ["domains"]
+    },
+    "router": {
+      "type": "object",
+      "description": "Central reverse proxy (Traefik) set up automatically on startup. A single host-level instance shared across every project and branch, so apps do not run their own (which would collide on the published port). Apps opt in by attaching to the shared network and declaring Traefik labels.",
+      "properties": {
+        "image": {
+          "type": "string",
+          "default": "traefik:v3",
+          "description": "Traefik image to run"
+        },
+        "hostname": {
+          "type": "string",
+          "description": "Hostname for the Traefik dashboard (e.g. router.red-fox). Must be covered by dnsmasq.domains."
+        },
+        "dashboard_port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "default": 8080,
+          "description": "Host port for the Traefik dashboard"
+        },
+        "shared_network": {
+          "type": "string",
+          "default": "fog-router",
+          "description": "Name of the external Docker network shared with app services"
+        }
+      }
+    },
     "sidebar": {
       "type": "object",
       "properties": {

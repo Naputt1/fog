@@ -76,6 +76,11 @@ pub struct Terminal {
     /// spawned process as `FOG_BRANCH` so compose files can derive per-branch
     /// project names, hostnames, and ports.
     pub branch: Option<String>,
+    /// Project identity (git-common-dir) of the instance this terminal serves,
+    /// used to decide whether shared reuse infrastructure may be torn down.
+    pub project: Option<String>,
+    /// Name of the script this terminal is part of.
+    pub script: String,
     /// Whether this service is borrowed from another instance (reuse mode):
     /// no process is spawned, health checks verify the resource, and it is
     /// not torn down on exit.
@@ -502,6 +507,8 @@ impl Terminal {
             shutdown_cmd: None,
             dep_names: vec![],
             branch: None,
+            project: None,
+            script: String::new(),
             reused: false,
             owned_pid: None,
             raw_fd: None,
@@ -560,6 +567,8 @@ impl Terminal {
             shutdown_cmd: None,
             dep_names: vec![],
             branch,
+            project: None,
+            script: String::new(),
             reused: false,
             owned_pid: None,
             raw_fd: None,
@@ -610,6 +619,8 @@ impl Terminal {
             shutdown_cmd: None,
             dep_names: vec![],
             branch: None,
+            project: None,
+            script: String::new(),
             reused: false,
             owned_pid: None,
             raw_fd: None,
@@ -661,6 +672,8 @@ impl Terminal {
             shutdown_cmd: None,
             dep_names: deps.to_vec(),
             branch: None,
+            project: None,
+            script: String::new(),
             reused: false,
             owned_pid: None,
             raw_fd: None,
@@ -713,6 +726,8 @@ impl Terminal {
             shutdown_cmd: None,
             dep_names: vec![],
             branch: None,
+            project: None,
+            script: String::new(),
             reused: true,
             owned_pid: None,
             raw_fd: None,
@@ -811,6 +826,8 @@ impl Terminal {
             shutdown_cmd: None,
             dep_names: vec![],
             branch: None,
+            project: None,
+            script: String::new(),
             reused: true,
             owned_pid: Some(pid),
             raw_fd: Some(fd),
@@ -1580,7 +1597,20 @@ impl Drop for Terminal {
         // live successor (handover in a reclaim/worktree switch). A borrowed or
         // assumed-up reuse service with no successor must still be torn down,
         // so the gate is `handed_off`, not `reused`.
-        if !self.handed_off {
+        //
+        // Multi-branch: a shared (reuse) service is only torn down when this is
+        // the last instance serving the same (project, script) — another branch
+        // may still be using it, so its `shutdown_cmd` (e.g. `docker compose
+        // down`) must not run while a sibling branch is alive.
+        let last_instance = !self.reused
+            || self.project.is_none()
+            || self.script.is_empty()
+            || crate::ipc::find_instances_any_branch(
+                self.project.as_deref().unwrap_or_default(),
+                &self.script,
+            )
+            .is_empty();
+        if !self.handed_off && last_instance {
             self.run_shutdown_cmd();
         }
     }

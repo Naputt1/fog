@@ -59,6 +59,8 @@ pub struct IpcState {
     pub script: String,
     /// Identity of the git project (worktree family) this instance belongs to.
     pub project: Option<String>,
+    /// Branch this instance serves, if any.
+    pub branch: Option<String>,
     /// Epoch milliseconds when this instance started.
     pub started_at: u64,
     /// Set to `true` when a kill request is received.
@@ -81,12 +83,13 @@ pub struct IpcState {
 
 impl IpcState {
     /// Creates a new empty [`IpcState`] for the given script name.
-    pub fn new(script: String, project: Option<String>) -> Self {
+    pub fn new(script: String, project: Option<String>, branch: Option<String>) -> Self {
         Self {
             services: Arc::new(Mutex::new(Vec::new())),
             proxy: Arc::new(Mutex::new(None)),
             script,
             project,
+            branch,
             started_at: crate::lock::now_ms(),
             kill_flag: Arc::new(AtomicBool::new(false)),
             reuse_skip: Arc::new(Mutex::new(Vec::new())),
@@ -113,6 +116,9 @@ pub struct StatusResponse {
     /// Git project identity of the instance, if it is inside a repository.
     #[serde(default)]
     pub project: Option<String>,
+    /// Branch the instance serves, if any.
+    #[serde(default)]
+    pub branch: Option<String>,
     /// Epoch milliseconds when the instance started (0 for older versions).
     #[serde(default)]
     pub started_at: u64,
@@ -232,6 +238,7 @@ fn handle_connection(mut stream: UnixStream, state: Arc<IpcState>) {
                 services,
                 proxy,
                 project: state.project.clone(),
+                branch: state.branch.clone(),
                 started_at: state.started_at,
             })
             .unwrap_or_default();
@@ -568,19 +575,67 @@ pub fn reclaim(path: &Path, reuse: &[String]) -> ReclaimOutcome {
 }
 
 /// Finds all running instances belonging to the given project that run the
-/// given script, excluding this process.
+/// given script on the given branch, excluding this process.
+///
+/// When `branch` is `Some(b)`, only instances serving exactly that branch
+/// match. When it is `None`, only branch-less instances match (legacy / non-git
+/// runs), so branch-aware instances never reclaim each other.
 ///
 /// Returns a sorted list of `(pid, socket_path)` pairs.
-pub fn find_instances_for(project: &str, script: &str) -> Vec<(u32, PathBuf)> {
-    find_instances_with_status(project, script)
+pub fn find_instances_for(
+    project: &str,
+    script: &str,
+    branch: Option<&str>,
+) -> Vec<(u32, PathBuf)> {
+    find_instances_with_status(project, script, branch)
         .into_iter()
         .map(|(pid, path, _)| (pid, path))
         .collect()
 }
 
 /// Like [`find_instances_for`], but also returns each instance's status
-/// snapshot (including its `started_at`).
+/// snapshot (including its `started_at` and branch).
 pub fn find_instances_with_status(
+    project: &str,
+    script: &str,
+    branch: Option<&str>,
+) -> Vec<(u32, PathBuf, StatusResponse)> {
+    let self_pid = std::process::id();
+    let mut out = Vec::new();
+    let Ok(instances) = find_instances() else {
+        return out;
+    };
+    for (pid, path) in instances {
+        if pid == self_pid {
+            continue;
+        }
+        match query_status(&path) {
+            Ok(status) => {
+                if status.project.as_deref() != Some(project) || status.script != script {
+                    continue;
+                }
+                let same_branch = match branch {
+                    Some(b) => status.branch.as_deref() == Some(b),
+                    None => status.branch.is_none(),
+                };
+                if same_branch {
+                    out.push((pid, path, status));
+                }
+            }
+            Err(_) => {
+                let _ = fs::remove_file(&path);
+            }
+        }
+    }
+    out.sort_by_key(|(pid, _, _)| *pid);
+    out
+}
+
+/// Finds every other running instance serving `script` in `project`, on ANY
+/// branch. Used to decide whether shared (reuse) infrastructure may be torn
+/// down: as long as another branch still runs the same script, the last one
+/// must keep the shared resource alive.
+pub fn find_instances_any_branch(
     project: &str,
     script: &str,
 ) -> Vec<(u32, PathBuf, StatusResponse)> {
@@ -608,9 +663,14 @@ pub fn find_instances_with_status(
     out
 }
 
-/// Returns the lowest-PID instance serving `script` in `project`, if any.
-pub fn find_serving(project: &str, script: &str) -> Option<(u32, PathBuf, StatusResponse)> {
-    find_instances_with_status(project, script)
+/// Returns the lowest-PID instance serving `script` in `project` on `branch`,
+/// if any.
+pub fn find_serving(
+    project: &str,
+    script: &str,
+    branch: Option<&str>,
+) -> Option<(u32, PathBuf, StatusResponse)> {
+    find_instances_with_status(project, script, branch)
         .into_iter()
         .next()
 }
@@ -652,7 +712,7 @@ mod tests {
 
     #[test]
     fn test_server_and_client_roundtrip() {
-        let state = Arc::new(IpcState::new("dev".to_string(), None));
+        let state = Arc::new(IpcState::new("dev".to_string(), None, None));
         state.services.lock().unwrap().push(ServiceStatus {
             name: "web".into(),
             running: true,
@@ -690,7 +750,7 @@ mod tests {
 
     #[test]
     fn test_kill_sets_flag() {
-        let state = Arc::new(IpcState::new("dev".to_string(), None));
+        let state = Arc::new(IpcState::new("dev".to_string(), None, None));
         let path = std::env::temp_dir().join("fog-test-kill.sock");
         let _ = fs::remove_file(&path);
         let listener = UnixListener::bind(&path).unwrap();
@@ -723,7 +783,7 @@ mod tests {
         let dup_fd = unsafe { libc::dup(master_fd) };
         assert!(dup_fd >= 0);
 
-        let state = Arc::new(IpcState::new("dev".to_string(), None));
+        let state = Arc::new(IpcState::new("dev".to_string(), None, None));
         state.handoff_results.lock().unwrap().push(HandoffItem {
             name: "db".into(),
             pid: 99_999,
@@ -779,7 +839,7 @@ mod tests {
         let dup_fd = unsafe { libc::dup(master_fd) };
         assert!(dup_fd >= 0);
 
-        let state = Arc::new(IpcState::new("dev".to_string(), None));
+        let state = Arc::new(IpcState::new("dev".to_string(), None, None));
         state.handoff_results.lock().unwrap().push(HandoffItem {
             name: "db".into(),
             pid: 99_999,
@@ -834,7 +894,7 @@ mod tests {
     fn test_plain_kill_does_not_consume_handoffs() {
         // A plain kill arriving while a handoff is pending must not take the
         // prepared results away from the reclaiming client.
-        let state = Arc::new(IpcState::new("dev".to_string(), None));
+        let state = Arc::new(IpcState::new("dev".to_string(), None, None));
         let pty = portable_pty::native_pty_system()
             .openpty(portable_pty::PtySize {
                 rows: 24,
