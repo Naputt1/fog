@@ -158,6 +158,36 @@ fn default_router_network() -> String {
     "fog-router".to_string()
 }
 
+fn default_router_cert_dir() -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    format!("{home}/.config/fog/certs")
+}
+
+/// Optional HTTPS (TLS) settings for the central router.
+///
+/// When enabled, fog generates local CA wildcard certificates (via mkcert) for
+/// the configured `dnsmasq` domains plus the router hostname and `localhost`,
+/// and Traefik terminates TLS on `:443` (a `websecure` entrypoint) using them.
+/// HTTP on `:80` keeps working alongside HTTPS.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct RouterTlsConfig {
+    /// Enable HTTPS termination on the central router (default: false).
+    pub enabled: bool,
+    /// Directory where wildcard certificates are stored (default:
+    /// `~/.config/fog/certs`). Generated per-domain, idempotently.
+    pub cert_dir: String,
+}
+
+impl Default for RouterTlsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            cert_dir: default_router_cert_dir(),
+        }
+    }
+}
+
 /// Host-global reverse proxy (Traefik) setup applied automatically on startup.
 ///
 /// This mirrors [`DnsmasqConfig`]: the router is a shared, host-level resource
@@ -168,9 +198,9 @@ fn default_router_network() -> String {
 /// Apps opt into routing by placing Traefik container labels on their services
 /// and attaching them to the shared network named by `shared_network`.
 #[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
 pub struct RouterConfig {
     /// Traefik image to run (default: `traefik:v3`).
-    #[serde(default = "default_router_image")]
     pub image: String,
     /// Hostname for the Traefik dashboard (e.g. `router.red-fox`). The
     /// wildcard-DNS mapping must already cover it (via `dnsmasq.domains`).
@@ -178,8 +208,26 @@ pub struct RouterConfig {
     /// Host port on which the Traefik dashboard listens (default: 8080).
     pub dashboard_port: Option<u16>,
     /// Name of the external Docker network shared with app services.
-    #[serde(default = "default_router_network")]
     pub shared_network: String,
+    /// Port the embedded service-directory index server listens on
+    /// (default: 18080). Requests to the router with no matching app host are
+    /// served the generated `index.html` from here.
+    pub index_port: Option<u16>,
+    /// Optional HTTPS (TLS) termination settings.
+    pub tls: RouterTlsConfig,
+}
+
+impl Default for RouterConfig {
+    fn default() -> Self {
+        Self {
+            image: default_router_image(),
+            hostname: None,
+            dashboard_port: Some(8080),
+            shared_network: default_router_network(),
+            index_port: Some(18080),
+            tls: RouterTlsConfig::default(),
+        }
+    }
 }
 
 /// Top-level application configuration loaded from `fog.json`.

@@ -327,8 +327,10 @@ declaring standard Traefik container labels:
 |-------|----------|------|---------|-------------|
 | `image` | No | `string` | `"traefik:v3"` | Traefik image to run |
 | `hostname` | No | `string` | — | Traefik dashboard hostname (e.g. `router.acme`); must be covered by `dnsmasq.domains` |
+| `index_port` | No | `integer` | `18080` | Port of the standalone service-directory index server (see below) |
 | `dashboard_port` | No | `integer` | `8080` | Host port for the Traefik dashboard |
 | `shared_network` | No | `string` | `"fog-router"` | External Docker network shared with app services |
+| `tls` | No | `object` | `{ enabled: false }` | Optional HTTPS termination (see below) |
 
 When `fog <script>` starts and a `router` section is configured, fog:
 
@@ -345,6 +347,64 @@ their labels, so branches appearing and disappearing are routed and untouted
 automatically. The router is **never** torn down when a project or branch exits
 (it is a host-global resource, like dnsmasq); stopping it is a manual
 `docker rm -f fog-router-traefik`. Any failure is a warning, never a hard error.
+
+### router.tls — HTTPS termination
+
+To serve `https://<branch>.<domain>` (no browser warnings), enable TLS:
+
+```json
+{
+  "router": {
+    "hostname": "router.acme",
+    "shared_network": "fog-router",
+    "tls": { "enabled": true }
+  }
+}
+```
+
+| Field | Required | Type | Default | Description |
+|-------|----------|------|---------|-------------|
+| `enabled` | No | `boolean` | `false` | Enable HTTPS on the central router |
+| `cert_dir` | No | `string` | `~/.config/fog/certs` | Where wildcard certificates are stored |
+
+When TLS is enabled, fog generates a **local-CA wildcard certificate** (via
+[mkcert](https://github.com/FiloSottile/mkcert)) for each `dnsmasq` domain plus
+the router hostname and `localhost`, stores it under `cert_dir`, and writes a
+Traefik file-provider config that Traefik hot-reloads. Traefik then terminates
+HTTPS on a `:443` `websecure` entrypoint while HTTP on `:80` keeps working.
+
+Prerequisites (one-time):
+
+```bash
+brew install mkcert
+mkcert -install          # installs the local CA into the OS trust store (sudo)
+```
+
+TLS is **sticky host-wide**: because the router is shared by every project, a
+project whose `router` config does not enable `tls` will never tear down an
+already-running HTTPS router (it would break other projects' HTTPS). Disabling
+TLS requires removing the router manually (`docker rm -f fog-router-traefik`)
+and re-running `fog <script>`.
+
+Apps must opt the router into TLS per route by adding the label
+`traefik.http.routers.<name>.tls=true` to their service — otherwise Traefik
+serves plain HTTP on `:80` but not HTTPS on `:443`.
+
+### Service-directory index (unmatched hosts)
+
+A request whose host matches **no** app router (e.g. opening the raw tailnet IP
+`http://100.86.26.45` or the Traefik dashboard host directly) is served a
+generated `index.html` instead of a 404. The page lists every running service,
+its hostname, and the internal port DNS forwards to it, with click-to-copy
+links — handy for opening dev apps from a phone on the tailnet.
+
+- fog runs a standalone index server (`fog index serve`) on loopback
+  `index_port` (default `18080`), detached so it survives individual fog
+  instances exiting.
+- The file is regenerated when instances start and stop (bounded startup
+  refreshes + a teardown refresh); refresh the browser to pick up changes.
+- Traefik routes unmatched hosts to it via a low-priority catch-all router
+  (`Host(\`*\`)`, `priority = 1`), so specific app routers always win.
 
 ## Theme
 

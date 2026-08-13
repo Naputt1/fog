@@ -5,6 +5,7 @@ pub mod config;
 pub mod config_watcher;
 pub mod dnsmasq;
 pub mod fds;
+pub mod index;
 pub mod ipc;
 pub mod keybinding;
 pub mod lock;

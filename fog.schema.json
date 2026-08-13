@@ -154,6 +154,28 @@
           "type": "string",
           "default": "fog-router",
           "description": "Name of the external Docker network shared with app services"
+        },
+        "index_port": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 65535,
+          "default": 18080,
+          "description": "Port of the standalone service-directory index server. Requests to the router with no matching app host are served the generated index.html (listing running services, their hostnames and the port DNS forwards to) from here."
+        },
+        "tls": {
+          "type": "object",
+          "description": "Optional HTTPS termination on the central router. When enabled, fog generates local-CA wildcard certificates (mkcert) for the dnsmasq domains plus the router hostname and localhost, and Traefik serves them on a :443 websecure entrypoint. HTTP on :80 keeps working.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "Enable HTTPS termination on the central router"
+            },
+            "cert_dir": {
+              "type": "string",
+              "description": "Directory where wildcard certificates are stored (default: ~/.config/fog/certs). Requires mkcert (brew install mkcert; mkcert -install once)."
+            }
+          }
         }
       }
     },
