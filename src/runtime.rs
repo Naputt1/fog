@@ -299,7 +299,7 @@ pub fn build(
                      fog cannot verify it is already running, starting it\n"
                 ));
                 t
-            } else if health_checks_pass(&health_checks) {
+            } else if health_checks_pass(&health_checks, branch.as_deref()) {
                 // The resource is genuinely up: borrow it instead of re-running
                 // the start command.
                 let mut reused = Terminal::spawn_reused(

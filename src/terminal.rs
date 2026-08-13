@@ -152,9 +152,9 @@ fn scrollback_len(screen: &mut vt100::Screen) -> usize {
 /// Probes a single health-check target. Both `tcp` and `http` kinds use a TCP
 /// connect, so they share this implementation. The `docker` kind checks the
 /// actual container from the configured compose file.
-fn check_target(config: &HealthCheckConfig) -> bool {
+fn check_target(config: &HealthCheckConfig, branch: Option<&str>) -> bool {
     match config.kind {
-        crate::config::HealthCheckKind::Docker => check_docker_target(config),
+        crate::config::HealthCheckKind::Docker => check_docker_target(config, branch),
         _ => {
             let timeout = config.timeout_ms.unwrap_or(2000);
             let addr = config
@@ -181,20 +181,28 @@ fn check_target(config: &HealthCheckConfig) -> bool {
 ///
 /// The compose file is resolved relative to the service's working directory at
 /// build time, so `config.compose_file` is already absolute here.
-fn check_docker_target(config: &HealthCheckConfig) -> bool {
+///
+/// `branch` (the worktree branch, exported to services as `FOG_BRANCH`) is
+/// forwarded to the subprocess so branch-suffixed compose project names
+/// (e.g. `redfox-${FOG_BRANCH:-main}`) resolve to the running project instead
+/// of the `main` default.
+fn check_docker_target(config: &HealthCheckConfig, branch: Option<&str>) -> bool {
     let timeout = config.timeout_ms.unwrap_or(2000);
     let compose_file = config
         .compose_file
         .clone()
         .unwrap_or_else(|| "docker-compose.yml".to_string());
 
-    let mut child = match std::process::Command::new("docker")
-        .args(["compose", "-f", &compose_file, "ps", "--format", "json"])
+    let mut cmd = std::process::Command::new("docker");
+    cmd.args(["compose", "-f", &compose_file, "ps", "--format", "json"])
         .arg(&config.target)
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    {
+        .stderr(std::process::Stdio::null());
+    if let Some(branch) = branch {
+        cmd.env("FOG_BRANCH", branch);
+    }
+
+    let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(_) => return false,
     };
@@ -263,13 +271,16 @@ fn docker_ps_is_healthy(stdout: &str) -> bool {
 /// Checks run concurrently so the result is bounded by the slowest check
 /// rather than the sum — important for the synchronous startup probe of reused
 /// services, which would otherwise add `timeout_ms` per check to startup.
-pub fn health_checks_pass(configs: &[HealthCheckConfig]) -> bool {
+///
+/// `branch` is forwarded to `docker`-kind checks so they resolve the
+/// branch-suffixed compose project (see [`check_docker_target`]).
+pub fn health_checks_pass(configs: &[HealthCheckConfig], branch: Option<&str>) -> bool {
     thread::scope(|s| {
         configs
             .iter()
             .map(|c| {
                 let c = c.clone();
-                s.spawn(move || check_target(&c))
+                s.spawn(move || check_target(&c, branch))
             })
             .collect::<Vec<_>>()
             .into_iter()
@@ -1363,7 +1374,7 @@ impl Terminal {
         if self.health_checks.is_empty() {
             return;
         }
-        let healthy = health_checks_pass(&self.health_checks);
+        let healthy = health_checks_pass(&self.health_checks, self.branch.as_deref());
         self.set_health_status(if healthy {
             HealthStatus::Healthy
         } else {
@@ -1396,6 +1407,7 @@ impl Terminal {
         }
         let status = self.health_status.clone();
         let stop = self.health_stop.clone();
+        let branch = self.branch.clone();
 
         thread::spawn(move || {
             let min_interval = configs
@@ -1408,7 +1420,7 @@ impl Terminal {
                 if stop.load(Ordering::SeqCst) {
                     return;
                 }
-                let all_healthy = health_checks_pass(&configs);
+                let all_healthy = health_checks_pass(&configs, branch.as_deref());
                 let mut s = status.lock().expect("health status mutex poisoned");
                 *s = if all_healthy {
                     HealthStatus::Healthy
@@ -1683,7 +1695,7 @@ mod tests {
             interval_ms: None,
             timeout_ms: Some(100),
         }];
-        assert!(!health_checks_pass(&closed));
+        assert!(!health_checks_pass(&closed, None));
 
         // A live listener passes, and stays passing next to a reachable check.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1695,7 +1707,7 @@ mod tests {
             interval_ms: None,
             timeout_ms: Some(200),
         }];
-        assert!(health_checks_pass(&open));
+        assert!(health_checks_pass(&open, None));
 
         // All checks must pass: one reachable + one closed fails.
         let mixed = vec![
@@ -1714,7 +1726,7 @@ mod tests {
                 timeout_ms: Some(100),
             },
         ];
-        assert!(!health_checks_pass(&mixed));
+        assert!(!health_checks_pass(&mixed, None));
     }
 
     #[test]
