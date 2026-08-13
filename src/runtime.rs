@@ -238,12 +238,23 @@ pub fn build(
 
         let has_deps = entry.depends_on.is_some();
 
+        // Which flag governs sharing depends on the script's run mode: single
+        // instance (concurrent: false) shares via `reuse` (handed over during a
+        // reclaim/worktree switch); concurrent mode shares via `share` (borrowed
+        // if already up). The other flag is ignored in its mode.
+        let shared = if script.concurrent {
+            entry.share
+        } else {
+            entry.reuse
+        };
+        let share_flag = if script.concurrent { "share" } else { "reuse" };
+
         // Identity metadata carried on every terminal so reuse teardown can ask
         // "are any other instances still serving this (project, script)?".
         let project = project.clone();
         let script_name = script_name.to_string();
 
-        let terminal = if entry.reuse {
+        let mut terminal = if shared {
             if let Some(handoff) = adopted.remove(&name) {
                 let mut t = Terminal::adopt(
                     service_path_str.clone(),
@@ -284,7 +295,7 @@ pub fn build(
                 // mode, so a config warning must render in the tab instead of
                 // stderr (which would corrupt the layout).
                 t.notice(&format!(
-                    "⚠ service '{name}' has reuse: true but no health_check; \
+                    "⚠ service '{name}' has {share_flag}: true but no health_check; \
                      fog cannot verify it is already running, starting it\n"
                 ));
                 t
@@ -363,6 +374,13 @@ pub fn build(
                 &script_name,
             )
         };
+        // Mark shared resources so teardown keeps them alive (skips the
+        // `shutdown_cmd`) while any sibling instance still serves the same
+        // project+script. This matters when a shared service was started here
+        // (not borrowed) and another instance is using it.
+        if shared {
+            terminal.shared = true;
+        }
         items[idx] = Some(terminal);
     }
 
@@ -423,6 +441,7 @@ mod tests {
             depends_on: deps.map(|d| d.into_iter().map(String::from).collect()),
             shutdown_cmd: None,
             reuse: false,
+            share: false,
         }
     }
 
@@ -479,6 +498,20 @@ mod tests {
             depends_on: None,
             shutdown_cmd: None,
             reuse: true,
+            share: false,
+        }
+    }
+
+    fn share_entry(name: &str, health: Option<HealthCheckSpec>) -> ConfigEntry {
+        ConfigEntry {
+            name: Some(name.to_string()),
+            path: ".".to_string(),
+            cmd: "true".to_string(),
+            health_check: health,
+            depends_on: None,
+            shutdown_cmd: None,
+            reuse: false,
+            share: true,
         }
     }
 
@@ -486,6 +519,15 @@ mod tests {
         ScriptConfig {
             service: Some(entries),
             proxy: None,
+            concurrent: false,
+        }
+    }
+
+    fn script_with_concurrent(entries: Vec<ConfigEntry>) -> ScriptConfig {
+        ScriptConfig {
+            service: Some(entries),
+            proxy: None,
+            concurrent: true,
         }
     }
 
@@ -567,6 +609,113 @@ mod tests {
             !rt.items[0].reused,
             "reuse without a health check cannot verify, so it starts"
         );
+    }
+
+    #[test]
+    fn test_build_concurrent_share_up_resource_borrows() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let script =
+            script_with_concurrent(vec![share_entry("db", Some(tcp_health(&addr.to_string())))]);
+        let mut adopted = HashMap::new();
+        let rt = build(
+            &script,
+            "dev",
+            Path::new("."),
+            None,
+            false,
+            100,
+            None,
+            &mut adopted,
+        )
+        .unwrap();
+        assert!(rt.items[0].reused, "an up shared resource must be borrowed");
+        assert!(
+            rt.items[0].shared,
+            "a borrowed shared resource must stay marked shared for teardown"
+        );
+    }
+
+    #[test]
+    fn test_build_concurrent_share_down_resource_starts() {
+        let script =
+            script_with_concurrent(vec![share_entry("db", Some(tcp_health("127.0.0.1:1")))]);
+        let mut adopted = HashMap::new();
+        let rt = build(
+            &script,
+            "dev",
+            Path::new("."),
+            None,
+            false,
+            100,
+            None,
+            &mut adopted,
+        )
+        .unwrap();
+        assert!(
+            !rt.items[0].reused,
+            "a down shared resource must be started, not borrowed"
+        );
+        assert!(
+            rt.items[0].shared,
+            "a started shared resource stays marked shared so siblings keep it alive"
+        );
+    }
+
+    #[test]
+    fn test_build_concurrent_reuse_flag_ignored() {
+        // In concurrent mode only `share` governs; a `reuse`-flagged service is
+        // a plain per-instance service and must be spawned, not borrowed.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let script =
+            script_with_concurrent(vec![reuse_entry("db", Some(tcp_health(&addr.to_string())))]);
+        let mut adopted = HashMap::new();
+        let rt = build(
+            &script,
+            "dev",
+            Path::new("."),
+            None,
+            false,
+            100,
+            None,
+            &mut adopted,
+        )
+        .unwrap();
+        assert!(
+            !rt.items[0].reused,
+            "reuse is ignored in concurrent mode: the service must be started"
+        );
+        assert!(
+            !rt.items[0].shared,
+            "a non-share service in concurrent mode is not shared"
+        );
+    }
+
+    #[test]
+    fn test_build_single_instance_share_flag_ignored() {
+        // In single-instance mode only `reuse` governs; a `share`-flagged
+        // service is a plain per-instance service and must be spawned.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let script = script_with(vec![share_entry("db", Some(tcp_health(&addr.to_string())))]);
+        let mut adopted = HashMap::new();
+        let rt = build(
+            &script,
+            "dev",
+            Path::new("."),
+            None,
+            false,
+            100,
+            None,
+            &mut adopted,
+        )
+        .unwrap();
+        assert!(
+            !rt.items[0].reused,
+            "share is ignored in single-instance mode: the service must be started"
+        );
+        assert!(!rt.items[0].shared);
     }
 
     #[test]

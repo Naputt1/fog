@@ -83,8 +83,10 @@ main.rs
   │
   ├── Parses CLI args (clap): `fog <script>` | `fog ls` | `fog kill [pid]` | `fog logs [pid]`; `-d` runs headlessly as a daemon
   ├── Loads config, looks up the named script's services & proxy
-  ├── Acquires per-(project, script) owner lock, coordinates with/reclaims
-  │   any existing instance of the same script in the same project
+  ├── Single-instance scripts only (`"concurrent": false`): acquires a
+  │   per-(project, script, branch) owner lock and reclaims any existing
+  │   instance of the same script in the same project+branch. Concurrent
+  │   scripts (default) skip coordination and start alongside existing instances.
   ├── Spawns IPC server (Unix socket) sharing IpcState with the App
   ├── Spawns Terminal for each service entry
   ├── Releases the owner lock (services are up)
@@ -148,12 +150,12 @@ Terminal::get_screen(visible_rows, offset)
 
 ## Process lifecycle
 
-1. **Startup**: Parse config, spawn terminals, start proxy, enter TUI. Before spawning, fog detects the git project (`git rev-parse --git-common-dir`) and coordinates with any other instance running the same script in the same project (see *Cross-instance coordination* below). If it should take over, it sends a `kill` request carrying the `reuse` service names over IPC; the old instance hands over live reused services (PTY master fd via `SCM_RIGHTS`) and then exits.
+1. **Startup**: Parse config, spawn terminals, start proxy, enter TUI. Before spawning, fog detects the git project (`git rev-parse --git-common-dir`). For **single-instance** scripts (`"concurrent": false`) it coordinates with any other instance running the same script in the same project+branch (see *Cross-instance coordination* below): if it should take over, it sends a `kill` request carrying the `reuse` service names over IPC; the old instance hands over live reused services (PTY master fd via `SCM_RIGHTS`) and then exits. **Concurrent** scripts (the default) skip this entirely and start alongside existing instances; services flagged `share: true` are borrowed (not re-started) when their `health_check` already passes.
 2. **Running**: Event loop polls input at 50ms intervals, draws UI, handles events.
 3. **Shutdown**: On `q` / `Ctrl+C` / SIGINT, or a replacement's `kill` request:
    - `exit` flag is set
    - On a reclaim (`kill` with `reuse` names), the App extracts the requested live services, then waits for the IPC thread to send them before dropping terminals
-   - Each `Terminal` drops → kills child process group (SIGTERM, wait 500ms, SIGKILL), kills descendants; services that were handed off are released without being killed, and their `shutdown_cmd` is skipped so the live successor keeps the resource. Any other service — including a borrowed/assumed-up reuse service with no successor — runs its `shutdown_cmd` on drop, so the last instance tears the resource down
+   - Each `Terminal` drops → kills child process group (SIGTERM, wait 500ms, SIGKILL), kills descendants; services that were handed off are released without being killed, and their `shutdown_cmd` is skipped so the live successor keeps the resource. Any other service — including a borrowed/assumed-up reuse/share service with no successor — runs its `shutdown_cmd` on drop, so the last instance tears the resource down. Shared (reuse/share) services skip their `shutdown_cmd` whenever **any** sibling instance still serves the same (project, script) — a concurrent instance on the same branch or another branch.
    - `ProxyInstance` drops → sets shutdown flag, joins proxy thread
    - Terminal leaves raw mode, restores alternate screen, disables mouse capture
    - If `--save-logs` was passed, writes output files to `temp/<name>.txt`

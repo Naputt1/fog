@@ -808,13 +808,14 @@ impl App {
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
 
-        // Preserve shared services: mark reuse terminals handed off so dropping
-        // the old set neither kills their processes nor runs their shutdown_cmds.
-        // Adopted terminals transfer their live fd; borrowed (assumed-up)
-        // terminals are marked handed off so the successor keeps the resource.
+        // Preserve shared services: mark reuse/share terminals handed off so
+        // dropping the old set neither kills their processes nor runs their
+        // shutdown_cmds. Adopted terminals transfer their live fd; borrowed
+        // (assumed-up) terminals are marked handed off so the successor keeps
+        // the resource.
         let mut adopted: HashMap<String, ipc::HandoffItem> = HashMap::new();
         for item in &mut self.items {
-            if item.reused {
+            if item.reused || item.shared {
                 if let Some(handoff) = item.extract_handoff() {
                     adopted.insert(handoff.name.clone(), handoff);
                 } else {

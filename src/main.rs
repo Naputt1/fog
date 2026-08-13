@@ -637,8 +637,14 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
     let mut adopted: HashMap<String, ipc::HandoffItem> = HashMap::new();
     let mut owner_lock: Option<fog::lock::OwnerLock> = None;
     if let Some(ref project) = project {
-        let reuse = reuse_names(script);
-        (adopted, owner_lock) = reconcile_instance(project, name, branch.as_deref(), &reuse);
+        // Concurrent scripts (default) start alongside existing instances of the
+        // same project+script instead of replacing them, so no coordination or
+        // reclaim happens. Only single-instance scripts take over from a previous
+        // run (handing over `reuse` services).
+        if !script.concurrent {
+            let reuse = reuse_names(script);
+            (adopted, owner_lock) = reconcile_instance(project, name, branch.as_deref(), &reuse);
+        }
     }
 
     let sigint = Arc::new(AtomicBool::new(false));

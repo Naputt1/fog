@@ -85,6 +85,11 @@ pub struct Terminal {
     /// no process is spawned, health checks verify the resource, and it is
     /// not torn down on exit.
     pub reused: bool,
+    /// Whether this service is a shared resource for a concurrent script
+    /// (`share: true`). Even when it was started (not borrowed) here, its
+    /// `shutdown_cmd` is skipped on teardown while any other instance still
+    /// serves the same (project, script).
+    pub shared: bool,
     /// When a reused service is adopted from another instance, the child PID
     /// to wait on / kill instead of a [`Child`] handle.
     owned_pid: Option<u32>,
@@ -510,6 +515,7 @@ impl Terminal {
             project: None,
             script: String::new(),
             reused: false,
+            shared: false,
             owned_pid: None,
             raw_fd: None,
             reused_since: None,
@@ -570,6 +576,7 @@ impl Terminal {
             project: None,
             script: String::new(),
             reused: false,
+            shared: false,
             owned_pid: None,
             raw_fd: None,
             reused_since: None,
@@ -622,6 +629,7 @@ impl Terminal {
             project: None,
             script: String::new(),
             reused: false,
+            shared: false,
             owned_pid: None,
             raw_fd: None,
             reused_since: None,
@@ -675,6 +683,7 @@ impl Terminal {
             project: None,
             script: String::new(),
             reused: false,
+            shared: false,
             owned_pid: None,
             raw_fd: None,
             reused_since: None,
@@ -729,6 +738,7 @@ impl Terminal {
             project: None,
             script: String::new(),
             reused: true,
+            shared: false,
             owned_pid: None,
             raw_fd: None,
             reused_since: Some(Instant::now()),
@@ -829,6 +839,7 @@ impl Terminal {
             project: None,
             script: String::new(),
             reused: true,
+            shared: false,
             owned_pid: Some(pid),
             raw_fd: Some(fd),
             reused_since: None,
@@ -1598,11 +1609,14 @@ impl Drop for Terminal {
         // assumed-up reuse service with no successor must still be torn down,
         // so the gate is `handed_off`, not `reused`.
         //
-        // Multi-branch: a shared (reuse) service is only torn down when this is
-        // the last instance serving the same (project, script) — another branch
-        // may still be using it, so its `shutdown_cmd` (e.g. `docker compose
-        // down`) must not run while a sibling branch is alive.
-        let last_instance = !self.reused
+        // Multi-branch: a shared (reuse/share) service is only torn down when
+        // this is the last instance serving the same (project, script) —
+        // another branch, or a concurrent same-branch instance, may still be
+        // using it, so its `shutdown_cmd` (e.g. `docker compose down`) must
+        // not run while a sibling is alive. A shared service that was started
+        // (not borrowed) here is covered by `shared`, not just `reused`.
+        let is_shared = self.reused || self.shared;
+        let last_instance = !is_shared
             || self.project.is_none()
             || self.script.is_empty()
             || crate::ipc::find_instances_any_branch(

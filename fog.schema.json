@@ -29,7 +29,12 @@
                 "reuse": {
                   "type": "boolean",
                   "default": false,
-                  "description": "When another instance of the same project+script starts, this service is reused instead of torn down: its shutdown_cmd is skipped, a live process is handed over, and starting it is skipped if it is already up (verified via health_check)."
+                  "description": "Reuse this service across worktree switches. Only honored when the script has concurrent: false (single-instance mode): when another instance of the same project+script starts, this service's shutdown_cmd is skipped, a live process is handed over, and starting it is skipped if it is already up (verified via health_check)."
+                },
+                "share": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "Share this service between multiple concurrent instances of the script. Only honored when the script has concurrent: true: when another instance of the same project+script is already running and this service's health_check passes, the cmd is not re-run (the service is borrowed instead of duplicated), and it is torn down (shutdown_cmd) only when the last instance of the project+script exits."
                 },
                 "health_check": {
                   "oneOf": [
@@ -97,6 +102,11 @@
               "tls_cert": { "type": "string" },
               "tls_key": { "type": "string" }
             }
+          },
+          "concurrent": {
+            "type": "boolean",
+            "default": true,
+            "description": "Allow multiple concurrent instances of this script in the same project+branch. When true (default), running the script again starts alongside existing instances instead of killing them; services flagged share: true are shared between those instances. When false, only one instance runs and a new run kills the previous one first (with reuse: true services handed over)."
           }
         }
       }

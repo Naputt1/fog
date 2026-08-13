@@ -63,8 +63,19 @@ pub struct ConfigEntry {
     /// When another instance of the same project+script starts, this service's
     /// `shutdown_cmd` is skipped (and its live process handed over) instead of
     /// being torn down, so the resource can be reused across worktrees.
+    ///
+    /// Only honored when the script has `concurrent: false` (single-instance
+    /// mode, which is the worktree-switch reclaim path).
     #[serde(default)]
     pub reuse: bool,
+    /// Share this service between multiple concurrent instances of the script.
+    /// Only honored when the script has `concurrent: true`: when another
+    /// instance of the same project+script is already running and this
+    /// service's `health_check` passes, the `cmd` is not re-run (the service
+    /// is borrowed instead of duplicated), and it is torn down only when the
+    /// last instance of the project+script exits.
+    #[serde(default)]
+    pub share: bool,
 }
 
 /// A route definition for the reverse proxy.
@@ -141,6 +152,10 @@ pub struct DnsmasqConfig {
     pub port: u16,
 }
 
+fn default_concurrent() -> bool {
+    true
+}
+
 /// A named script: a full set of services and optional proxy configuration.
 #[derive(Debug, Deserialize, Clone)]
 pub struct ScriptConfig {
@@ -148,6 +163,14 @@ pub struct ScriptConfig {
     pub service: Option<Vec<ConfigEntry>>,
     /// Optional reverse proxy configuration.
     pub proxy: Option<ProxyConfig>,
+    /// Allow multiple concurrent instances of this script in the same
+    /// project+branch. When true (default), running the script again starts
+    /// alongside existing instances instead of killing them; services flagged
+    /// `share: true` are shared between those instances. When false, only one
+    /// instance runs and a new run kills the previous one first (with
+    /// `reuse: true` services handed over).
+    #[serde(default = "default_concurrent")]
+    pub concurrent: bool,
 }
 
 fn default_router_image() -> String {
@@ -285,6 +308,61 @@ mod tests {
         std::fs::write(&path, r#"{"scripts":{"dev":{}}}"#).unwrap();
         let config = load(&path).unwrap();
         assert!(config.scripts.contains_key("dev"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_load_concurrent_defaults_to_true() {
+        let path =
+            std::env::temp_dir().join(format!("fog-config-concurrent-{}.json", std::process::id()));
+        std::fs::write(&path, r#"{"scripts":{"dev":{}}}"#).unwrap();
+        let config = load(&path).unwrap();
+        assert!(
+            config.scripts["dev"].concurrent,
+            "scripts default to concurrent (multiple runs allowed)"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_load_concurrent_opt_out() {
+        let path = std::env::temp_dir().join(format!(
+            "fog-config-concurrent-false-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(&path, r#"{"scripts":{"dev":{"concurrent":false}}}"#).unwrap();
+        let config = load(&path).unwrap();
+        assert!(!config.scripts["dev"].concurrent);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_load_share_defaults_to_false() {
+        let path =
+            std::env::temp_dir().join(format!("fog-config-share-{}.json", std::process::id()));
+        std::fs::write(
+            &path,
+            r#"{"scripts":{"dev":{"service":[{"path":".","cmd":"true"}]}}}"#,
+        )
+        .unwrap();
+        let config = load(&path).unwrap();
+        let entries = config.scripts["dev"].service.as_ref().unwrap();
+        assert!(!entries[0].share, "share defaults to false");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_load_share_enabled() {
+        let path =
+            std::env::temp_dir().join(format!("fog-config-share-true-{}.json", std::process::id()));
+        std::fs::write(
+            &path,
+            r#"{"scripts":{"dev":{"service":[{"path":".","cmd":"true","share":true}]}}}"#,
+        )
+        .unwrap();
+        let config = load(&path).unwrap();
+        let entries = config.scripts["dev"].service.as_ref().unwrap();
+        assert!(entries[0].share);
         let _ = std::fs::remove_file(&path);
     }
 

@@ -60,10 +60,11 @@ A script bundles a set of services and an optional proxy under a name. Run it wi
 
 ### Script fields
 
-| Field | Required | Type | Description |
-|-------|----------|------|-------------|
-| `service` | No | `array` | List of service entries to manage |
-| `proxy` | No | `object` | Reverse proxy configuration (see below) |
+| Field | Required | Type | Default | Description |
+|-------|----------|------|---------|-------------|
+| `service` | No | `array` | — | List of service entries to manage |
+| `proxy` | No | `object` | — | Reverse proxy configuration (see below) |
+| `concurrent` | No | `boolean` | `true` | Allow multiple concurrent instances of this script in the same project+branch (see [Concurrent mode](#concurrent-mode--sharing-services)) |
 
 `fog` requires a script name; running `fog` with no arguments lists the available scripts.
 
@@ -100,11 +101,14 @@ A script bundles a set of services and an optional proxy under a name. Run it wi
 | `cmd` | **Yes** | `string` | Shell command to execute (e.g. `cargo run`, `npm run dev`, `air`). |
 | `health_check` | No | `object` | Health check configuration (see below). |
 | `shutdown_cmd` | No | `string` | Shell command to run on shutdown (e.g. `docker compose down`). |
-| `reuse` | No | `boolean` | Reuse this service across worktree switches (see below). |
+| `reuse` | No | `boolean` | Reuse this service across worktree switches (only honored in single-instance mode, see below). |
+| `share` | No | `boolean` | Share this service between multiple concurrent instances (only honored in concurrent mode, see below). |
 
 The command is executed inside a shell (`$SHELL` or `bash`) using `cd <path> && <cmd>`.
 
 ## Worktree-aware runs & service reuse
+
+> `reuse` below applies only when the script sets `"concurrent": false` (single-instance mode). Scripts default to `concurrent: true` — see [Concurrent mode & sharing services](#concurrent-mode--sharing-services).
 
 fog identifies the git repository a script runs in via `git rev-parse --git-common-dir`, which is shared by every worktree of the same repo. The instance identity is `(project, script, branch)`: two worktrees on **different branches** run concurrently, while starting the **same script on the same branch** while another instance is already running (e.g. a human plus an agent) makes fog:
 
@@ -137,6 +141,36 @@ Services flagged with `"reuse": true` are treated specially to save time when sw
 ```
 
 > `reuse` works best **with** a `health_check` — fog needs it to verify the resource is already up. If `reuse` is set without one, fog warns and starts the `cmd` normally.
+
+### Concurrent mode & sharing services
+
+By default a script is **concurrent** (`"concurrent": true`): running `fog <script>` again in the same project+branch **starts alongside** the existing instances instead of killing them. `fog ls` lists every instance (pass a PID to `fog kill`/`fog logs` to target a specific one). This is handy when a human and an agent — or two agents — want to work against the same environment at once.
+
+Per-instance services (everything not flagged `share`) are started fresh in each instance and torn down when that instance exits, so instances never collide on ports unless the config says otherwise.
+
+Services flagged `"share": true` are **shared between all concurrent instances** of the project+script:
+
+- **Probe-first**: at startup fog probes the resource once via `health_check`. If it is already reachable (a sibling instance started it), the service's `cmd` is **not** re-run and the tab shows a `♻ reusing already-running ...` notice instead — so a database or compose stack is not duplicated.
+- **Start when down**: if it is not reachable, fog runs the `cmd` (the first instance to start becomes the owner). No misleading "reusing" tab, no delay.
+- **Mid-session fallback**: if a borrowed shared service later becomes unreachable, fog starts the `cmd` itself after a short grace period (~10s).
+- **Last-instance teardown**: a shared resource is torn down (`shutdown_cmd`, e.g. `docker compose down`) only when the **last** instance serving that (project, script) exits — a sibling instance or a different branch's `fog dev` keeps it alive.
+
+```json
+{
+  "name": "db",
+  "path": ".",
+  "cmd": "docker compose up -d",
+  "shutdown_cmd": "docker compose down",
+  "share": true,
+  "health_check": [
+    { "kind": "tcp", "target": "localhost:5432" }
+  ]
+}
+```
+
+> Like `reuse`, `share` works best **with** a `health_check` — fog needs it to verify the resource is already up. If `share` is set without one, fog warns and starts the `cmd` normally (concurrent instances could then race to start the same resource).
+
+> `reuse` and `share` are mutually exclusive across modes: `reuse` is only honored when `"concurrent": false` (single-instance), and `share` is only honored when `"concurrent": true`. Set `"concurrent": false` to restore the old behavior where a re-run kills the previous instance first (handing over `reuse` services).
 
 ### `FOG_BRANCH` environment variable
 
