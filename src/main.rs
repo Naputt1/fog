@@ -313,6 +313,38 @@ fn reconcile_instance(
     (adopted, Some(lock))
 }
 
+/// Returns a human-readable project name for `fog ls`.
+///
+/// The instance's project identity is the git common dir (e.g.
+/// `/repo/.git`), shared by every worktree; strip the trailing `.git`
+/// component so the repo name is shown instead.
+fn project_display_name(project: &str) -> String {
+    let path = Path::new(project);
+    if path.file_name().is_some_and(|n| n == ".git") {
+        path.parent()
+            .and_then(Path::file_name)
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| project.to_string())
+    } else {
+        path.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| project.to_string())
+    }
+}
+
+/// A service line in the `fog ls` sub-table: (service name, state).
+type ServiceEntry = (String, String);
+
+/// One running instance: identity columns plus the services sub-table.
+struct InstanceRow {
+    pid: u32,
+    script: String,
+    project: String,
+    branch: String,
+    proxy: String,
+    services: Vec<ServiceEntry>,
+}
+
 fn cmd_ls() -> io::Result<()> {
     let instances = ipc::find_instances()?;
 
@@ -321,7 +353,7 @@ fn cmd_ls() -> io::Result<()> {
         return Ok(());
     }
 
-    let mut rows: Vec<(u32, String, String, String, String, String)> = Vec::new();
+    let mut rows: Vec<InstanceRow> = Vec::new();
     for (pid, path) in &instances {
         match ipc::query_status(path) {
             Ok(status) => {
@@ -339,21 +371,22 @@ fn cmd_ls() -> io::Result<()> {
                         } else {
                             "stopped".to_string()
                         };
-                        format!("{}:{}", s.name, state)
+                        (s.name.clone(), state)
                     })
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                    .collect::<Vec<_>>();
                 let project = status
                     .project
-                    .map(|p| {
-                        Path::new(&p)
-                            .file_name()
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or(p)
-                    })
+                    .map(|p| project_display_name(&p))
                     .unwrap_or_else(|| "-".to_string());
                 let branch = status.branch.unwrap_or_else(|| "-".to_string());
-                rows.push((*pid, status.script, project, branch, proxy, services));
+                rows.push(InstanceRow {
+                    pid: *pid,
+                    script: status.script,
+                    project,
+                    branch,
+                    proxy,
+                    services,
+                });
             }
             Err(_) => {
                 // Only treat the socket as stale if the owning process is
@@ -371,25 +404,53 @@ fn cmd_ls() -> io::Result<()> {
         return Ok(());
     }
 
+    let max = |len: usize, header: &str| len.max(header.len());
     let w_pid = rows
         .iter()
-        .map(|r| r.0.to_string().len())
+        .map(|r| r.pid.to_string().len())
         .max()
-        .unwrap_or(3);
-    let w_script = rows.iter().map(|r| r.1.len()).max().unwrap_or(6);
-    let w_project = rows.iter().map(|r| r.2.len()).max().unwrap_or(7);
-    let w_branch = rows.iter().map(|r| r.3.len()).max().unwrap_or(6);
-    let w_proxy = rows.iter().map(|r| r.4.len()).max().unwrap_or(5);
+        .unwrap_or(0);
+    let w_script = rows.iter().map(|r| r.script.len()).max().unwrap_or(0);
+    let w_project = rows.iter().map(|r| r.project.len()).max().unwrap_or(0);
+    let w_branch = rows.iter().map(|r| r.branch.len()).max().unwrap_or(0);
+    let w_proxy = rows.iter().map(|r| r.proxy.len()).max().unwrap_or(0);
+    let w_service = rows
+        .iter()
+        .flat_map(|r| r.services.iter())
+        .map(|(name, _)| name.len())
+        .max()
+        .unwrap_or(0);
+    let w_status = rows
+        .iter()
+        .flat_map(|r| r.services.iter())
+        .map(|(_, state)| state.len())
+        .max()
+        .unwrap_or(0);
+
+    let w_pid = max(w_pid, "pid");
+    let w_script = max(w_script, "script");
+    let w_project = max(w_project, "project");
+    let w_branch = max(w_branch, "branch");
+    let w_proxy = max(w_proxy, "proxy");
+    let w_service = max(w_service, "service");
+    let w_status = max(w_status, "status");
 
     println!(
-        "{:<w_pid$}  {:<w_script$}  {:<w_project$}  {:<w_branch$}  {:<w_proxy$}  services",
+        "{:<w_pid$}  {:<w_script$}  {:<w_project$}  {:<w_branch$}  {:<w_proxy$}",
         "pid", "script", "project", "branch", "proxy"
     );
-    for (pid, script, project, branch, proxy, services) in rows {
+    for row in rows {
         println!(
-            "{:<w_pid$}  {:<w_script$}  {:<w_project$}  {:<w_branch$}  {:<w_proxy$}  {}",
-            pid, script, project, branch, proxy, services
+            "{:<w_pid$}  {:<w_script$}  {:<w_project$}  {:<w_branch$}  {:<w_proxy$}",
+            row.pid, row.script, row.project, row.branch, row.proxy
         );
+        if !row.services.is_empty() {
+            println!("  {:<w_service$}  {:<w_status$}", "service", "status");
+            for (name, state) in row.services {
+                println!("  {:<w_service$}  {:<w_status$}", name, state);
+            }
+        }
+        println!();
     }
     Ok(())
 }
@@ -935,6 +996,22 @@ mod tests {
         let missing = dir.join("missing.json");
         assert_eq!(resolve_config_path(&missing), missing);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_project_display_name_strips_git_common_dir() {
+        // The project identity is the git common dir (`/repo/.git`); the
+        // display name must be the repo directory, not `.git`.
+        assert_eq!(project_display_name("/Users/alice/dev/fog/.git"), "fog");
+        assert_eq!(project_display_name("/Users/alice/dev/fog"), "fog");
+    }
+
+    #[test]
+    fn test_project_display_name_fallback() {
+        // Fallback identity (non-git) is a plain directory path; the display
+        // name is its basename. A bare/rootless path falls back to itself.
+        assert_eq!(project_display_name("/tmp/my-project"), "my-project");
+        assert_eq!(project_display_name("fog"), "fog");
     }
 
     #[test]
