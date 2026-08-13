@@ -14,15 +14,30 @@ use std::thread;
 /// Default port for the embedded service-directory index server.
 const DEFAULT_INDEX_PORT: u16 = 18080;
 
-/// One reachable frontend service discovered from Traefik labels.
+/// One rendered row of HTML for a single service.
+type IndexRow = String;
+/// A worktree (or `shared`) subgroup: (group name, rendered rows).
+type IndexGroup = (String, Vec<IndexRow>);
+/// A project section: (project name, worktree/shared groups).
+type ProjectSection = (String, Vec<IndexGroup>);
+
+/// One reachable service discovered from docker (Traefik labels or
+/// `fog.expose` custom labels).
 struct IndexEntry {
-    /// Compose project of the container (e.g. `redfox-main`, `gems-main`).
+    /// Display project name (e.g. `gems`, `red-fox`), derived from the repo
+    /// root of the compose project's working dir.
     project: String,
-    /// Compose service name (e.g. `frontend`).
+    /// Worktree/branch group (e.g. `main`, `feature-x`). Shared infra services
+    /// report `shared`.
+    worktree: String,
+    /// Whether this is a shared infra service (under the `shared` subgroup).
+    shared: bool,
+    /// Compose service name (e.g. `frontend`, `postgres`).
     service: String,
-    /// Hostname the router accepts (e.g. `main.red-fox`).
+    /// Hostname the router accepts (e.g. `main.red-fox`, `main.postgres.gems`).
     hostname: String,
-    /// Internal container port Traefik forwards to.
+    /// Internal container port Traefik forwards to. Empty for raw-TCP
+    /// services exposed via `fog.expose` (they are reached by host port).
     port: String,
     /// Host-published docker port bindings of the container (e.g.
     /// `0.0.0.0:8080->8080/tcp`). Empty when nothing is published to the host.
@@ -205,48 +220,78 @@ fn serve_blocking(port: u16, dir: PathBuf, network: String) -> io::Result<()> {
     })
 }
 
-/// Generates the `index.html` listing every running service and the port DNS
-/// forwards to it, by parsing the Traefik labels of containers on the router's
-/// shared network. `base_host` is the host the request came in on (e.g.
+/// Generates the `index.html` listing every running service grouped by project
+/// then worktree, by parsing the Traefik labels (and `fog.expose` custom labels)
+/// of containers. `base_host` is the host the request came in on (e.g.
 /// `100.86.26.45`); when set, each service that publishes a host port gets a
 /// clickable raw `http://{base_host}:{port}/` link too.
 fn generate_index(cfg: &RouterConfig, base_host: Option<&str>) -> String {
     let entries = discover_entries(&cfg.shared_network);
     let _tls_default = cfg.tls.enabled;
-    let rows = entries
-        .into_iter()
-        .map(|e| {
-            let scheme = if e.tls { "https" } else { "http" };
-            let url = format!("{scheme}://{}/", e.hostname);
-            let published = if e.published.is_empty() {
-                String::new()
+
+    // Group entries by project, then by worktree (shared infra last). Preserve
+    // insertion order within a group.
+    let mut projects: Vec<ProjectSection> = Vec::new();
+    for e in entries {
+        let row = render_entry(&e, base_host);
+        let group = if e.shared {
+            "shared".to_string()
+        } else {
+            e.worktree.clone()
+        };
+        // Find or insert the project bucket.
+        match projects.iter_mut().find(|(p, _)| *p == e.project) {
+            Some((_, groups)) => match groups.iter_mut().find(|(g, _)| *g == group) {
+                Some((_, rows)) => rows.push(row),
+                None => groups.push((group, vec![row])),
+            },
+            None => projects.push((e.project.clone(), vec![(group, vec![row])])),
+        }
+    }
+
+    // Sort projects and groups; shared subgroup sinks to the bottom.
+    projects.sort_by(|a, b| a.0.cmp(&b.0));
+    for (_, groups) in &mut projects {
+        groups.sort_by(|a, b| {
+            let ak = if a.0 == "shared" {
+                "zzz".to_string()
             } else {
-                format!(
-                    " <span class=\"port\">docker published: {}</span>",
-                    e.published.join(", ")
-                )
+                a.0.clone()
             };
-            let raw = match (&base_host, &e.raw_port) {
-                (Some(host), Some(port)) => {
-                    let raw_url = format!("http://{host}:{port}/");
-                    format!(
-                        " <button data-url=\"{raw_url}\">copy raw</button> \
-                         <a href=\"{raw_url}\">{raw_url}</a>"
-                    )
-                }
-                _ => String::new(),
+            let bk = if b.0 == "shared" {
+                "zzz".to_string()
+            } else {
+                b.0.clone()
             };
-            format!(
-                "<li><span class=\"name\">{}.{}&nbsp;<code>{}</code></span> \
-                 <button data-url=\"{url}\">copy</button> <a href=\"{url}\">{url}</a> \
-                 <span class=\"port\">→ traefik port {}</span>{published}{raw}</li>",
-                e.project, e.service, e.hostname, e.port
-            )
+            ak.cmp(&bk)
+        });
+    }
+
+    let sections = projects
+        .into_iter()
+        .map(|(project, groups)| {
+            let groups_html = groups
+                .into_iter()
+                .map(|(group, rows)| {
+                    let rows_html = rows.join("\n");
+                    if group == "shared" {
+                        format!(
+                            "<div class=\"group\"><h3>shared</h3><ul>\n{rows_html}\n</ul></div>"
+                        )
+                    } else {
+                        format!(
+                            "<div class=\"group\"><h3>{group}</h3><ul>\n{rows_html}\n</ul></div>"
+                        )
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("<section><h2>{project}</h2>\n{groups_html}\n</section>")
         })
         .collect::<Vec<_>>()
         .join("\n");
 
-    let empty = if rows.is_empty() {
+    let empty = if sections.is_empty() {
         "<p class=\"empty\">No services are currently running on the router.</p>"
     } else {
         ""
@@ -262,8 +307,10 @@ fn generate_index(cfg: &RouterConfig, base_host: Option<&str>) -> String {
 <style>
   body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 2rem auto; max-width: 720px; padding: 0 1rem; color: #1f2328; }}
   h1 {{ font-size: 1.3rem; }}
-  ul {{ list-style: none; padding: 0; }}
-  li {{ display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; padding: .6rem .8rem; border-bottom: 1px solid #e5e7eb; }}
+  h2 {{ font-size: 1.1rem; margin: 1.5rem 0 .4rem; border-bottom: 2px solid #0969da; padding-bottom: .2rem; }}
+  h3 {{ font-size: .95rem; margin: .8rem 0 .2rem; color: #57606a; }}
+  ul {{ list-style: none; padding: 0; margin: 0; }}
+  li {{ display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; padding: .5rem .8rem; border-bottom: 1px solid #e5e7eb; }}
   code {{ background: #f3f4f6; padding: .1rem .3rem; border-radius: 4px; }}
   button {{ font: inherit; cursor: pointer; border: 1px solid #d0d7de; background: #f6f8fa; border-radius: 6px; padding: .2rem .6rem; }}
   button.copied {{ background: #dafbe1; border-color: #4ac26b; }}
@@ -275,9 +322,7 @@ fn generate_index(cfg: &RouterConfig, base_host: Option<&str>) -> String {
 <body>
 <h1>fog — running services</h1>
 <p>Tap <b>copy</b> to copy a URL, or open it directly.</p>
-<ul>
-{rows}
-</ul>
+{sections}
 {empty}
 <script>
 document.addEventListener('click', function (ev) {{
@@ -302,32 +347,81 @@ function fallback(url, ok) {{
     )
 }
 
+/// Renders a single index entry as a `<li>` row. HTTP services (via Traefik)
+/// link to `{scheme}://{hostname}/`; raw-TCP services exposed via `fog.expose`
+/// have no traefik port and link to `{hostname}:{raw_port}` instead.
+fn render_entry(e: &IndexEntry, base_host: Option<&str>) -> String {
+    let published = if e.published.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " <span class=\"port\">docker published: {}</span>",
+            e.published.join(", ")
+        )
+    };
+    if e.port.is_empty() {
+        // Raw-TCP service (postgres, redis, ...): reachable via hostname + host port.
+        let Some(raw_port) = &e.raw_port else {
+            return format!(
+                "<li><span class=\"name\">{}&nbsp;<code>{}</code></span>{published}</li>",
+                e.service, e.hostname
+            );
+        };
+        let url = format!("http://{}:{}/", e.hostname, raw_port);
+        let host_port = format!("{}:{}", e.hostname, raw_port);
+        return format!(
+            "<li><span class=\"name\">{}&nbsp;<code>{}</code></span> \
+             <button data-url=\"{url}\">copy</button> <a href=\"{url}\">{host_port}</a> \
+             <span class=\"port\">→ host port {}</span>{published}</li>",
+            e.service, e.hostname, raw_port
+        );
+    }
+    let scheme = if e.tls { "https" } else { "http" };
+    let url = format!("{scheme}://{}/", e.hostname);
+    let raw = match (&base_host, &e.raw_port) {
+        (Some(host), Some(port)) => {
+            let raw_url = format!("http://{host}:{port}/");
+            format!(
+                " <button data-url=\"{raw_url}\">copy raw</button> \
+                 <a href=\"{raw_url}\">{raw_url}</a>"
+            )
+        }
+        _ => String::new(),
+    };
+    format!(
+        "<li><span class=\"name\">{}&nbsp;<code>{}</code></span> \
+         <button data-url=\"{url}\">copy</button> <a href=\"{url}\">{url}</a> \
+         <span class=\"port\">→ traefik port {}</span>{published}{raw}</li>",
+        e.service, e.hostname, e.port
+    )
+}
+
 /// Queries docker for containers on the router's shared network and extracts,
 /// per reachable router: hostname(s), the internal port, and whether TLS.
 fn discover_entries(shared_network: &str) -> Vec<IndexEntry> {
     let mut entries = Vec::new();
-    let out = match Command::new("docker")
-        .args([
-            "ps",
-            "--filter",
-            &format!("network={shared_network}"),
-            "--format",
-            "{{.Names}}",
-        ])
-        .output()
-    {
-        Ok(o) => o,
-        Err(_) => return entries,
-    };
-    let names: Vec<String> = String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(String::from)
-        .collect();
+    let mut names: Vec<String> = Vec::new();
+    for query in [
+        format!("network={shared_network}"),
+        "label=fog.expose=true".to_string(),
+    ] {
+        let out = match Command::new("docker")
+            .args(["ps", "--filter", &query, "--format", "{{.Names}}"])
+            .output()
+        {
+            Ok(o) => o,
+            Err(_) => continue,
+        };
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            let line = line.trim();
+            if !line.is_empty() && !names.contains(&line.to_string()) {
+                names.push(line.to_string());
+            }
+        }
+    }
 
     for name in names {
-        // Skip the router itself and any container without traefik labels.
+        // Skip the router itself.
         let labels = match container_labels(&name) {
             Some(l) => l,
             None => continue,
@@ -335,18 +429,41 @@ fn discover_entries(shared_network: &str) -> Vec<IndexEntry> {
         let has_traefik = labels
             .keys()
             .any(|k| k.starts_with("traefik.http.routers."));
-        if !has_traefik {
+        let expose = labels.get("fog.expose").is_some_and(|v| v == "true");
+        if !has_traefik && !expose {
             continue;
         }
-        let project = labels
-            .get("com.docker.compose.project")
-            .cloned()
-            .unwrap_or_else(|| name.clone());
+        let (project, worktree, shared) = derive_group(&labels, &name);
         let service = labels
             .get("com.docker.compose.service")
             .cloned()
             .unwrap_or_else(|| "app".to_string());
         let published = docker_ports(&name);
+
+        // Raw-TCP services exposed via `fog.expose` have no Traefik HTTP
+        // router; they are reached by hostname + published host port.
+        if expose {
+            let Some(hostname) = labels.get("fog.hostname").cloned() else {
+                continue;
+            };
+            let Some(raw_port) = docker_host_port(&name) else {
+                continue;
+            };
+            entries.push(IndexEntry {
+                project: project.clone(),
+                worktree: worktree.clone(),
+                shared,
+                service: service.clone(),
+                hostname,
+                port: String::new(),
+                published: published.clone(),
+                raw_port: Some(raw_port),
+                tls: false,
+            });
+            if !has_traefik {
+                continue;
+            }
+        }
 
         // First pass: collect service ports.
         let mut service_port: std::collections::HashMap<String, String> =
@@ -385,6 +502,8 @@ fn discover_entries(shared_network: &str) -> Vec<IndexEntry> {
             for host in extract_hosts(v) {
                 entries.push(IndexEntry {
                     project: project.clone(),
+                    worktree: worktree.clone(),
+                    shared,
                     service: service.clone(),
                     hostname: host,
                     port: port.clone(),
@@ -396,6 +515,59 @@ fn discover_entries(shared_network: &str) -> Vec<IndexEntry> {
         }
     }
     entries
+}
+
+/// Derives the display project name, worktree group and shared-infra flag for a
+/// container from its compose labels.
+///
+/// Project = the repo root basename of `com.docker.compose.project.working_dir`
+/// (e.g. `/Users/.../GEMS` -> `gems`). Infra compose files live in an `infra/`
+/// subdirectory, so those are flagged `shared` and grouped under the repo root's
+/// project. Worktree = the compose project name after the first `-` (e.g.
+/// `gems-main` -> `main`, `gems-feature-x` -> `feature-x`), ignored for shared.
+fn derive_group(
+    labels: &std::collections::HashMap<String, String>,
+    container_name: &str,
+) -> (String, String, bool) {
+    let wd = labels
+        .get("com.docker.compose.project.working_dir")
+        .map(String::as_str)
+        .unwrap_or("");
+    let project_name = labels
+        .get("com.docker.compose.project")
+        .map(String::as_str)
+        .unwrap_or(container_name);
+    let is_infra = wd.ends_with("/infra") || wd.ends_with("\\infra");
+    let project = if wd.is_empty() {
+        // No working-dir label: fall back to the compose project name with any
+        // trailing `-<worktree>` stripped.
+        project_name
+            .split_once('-')
+            .map(|(p, _)| p.to_string())
+            .unwrap_or_else(|| project_name.to_string())
+    } else if is_infra {
+        // Repo root is the parent of `infra/`.
+        let repo = std::path::Path::new(wd)
+            .parent()
+            .and_then(|p| p.file_name())
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| project_name.to_string());
+        repo.to_lowercase()
+    } else {
+        std::path::Path::new(wd)
+            .file_name()
+            .map(|s| s.to_string_lossy().to_lowercase().to_owned())
+            .unwrap_or_else(|| project_name.to_string())
+    };
+    if is_infra {
+        (project, "shared".to_string(), true)
+    } else {
+        let worktree = project_name
+            .split_once('-')
+            .map(|(_, w)| w.to_string())
+            .unwrap_or_else(|| "main".to_string());
+        (project, worktree, false)
+    }
 }
 
 /// Extracts hostnames from a Traefik `Host(...)` / `HostRegexp(...)` rule.
@@ -579,5 +751,134 @@ mod tests {
         // The helper shells out to docker, so no live assertion is reliable;
         // just confirm it returns a value (or None) without panicking.
         let _ = docker_host_port("fog-router-traefik");
+    }
+
+    fn labels(pairs: &[(&str, &str)]) -> std::collections::HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn test_derive_group_app_project() {
+        let l = labels(&[
+            (
+                "com.docker.compose.project.working_dir",
+                "/Users/naputt/git/GEMS",
+            ),
+            ("com.docker.compose.project", "gems-main"),
+        ]);
+        assert_eq!(
+            derive_group(&l, "gems-main-api-1"),
+            ("gems".into(), "main".into(), false)
+        );
+    }
+
+    #[test]
+    fn test_derive_group_app_feature_worktree() {
+        let l = labels(&[
+            (
+                "com.docker.compose.project.working_dir",
+                "/Users/naputt/git/GEMS",
+            ),
+            ("com.docker.compose.project", "gems-feature-x"),
+        ]);
+        assert_eq!(
+            derive_group(&l, "gems-feature-x-api-1"),
+            ("gems".into(), "feature-x".into(), false)
+        );
+    }
+
+    #[test]
+    fn test_derive_group_infra_is_shared() {
+        let l = labels(&[
+            (
+                "com.docker.compose.project.working_dir",
+                "/Users/naputt/git/GEMS/infra",
+            ),
+            ("com.docker.compose.project", "gems-infra"),
+        ]);
+        assert_eq!(
+            derive_group(&l, "gems-postgres"),
+            ("gems".into(), "shared".into(), true)
+        );
+    }
+
+    #[test]
+    fn test_derive_group_redfox_naming() {
+        // red-fox app project is `redfox-main` (no dash in the base) and infra
+        // is `red-fox-infra` under `infra/`; both must resolve to `red-fox`.
+        let app = labels(&[
+            (
+                "com.docker.compose.project.working_dir",
+                "/Users/naputt/code/red-fox",
+            ),
+            ("com.docker.compose.project", "redfox-main"),
+        ]);
+        assert_eq!(
+            derive_group(&app, "redfox-main-api-1"),
+            ("red-fox".into(), "main".into(), false)
+        );
+
+        let infra = labels(&[
+            (
+                "com.docker.compose.project.working_dir",
+                "/Users/naputt/code/red-fox/infra",
+            ),
+            ("com.docker.compose.project", "red-fox-infra"),
+        ]);
+        assert_eq!(
+            derive_group(&infra, "red-fox-infra-postgres-1"),
+            ("red-fox".into(), "shared".into(), true)
+        );
+    }
+
+    #[test]
+    fn test_derive_group_no_labels_falls_back_to_name() {
+        let l = labels(&[]);
+        let (p, w, s) = derive_group(&l, "barecontainer");
+        assert_eq!(p, "barecontainer");
+        assert_eq!(w, "main");
+        assert!(!s);
+
+        // A dashed name without a working-dir falls back to the base (prefix
+        // before the first `-`).
+        let (p, w, _) = derive_group(&l, "gems-main");
+        assert_eq!(p, "gems");
+        assert_eq!(w, "main");
+    }
+
+    #[test]
+    fn test_render_entry_http_vs_raw() {
+        let http = IndexEntry {
+            project: "gems".into(),
+            worktree: "main".into(),
+            shared: false,
+            service: "api".into(),
+            hostname: "main.api.gems".into(),
+            port: "8082".into(),
+            published: vec![],
+            raw_port: None,
+            tls: true,
+        };
+        let row = render_entry(&http, None);
+        assert!(row.contains("https://main.api.gems/"));
+        assert!(row.contains("traefik port 8082"));
+
+        let raw = IndexEntry {
+            project: "gems".into(),
+            worktree: "shared".into(),
+            shared: true,
+            service: "postgres".into(),
+            hostname: "main.postgres.gems".into(),
+            port: String::new(),
+            published: vec!["0.0.0.0:55274->5432/tcp".into()],
+            raw_port: Some("55274".into()),
+            tls: false,
+        };
+        let row = render_entry(&raw, None);
+        assert!(row.contains("main.postgres.gems:55274"));
+        assert!(row.contains("host port 55274"));
     }
 }
