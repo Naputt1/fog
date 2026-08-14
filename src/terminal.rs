@@ -1779,6 +1779,59 @@ mod tests {
     }
 
     #[test]
+    fn test_check_docker_target_exports_fog_branch() {
+        // A stub `docker` on PATH that only reports the api healthy when the
+        // probe exports `FOG_BRANCH` — regression test for branch-suffixed
+        // compose projects (e.g. `redfox-${FOG_BRANCH:-main}`) resolving to
+        // the wrong (main) project during the health check.
+        let dir = std::env::temp_dir().join(format!(
+            "fog-stub-docker-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let stub = dir.join("docker");
+        std::fs::write(
+            &stub,
+            "#!/bin/sh\n\
+             [ \"$FOG_BRANCH\" = \"ui\" ] || { echo '[]'; exit 0; }\n\
+             echo '[{\"Service\":\"api\",\"State\":\"running\",\"Health\":\"healthy\"}]'\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let prev_path = std::env::var("PATH").unwrap_or_default();
+        let stub_path = format!("{}:{}", dir.display(), prev_path);
+        // SAFETY: the stub only shadows the `docker` binary, and no other test
+        // in this binary spawns `docker`, so the PATH mutation cannot affect a
+        // concurrently running test.
+        unsafe { std::env::set_var("PATH", &stub_path) };
+
+        let config = HealthCheckConfig {
+            kind: crate::config::HealthCheckKind::Docker,
+            target: "api".into(),
+            compose_file: Some("compose.yml".into()),
+            interval_ms: None,
+            timeout_ms: Some(2000),
+        };
+        assert!(
+            check_docker_target(&config, Some("ui")),
+            "branch must be exported to the docker compose ps probe"
+        );
+        assert!(
+            !check_docker_target(&config, None),
+            "without FOG_BRANCH the probe must fail (resolves the main project)"
+        );
+
+        // SAFETY: restores the original PATH for any later test.
+        unsafe { std::env::set_var("PATH", &prev_path) };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn test_adopted_probe_health_runs_immediately() {
         let pty = portable_pty::native_pty_system()
             .openpty(portable_pty::PtySize {
