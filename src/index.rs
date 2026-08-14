@@ -123,9 +123,7 @@ pub fn refresh_after_startup(cfg: &RouterConfig) -> std::sync::Arc<std::sync::at
                 if stop_ref.load(std::sync::atomic::Ordering::SeqCst) {
                     return;
                 }
-                for msg in refresh(&cfg) {
-                    eprintln!("{msg}");
-                }
+                let _ = refresh(&cfg);
             }
         });
     stop
