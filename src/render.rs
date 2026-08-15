@@ -165,7 +165,7 @@ pub(crate) fn draw_terminal_content(
     in_terminal_input: bool,
     current_total_lines: usize,
     theme: &Theme,
-) {
+) -> selection::RowLayout {
     let inner = content_area.inner(Margin {
         horizontal: 1,
         vertical: 1,
@@ -184,20 +184,39 @@ pub(crate) fn draw_terminal_content(
         item.resize(text_area.width, visible_height);
     }
 
-    let (mut lines, _total) = match items.get_mut(tab_index) {
+    let (lines, _total) = match items.get_mut(tab_index) {
         Some(item) => item.get_screen(visible_height as usize, scroll_offset),
         None => (vec![Line::from("no tab")], 0),
     };
-    selection::apply_sel(
-        &mut lines,
-        select_start,
-        select_end,
-        scroll_offset,
-        current_total_lines,
-    );
+    // Wrap each logical line into physical rows of at most text_area.width, so
+    // long lines stay fully visible (wrapped) instead of being truncated, and
+    // so the row<->content mapping is exact. The layout is returned for mouse
+    // selection to reuse.
+    let window_start = current_total_lines
+        .saturating_sub(scroll_offset)
+        .saturating_sub(visible_height as usize);
+    let (mut rows, mut layout) =
+        selection::build_layout(&lines, window_start, text_area.width as usize);
+
+    // Anchor to the bottom: when wrapped rows overflow the viewport the oldest
+    // ones clip from the top so the newest output is always visible.
+    let inner_h = visible_height as usize;
+    let over = rows.len().saturating_sub(inner_h);
+    if over > 0 {
+        rows.drain(0..over);
+        layout.drain(0..over);
+    } else {
+        while rows.len() < inner_h {
+            rows.push(Line::from(vec![Span::raw("")]));
+            layout.push(None);
+        }
+    }
+
+    selection::apply_sel(&mut rows, &layout, select_start, select_end);
 
     frame.render_widget(block, content_area);
-    let widget = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
+    // Rows are already wrapped to fit, so render them 1:1 (no Paragraph wrap).
+    let widget = Paragraph::new(Text::from(rows));
     frame.render_widget(widget, text_area);
 
     if scrollbar_shown {
@@ -216,12 +235,28 @@ pub(crate) fn draw_terminal_content(
         && let Some(item) = items.get(tab_index)
         && let Some((row, col)) = item.cursor_position()
     {
-        let x = content_area.x + 1 + col;
-        let y = content_area.y + 1 + row;
-        if x < content_area.right() && y < content_area.bottom() {
-            frame.set_cursor_position(Position { x, y });
+        let cursor_line = window_start + row as usize;
+        // Locate the physical row showing the cursor's logical line/column.
+        let mut pos = None;
+        for (pidx, entry) in layout.iter().enumerate() {
+            if let Some((line, col_off)) = entry
+                && *line == cursor_line
+                && *col_off <= col as usize
+            {
+                pos = Some((pidx, *col_off));
+            }
+        }
+        if let Some((pidx, col_off)) = pos {
+            let x =
+                content_area.x + 1 + (col - col_off as u16).min(text_area.width.saturating_sub(1));
+            let y = content_area.y + 1 + pidx as u16;
+            if x < content_area.right() && y < content_area.bottom() {
+                frame.set_cursor_position(Position { x, y });
+            }
         }
     }
+
+    layout
 }
 
 pub(crate) fn draw_instructions(

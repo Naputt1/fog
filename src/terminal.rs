@@ -1784,10 +1784,7 @@ mod tests {
         // probe exports `FOG_BRANCH` — regression test for branch-suffixed
         // compose projects (e.g. `redfox-${FOG_BRANCH:-main}`) resolving to
         // the wrong (main) project during the health check.
-        let dir = std::env::temp_dir().join(format!(
-            "fog-stub-docker-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("fog-stub-docker-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let stub = dir.join("docker");
         std::fs::write(
@@ -2245,6 +2242,72 @@ mod tests {
             .size();
         assert_eq!(rows, 20, "height must track the visible area");
         assert_eq!(cols, 80, "width must never shrink");
+    }
+
+    /// Regression: when the terminal screen is wider than the render area (a
+    /// vertical scrollbar steals a column, or the window shrank and width is
+    /// grow-only), a full-width row wraps onto a second row. The last line must
+    /// stay visible (bottom-anchored) and its selection highlight must land on
+    /// the row that actually shows it — both were broken when wrapping pushed
+    /// the last line below the visible clip.
+    #[test]
+    fn test_last_line_selectable_when_screen_wider_than_area() {
+        use crate::render;
+        use crate::selection::RowLayout;
+        use crate::theme::Theme;
+        use ratatui::Terminal as RatatuiTerminal;
+        use ratatui::backend::TestBackend;
+        use ratatui::layout::Rect;
+        use ratatui::widgets::Block;
+
+        let mut t = Terminal::spawn_reused("svc".into(), ".".into(), "true".into(), 100);
+        {
+            let mut p = t.parser.lock().unwrap_or_else(|e| e.into_inner());
+            // Screen is 21 cols; the render area is only 20 wide (scrollbar).
+            p.screen_mut().set_size(3, 21);
+            p.process(b"\x1b[2J\x1b[H");
+            // Line 0 fills the screen (wraps over 2 rows); the last line is
+            // short so it is the whole content of the bottom row.
+            p.process(b"AAAAAAAAAAAAAAAAAAAAA\r\nBBBB\r\nCCCC");
+        }
+
+        let content_area = Rect::new(0, 0, 22, 5); // inner region: 20x3
+        let backend = TestBackend::new(22, 5);
+        let mut tt = RatatuiTerminal::new(backend).unwrap();
+        let mut layout: RowLayout = Vec::new();
+        tt.draw(|f| {
+            layout = render::draw_terminal_content(
+                f,
+                content_area,
+                Block::bordered(),
+                std::slice::from_mut(&mut t),
+                0,
+                0,
+                Some((2, 0)),
+                Some((2, 20)),
+                false,
+                3,
+                &Theme::default(),
+            );
+        })
+        .unwrap();
+
+        let buf = tt.backend().buffer();
+        // Bottom content row = buffer row 3 (border at rows 0 and 4).
+        let bottom: String = (1..21).map(|x| buf[(x, 3)].symbol().to_string()).collect();
+        assert!(
+            bottom.contains("CCCC"),
+            "last line must render on the bottom content row, got: {bottom:?}"
+        );
+        assert!(
+            buf[(1, 3)]
+                .style()
+                .add_modifier
+                .contains(Modifier::REVERSED),
+            "last line selection must be highlighted on the bottom content row"
+        );
+        // The layout must map the bottom content row to the last line.
+        assert_eq!(layout.last(), Some(&Some((2, 0))));
     }
 
     #[test]

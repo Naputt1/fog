@@ -120,6 +120,7 @@ pub struct App {
     scrollbar_dragging: bool,
     auto_scrolling: Option<bool>,
     auto_scroll_col: u16,
+    content_layout: selection::RowLayout,
     switch_popup: Option<SwitchPopup>,
     config_watcher_stop: Arc<AtomicBool>,
     ipc_state: Arc<IpcState>,
@@ -189,6 +190,7 @@ impl App {
             scrollbar_dragging: false,
             auto_scrolling: None,
             auto_scroll_col: 0,
+            content_layout: Vec::new(),
             switch_popup: None,
         }
     }
@@ -448,12 +450,14 @@ impl App {
                         self.scrollbar_dragging = true;
                         return Ok(());
                     }
+                    let layout = self.active_layout();
                     if let Some(pos) = selection::screen_to_content(
                         mouse.column,
                         mouse.row,
                         self.content_area,
                         self.scroll_offset,
                         self.current_total_lines(),
+                        layout,
                     ) {
                         self.selecting = true;
                         self.select_start = Some(pos);
@@ -476,12 +480,14 @@ impl App {
                             self.step_auto_scroll();
                         } else {
                             self.auto_scrolling = None;
+                            let layout = self.active_layout();
                             if let Some(pos) = selection::screen_to_content(
                                 mouse.column,
                                 mouse.row,
                                 self.content_area,
                                 self.scroll_offset,
                                 self.current_total_lines(),
+                                layout,
                             ) {
                                 self.select_end = Some(pos);
                             }
@@ -521,6 +527,7 @@ impl App {
         self.scroll_offset = 0;
         self.scrollbar_dragging = false;
         self.auto_scrolling = None;
+        self.content_layout.clear();
         selection::clear_selection(
             &mut self.selecting,
             &mut self.select_start,
@@ -978,6 +985,19 @@ impl App {
             return None;
         }
         let col_idx = (col - inner_x) as usize;
+        if let Some(layout) = self.active_layout() {
+            // Wrap-aware edges: the first/last rendered row's content.
+            let entry = if top {
+                layout.iter().find_map(|e| *e)
+            } else {
+                layout.iter().rev().find_map(|e| *e)
+            }?;
+            let (line, col_off) = entry;
+            if line >= self.current_total_lines() {
+                return None;
+            }
+            return Some((line, col_off + col_idx));
+        }
         let total = self.current_total_lines();
         let visible = self.content_height() as usize;
         let end = total.saturating_sub(self.scroll_offset);
@@ -987,6 +1007,18 @@ impl App {
             None
         } else {
             Some((line, col_idx))
+        }
+    }
+
+    /// Returns the physical-row layout of the last terminal-pane render, used
+    /// to map mouse coordinates to exact content positions. The proxy pane has
+    /// no layout (it does not wrap), so it falls back to the logical-line
+    /// formula.
+    fn active_layout(&self) -> Option<&[Option<(usize, usize)>]> {
+        if self.is_proxy_tab() {
+            None
+        } else {
+            Some(self.content_layout.as_slice())
         }
     }
 
@@ -1141,6 +1173,7 @@ impl App {
             .border_set(border::THICK);
 
         if is_proxy {
+            self.content_layout.clear();
             render::draw_proxy_content(
                 frame,
                 content_area,
@@ -1154,7 +1187,7 @@ impl App {
         } else {
             let total_lines = self.current_total_lines();
             let tab_index = self.service_tab_index().unwrap_or(self.tabs.index);
-            render::draw_terminal_content(
+            self.content_layout = render::draw_terminal_content(
                 frame,
                 content_area,
                 block,
@@ -1387,6 +1420,7 @@ mod tests {
             scrollbar_dragging: false,
             auto_scrolling: None,
             auto_scroll_col: 0,
+            content_layout: Vec::new(),
             switch_popup: None,
         }
     }
