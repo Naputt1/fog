@@ -154,6 +154,17 @@ auto-discovers them and routes each branch, and is **never** torn down when a
 project or branch exits. Open the dashboard at
 `http://router.acme:8080` (or `127.0.0.1:8080`).
 
+Unmatched hosts (or any path on the router) are served the **fog web UI**
+from a small embedded server: a **service directory** listing every running
+service grouped by project and branch (with copy-to-clipboard links), plus a
+**live-log viewer** at `http://<router>/logs` that streams any service's
+output in real time — colored ANSI, auto-scrolling, pause-on-scroll and copy —
+the way the TUI shows service tabs. Containerized services stream via
+`docker logs -f`; running fog instances (interactive or detached) expose their
+captured logs, their `daemon.log`, and the proxy's live request log. Pick a
+service on the left, or jump straight to one with
+`http://<router>/logs?service=<container>`.
+
 Full field reference and both sections are documented in
 [Configuration](https://github.com/Naputt1/fog/blob/main/docs/configuration.md).
 

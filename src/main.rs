@@ -501,11 +501,6 @@ fn resolve_instance<'a>(
     }
 }
 
-/// Directory holding a detached instance's captured logs: `$TMPDIR/fog-<pid>.logs/`.
-fn detached_log_dir(pid: u32) -> PathBuf {
-    std::env::temp_dir().join(format!("fog-{pid}.logs"))
-}
-
 /// Strips ANSI escape sequences from `s`, producing plain text. Used to render
 /// the raw PTY output captured in detached log files.
 fn strip_ansi(s: &str) -> String {
@@ -579,12 +574,9 @@ fn cmd_logs(pid: Option<u32>) -> io::Result<()> {
         }
     };
 
-    let dir = detached_log_dir(target_pid);
+    let dir = ipc::instance_log_dir(target_pid);
     if !dir.is_dir() {
-        eprintln!(
-            "error: instance {target_pid} has no captured logs (only instances \
-             started with `fog <script> -d` write log files)"
-        );
+        eprintln!("error: instance {target_pid} has no captured logs");
         std::process::exit(1);
     }
 
@@ -632,12 +624,15 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
     }
 
     // Detached daemons redirect their own diagnostics into a per-instance log
-    // directory early (so startup/reclaim messages are captured too); each
-    // service's raw PTY output is teed into its own file there.
+    // directory early (so startup/reclaim messages are captured too); every
+    // run (interactive or detached) tees each service's raw PTY output into
+    // its own file there, which also feeds `fog logs` and the web log viewer.
     let log_dir = if detached {
-        Some(init_daemon_logs()?)
+        let dir = create_log_dir()?;
+        redirect_daemon_output(&dir)?;
+        Some(dir)
     } else {
-        None
+        Some(create_log_dir()?)
     };
 
     let config_path = resolve_config_path(&resolve_run_config(cli));
@@ -765,6 +760,16 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
         io::Error::new(io::ErrorKind::InvalidData, format!("error: {}", e))
     })?;
 
+    // Expose the proxy's live request log to the IPC server so the web log
+    // viewer (and anything else) can stream it. The handle is stable across
+    // config hot-reloads, so wiring it once here is enough.
+    if let Some(proxy) = runtime.proxy.as_ref() {
+        *ipc_state
+            .proxy_logs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(proxy.logs_handle());
+    }
+
     // Containers are now starting; refresh the service index once after a short
     // grace so this instance's frontend appears in the directory page. The stop
     // flag halts the loop on teardown so a stale refresh cannot overwrite the
@@ -823,21 +828,28 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
     Ok(())
 }
 
-/// Creates the per-instance log directory for the current process and redirects
-/// stdout/stderr to `daemon.log` inside it. Returns the log directory.
-fn init_daemon_logs() -> io::Result<PathBuf> {
-    let dir = detached_log_dir(std::process::id());
+/// Creates the per-instance log directory for the current process, which
+/// every run (interactive or detached) tees each service's output into.
+fn create_log_dir() -> io::Result<PathBuf> {
+    let dir = ipc::instance_log_dir(std::process::id());
     fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+/// Redirects this process's stdout/stderr into `daemon.log` inside `dir`,
+/// so a detached daemon's own diagnostics are captured too. Only called for
+/// detached runs — an interactive run keeps stdout/stderr for the TUI.
+fn redirect_daemon_output(dir: &Path) -> io::Result<()> {
     let log = fs::File::create(dir.join("daemon.log"))?;
-    // SAFETY: dup2 onto the standard fds is always valid, and the original fd
-    // is ours to close.
+    // SAFETY: dup2 onto the standard fds is always valid, and the original
+    // fd is ours to close.
     let fd = log.into_raw_fd();
     unsafe {
         libc::dup2(fd, 1);
         libc::dup2(fd, 2);
         libc::close(fd);
     }
-    Ok(dir)
+    Ok(())
 }
 
 /// Detach mode entry point: re-executes `fog <script>` as a background daemon
@@ -882,7 +894,7 @@ fn daemonize(script: &str) -> io::Result<()> {
         }
         if child.try_wait().ok().flatten().is_some() {
             eprintln!("error: detached fog '{script}' (pid {pid}) exited during startup");
-            eprintln!("  logs: {}", detached_log_dir(pid).display());
+            eprintln!("  logs: {}", ipc::instance_log_dir(pid).display());
             std::process::exit(1);
         }
         if std::time::Instant::now() >= deadline {
@@ -890,7 +902,7 @@ fn daemonize(script: &str) -> io::Result<()> {
                 "error: detached fog '{script}' (pid {pid}) did not become ready within {}s",
                 DAEMON_READY_TIMEOUT.as_secs()
             );
-            eprintln!("  logs: {}", detached_log_dir(pid).display());
+            eprintln!("  logs: {}", ipc::instance_log_dir(pid).display());
             std::process::exit(1);
         }
         std::thread::sleep(Duration::from_millis(100));
@@ -900,7 +912,7 @@ fn daemonize(script: &str) -> io::Result<()> {
     println!("  status: fog ls {pid}");
     println!("  stop:   fog kill {pid}");
     println!("  logs:   fog logs {pid}");
-    println!("  log dir: {}", detached_log_dir(pid).display());
+    println!("  log dir: {}", ipc::instance_log_dir(pid).display());
     Ok(())
 }
 
@@ -1012,14 +1024,6 @@ mod tests {
         // name is its basename. A bare/rootless path falls back to itself.
         assert_eq!(project_display_name("/tmp/my-project"), "my-project");
         assert_eq!(project_display_name("fog"), "fog");
-    }
-
-    #[test]
-    fn test_detached_log_dir_naming() {
-        assert_eq!(
-            detached_log_dir(1234),
-            std::env::temp_dir().join("fog-1234.logs")
-        );
     }
 
     #[test]

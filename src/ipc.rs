@@ -1,6 +1,8 @@
+use crate::proxy::LogEntry;
 use serde::{Deserialize, Serialize};
-use std::fs;
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::collections::VecDeque;
+use std::fs::{self, File};
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::mem;
 use std::os::unix::io::RawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -16,6 +18,20 @@ const READ_TIMEOUT_SECS: u64 = 5;
 const HANDOFF_PREPARE_TIMEOUT_SECS: u64 = 30;
 /// Maximum accepted length for a single IPC request line.
 const MAX_IPC_LINE_LEN: usize = 8192;
+/// Default trailing lines emitted by a `logs` request before following.
+const DEFAULT_LOG_TAIL: usize = 200;
+/// Upper bound for a `logs` request's `tail`, so a single request cannot
+/// request an unbounded backfill.
+const MAX_LOG_TAIL: usize = 10_000;
+/// Poll interval while following a log file or the proxy queue.
+const LOG_FOLLOW_POLL_MS: u64 = 150;
+/// How long a follow loop keeps waiting for output after the underlying
+/// service has stopped before ending the stream.
+const LOG_FOLLOW_IDLE: Duration = Duration::from_secs(15);
+
+fn default_log_tail() -> usize {
+    DEFAULT_LOG_TAIL
+}
 
 /// Status snapshot of a single service.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,12 +65,19 @@ pub struct HandoffItem {
     pub fd: RawFd,
 }
 
+/// A cloneable handle to a proxy's live request-log queue.
+type ProxyLogHandle = Arc<Mutex<VecDeque<LogEntry>>>;
+
 /// Shared state published by the TUI app and served over the IPC socket.
 pub struct IpcState {
     /// Current status of all services.
     pub services: Arc<Mutex<Vec<ServiceStatus>>>,
     /// Current proxy status, if a proxy is configured.
     pub proxy: Arc<Mutex<Option<ProxyStatus>>>,
+    /// Live handle to the running proxy's request-log queue, if a proxy is
+    /// configured. Set once at startup by the App; stable across config
+    /// hot-reloads (restart reuses the same queue).
+    pub proxy_logs: Arc<Mutex<Option<ProxyLogHandle>>>,
     /// Name of the script currently running.
     pub script: String,
     /// Identity of the git project (worktree family) this instance belongs to.
@@ -87,6 +110,7 @@ impl IpcState {
         Self {
             services: Arc::new(Mutex::new(Vec::new())),
             proxy: Arc::new(Mutex::new(None)),
+            proxy_logs: Arc::new(Mutex::new(None)),
             script,
             project,
             branch,
@@ -135,6 +159,17 @@ enum Request {
         #[serde(default)]
         reuse: Vec<String>,
     },
+    Logs {
+        /// Service whose captured log to stream; the special name `proxy`
+        /// streams the proxy's live request log instead.
+        service: String,
+        /// Number of trailing lines to emit before any follow output.
+        #[serde(default = "default_log_tail")]
+        tail: usize,
+        /// Keep streaming new output until the connection closes.
+        #[serde(default)]
+        follow: bool,
+    },
 }
 
 /// The response sent back to a `kill` request.
@@ -149,6 +184,14 @@ struct KillResponse {
 /// Returns the socket path for a given PID: `$TMPDIR/fog-<pid>.sock`.
 pub fn socket_path(pid: u32) -> PathBuf {
     std::env::temp_dir().join(format!("fog-{pid}.sock"))
+}
+
+/// Returns the directory holding an instance's captured logs:
+/// `$TMPDIR/fog-<pid>.logs/`. Every run (interactive or detached) tees each
+/// service's raw PTY output into `<service>.log` here; detached runs also
+/// write their own diagnostics to `daemon.log`.
+pub fn instance_log_dir(pid: u32) -> PathBuf {
+    std::env::temp_dir().join(format!("fog-{pid}.logs"))
 }
 
 /// Returns the socket path for the current process.
@@ -278,7 +321,290 @@ fn handle_connection(mut stream: UnixStream, state: Arc<IpcState>) {
             state.kill_flag.store(true, Ordering::SeqCst);
             send_handoffs(stream, state);
         }
+        Request::Logs {
+            service,
+            tail,
+            follow,
+        } => handle_logs(stream, state, &service, tail, follow),
     };
+}
+
+/// Handles a `logs` request: streams a service's captured log (or the proxy
+/// request log when `service == "proxy"`).
+///
+/// The response is newline-delimited raw text (ANSI intact): the last `tail`
+/// lines are emitted first, then — with `follow` — new output until the
+/// client disconnects. The `[fog] ...` prefix marks control messages the
+/// page uses to stop reconnecting.
+fn handle_logs(
+    mut stream: UnixStream,
+    state: Arc<IpcState>,
+    service: &str,
+    tail: usize,
+    follow: bool,
+) {
+    let tail = tail.clamp(1, MAX_LOG_TAIL);
+    if service == "proxy" {
+        stream_proxy_log(&mut stream, &state, tail, follow);
+        return;
+    }
+    let dir = instance_log_dir(std::process::id());
+    stream_service_log(&mut stream, &state, &dir, service, tail, follow);
+}
+
+/// Whether a service is currently running, per the instance's live status.
+/// Unknown services (e.g. shell tabs, `daemon`) count as running.
+fn service_running(state: &IpcState, service: &str) -> bool {
+    state
+        .services
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .find(|s| s.name == service)
+        .map(|s| s.running)
+        .unwrap_or(true)
+}
+
+/// Whether the proxy is currently running, per the instance's live status.
+fn proxy_running(state: &IpcState) -> bool {
+    state
+        .proxy
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .map(|p| p.running)
+        .unwrap_or(true)
+}
+
+/// Streams a service's captured log file (`<sanitized>.log` inside `dir`).
+/// See [`handle_logs`] for the wire format.
+fn stream_service_log(
+    stream: &mut UnixStream,
+    state: &IpcState,
+    dir: &Path,
+    service: &str,
+    tail: usize,
+    follow: bool,
+) {
+    let safe = sanitize_service_name(service);
+    let path = dir.join(format!("{safe}.log"));
+    let Ok(file) = fs::File::open(&path) else {
+        let _ = writeln!(stream, "[fog] no captured log for service '{service}'");
+        return;
+    };
+
+    // Tail: read the last `tail` lines, and the byte offset just after them
+    // so the follow loop resumes without a gap or duplication.
+    let (lines, offset_after) = match file.try_clone() {
+        Ok(mut f) => read_tail_lines(&mut f, tail),
+        Err(_) => (Vec::new(), 0),
+    };
+    for line in &lines {
+        // PTY output uses CRLF; strip the trailing `\r` so the page shows the
+        // whole line (its JS treats `\r` as a line-overwrite marker).
+        let line = line.trim_end_matches('\r');
+        if writeln!(stream, "{line}").is_err() {
+            return;
+        }
+    }
+    if !follow {
+        let _ = stream.flush();
+        return;
+    }
+
+    // Follow: a BufReader positioned after the tail yields new bytes as the
+    // file grows. Complete lines are emitted immediately; a partial line is
+    // held until its terminating `\n` arrives.
+    let mut reader = BufReader::new(file);
+    if reader.seek(SeekFrom::Start(offset_after)).is_err() {
+        return;
+    }
+    let mut pending: Vec<u8> = Vec::with_capacity(1024);
+    let mut chunk = [0u8; 2048];
+    let mut last_growth = std::time::Instant::now();
+    loop {
+        if client_closed(stream) {
+            return;
+        }
+        // A stopped service that has gone quiet ends the stream, like
+        // `docker logs -f` on a stopped container.
+        if last_growth.elapsed() > LOG_FOLLOW_IDLE && !service_running(state, service) {
+            break;
+        }
+        match reader.read(&mut chunk) {
+            Ok(0) => {}
+            Ok(n) => {
+                last_growth = std::time::Instant::now();
+                pending.extend_from_slice(&chunk[..n]);
+                while let Some(pos) = pending.iter().position(|&b| b == b'\n') {
+                    let text = String::from_utf8_lossy(&pending[..pos]);
+                    let text = text.trim_end_matches('\r');
+                    if writeln!(stream, "{text}").is_err() {
+                        return;
+                    }
+                    pending.drain(..=pos);
+                }
+            }
+            Err(_) => return,
+        }
+        thread::sleep(Duration::from_millis(LOG_FOLLOW_POLL_MS));
+    }
+}
+
+/// Streams the proxy's live request-log queue. See [`handle_logs`] for the
+/// wire format; each entry is rendered the way the TUI's proxy tab shows it.
+fn stream_proxy_log(stream: &mut UnixStream, state: &IpcState, tail: usize, follow: bool) {
+    let handle = state
+        .proxy_logs
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let Some(queue) = handle else {
+        let _ = writeln!(stream, "[fog] no proxy configured");
+        return;
+    };
+
+    let (snapshot, total) = {
+        let q = queue.lock().unwrap_or_else(|e| e.into_inner());
+        let total = q.len();
+        let skip = total.saturating_sub(tail);
+        (q.iter().skip(skip).cloned().collect::<Vec<_>>(), total)
+    };
+    for entry in &snapshot {
+        if write_log_entry(stream, entry).is_err() {
+            return;
+        }
+    }
+    if !follow {
+        let _ = stream.flush();
+        return;
+    }
+
+    let mut sent = total;
+    let mut last_growth = std::time::Instant::now();
+    loop {
+        if client_closed(stream) {
+            return;
+        }
+        // A stopped proxy that has gone quiet ends the stream.
+        if last_growth.elapsed() > LOG_FOLLOW_IDLE && !proxy_running(state) {
+            break;
+        }
+        let q = queue.lock().unwrap_or_else(|e| e.into_inner());
+        let total = q.len();
+        if total > sent {
+            last_growth = std::time::Instant::now();
+            for entry in q.iter().skip(sent) {
+                if write_log_entry(stream, entry).is_err() {
+                    return;
+                }
+            }
+            sent = total;
+        }
+        drop(q);
+        thread::sleep(Duration::from_millis(LOG_FOLLOW_POLL_MS));
+    }
+}
+
+/// Formats a proxy log entry as a line matching the TUI proxy tab's layout.
+fn write_log_entry(stream: &mut UnixStream, entry: &LogEntry) -> io::Result<()> {
+    let method = if entry.ws {
+        "WS".to_string()
+    } else {
+        entry.method.clone()
+    };
+    let status = if entry.status == 0 {
+        String::new()
+    } else {
+        entry.status.to_string()
+    };
+    let latency = if entry.status == 0 {
+        String::new()
+    } else {
+        format!("{}ms", entry.latency_ms)
+    };
+    writeln!(
+        stream,
+        "{method:<6} {:<35} {:<5} {:<8} {}",
+        entry.path, status, latency, entry.upstream
+    )
+}
+
+/// Whether the client closed the connection. Attempts a non-blocking read
+/// with a short timeout: `Ok(0)` (EOF) or a hard error means closed.
+fn client_closed(stream: &mut UnixStream) -> bool {
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(LOG_FOLLOW_POLL_MS)));
+    let mut buf = [0u8; 1];
+    match stream.read(&mut buf) {
+        Ok(0) => true,
+        Ok(_) => false,
+        Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => {
+            false
+        }
+        Err(_) => true,
+    }
+}
+
+/// Reads the last `n` newline-terminated lines of `file`, returning them in
+/// order plus the absolute byte offset just *after* them (so a follow reader
+/// resumes with only new output — no duplication). The read window is capped
+/// at 1 MiB, so an arbitrarily large log still tails quickly.
+fn read_tail_lines(file: &mut File, n: usize) -> (Vec<String>, u64) {
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let window: u64 = 1 << 20;
+    let start = len.saturating_sub(window);
+    if file.seek(SeekFrom::Start(start)).is_err() {
+        return (Vec::new(), len);
+    }
+    let mut data = Vec::new();
+    if file.read_to_end(&mut data).is_err() {
+        return (Vec::new(), len);
+    }
+
+    // Split into lines, recording each line's absolute start and end offset.
+    let mut lines: Vec<(String, u64, u64)> = Vec::new();
+    let mut seg_start: u64 = start;
+    for (i, b) in data.iter().enumerate() {
+        if *b == b'\n' {
+            let text = String::from_utf8_lossy(&data[(seg_start - start) as usize..i]).into_owned();
+            let seg_end = seg_start + text.len() as u64 + 1;
+            lines.push((text, seg_start, seg_end));
+            seg_start = start + i as u64 + 1;
+        }
+    }
+
+    // Drop the leading partial line when the window started mid-line (the
+    // only complete line starting exactly at `start` when `start > 0`).
+    if start > 0 && lines.first().is_some_and(|(_, off, _)| *off == start) {
+        lines.remove(0);
+    }
+    let take = lines.len().saturating_sub(lines.len().saturating_sub(n));
+    let first_kept = lines.len().saturating_sub(take);
+    if first_kept >= lines.len() {
+        return (Vec::new(), len);
+    }
+    let offset_after = lines[lines.len() - 1].2;
+    let kept = lines
+        .into_iter()
+        .skip(first_kept)
+        .map(|(text, _, _)| text)
+        .collect::<Vec<_>>();
+    (kept, offset_after)
+}
+
+/// Sanitizes a service name into a safe log filename stem: `/` (and anything
+/// else outside an allowlist) becomes `_`, so a hostile name can never escape
+/// the log directory or reference another file.
+fn sanitize_service_name(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, ' ' | '_' | '.' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 /// The handoff message sent over the wire before each transferred fd.
@@ -728,7 +1054,7 @@ mod tests {
         let listener = UnixListener::bind(&path).unwrap();
         let server_state = state.clone();
         let server = thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
+            let (mut stream, _) = listener.accept().unwrap();
             handle_connection(stream, server_state);
         });
 
@@ -756,7 +1082,7 @@ mod tests {
         let listener = UnixListener::bind(&path).unwrap();
         let server_state = state.clone();
         let server = thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
+            let (mut stream, _) = listener.accept().unwrap();
             handle_connection(stream, server_state);
         });
 
@@ -796,7 +1122,7 @@ mod tests {
         let listener = UnixListener::bind(&path).unwrap();
         let server_state = state.clone();
         let server = thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
+            let (mut stream, _) = listener.accept().unwrap();
             handle_connection(stream, server_state);
         });
 
@@ -946,5 +1272,182 @@ mod tests {
         assert_eq!(outcome.handoffs[0].name, "db");
         // SAFETY: the returned fd is owned by the test.
         unsafe { libc::close(outcome.handoffs[0].fd) };
+    }
+
+    fn unique(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("fog-{name}-{}", std::process::id()))
+    }
+
+    #[test]
+    fn test_instance_log_dir_naming() {
+        assert_eq!(
+            instance_log_dir(1234),
+            std::env::temp_dir().join("fog-1234.logs")
+        );
+    }
+
+    #[test]
+    fn test_sanitize_service_name() {
+        assert_eq!(sanitize_service_name("web"), "web");
+        assert_eq!(sanitize_service_name("my service"), "my service");
+        assert_eq!(sanitize_service_name("a/b"), "a_b");
+        assert_eq!(sanitize_service_name("../../etc"), ".._.._etc");
+        assert_eq!(sanitize_service_name("a;rm -rf"), "a_rm -rf");
+        assert_eq!(sanitize_service_name(""), "");
+    }
+
+    #[test]
+    fn test_read_tail_lines() {
+        let dir = unique("readtail");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.log");
+        fs::write(&path, "l1\nl2\nl3\nl4\nl5\n").unwrap();
+
+        let mut f = fs::File::open(&path).unwrap();
+        let (lines, offset_after) = read_tail_lines(&mut f, 3);
+        assert_eq!(lines, vec!["l3", "l4", "l5"]);
+        // Offset points past the last tail line, so a follow reader gets only
+        // new output — no duplication.
+        assert_eq!(offset_after, 15);
+        let mut reader = BufReader::new(fs::File::open(&path).unwrap());
+        reader.seek(SeekFrom::Start(offset_after)).unwrap();
+        let mut rest = String::new();
+        reader.read_to_string(&mut rest).unwrap();
+        assert_eq!(rest, "");
+
+        // n larger than the file returns everything.
+        let mut f = fs::File::open(&path).unwrap();
+        let (lines, _) = read_tail_lines(&mut f, 10);
+        assert_eq!(lines, vec!["l1", "l2", "l3", "l4", "l5"]);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_stream_service_log_tail() {
+        let dir = unique("svclog");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("web.log"), "l1\nl2\nl3\nl4\nl5\n").unwrap();
+        let sock = unique("svclog.sock");
+        let _ = fs::remove_file(&sock);
+
+        let listener = UnixListener::bind(&sock).unwrap();
+        let dir_clone = dir.clone();
+        let state = Arc::new(IpcState::new("dev".to_string(), None, None));
+        let server_state = state.clone();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream_service_log(&mut stream, &server_state, &dir_clone, "web", 2, false);
+        });
+
+        let mut client = UnixStream::connect(&sock).unwrap();
+        let mut out = String::new();
+        client.read_to_string(&mut out).unwrap();
+        server.join().unwrap();
+
+        assert_eq!(out, "l4\nl5\n");
+
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_file(&sock);
+    }
+
+    #[test]
+    fn test_stream_service_log_missing() {
+        let dir = unique("misslog");
+        fs::create_dir_all(&dir).unwrap();
+        let sock = unique("misslog.sock");
+        let _ = fs::remove_file(&sock);
+
+        let listener = UnixListener::bind(&sock).unwrap();
+        let dir_clone = dir.clone();
+        let state = Arc::new(IpcState::new("dev".to_string(), None, None));
+        let server_state = state.clone();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream_service_log(&mut stream, &server_state, &dir_clone, "web", 5, false);
+        });
+
+        let mut client = UnixStream::connect(&sock).unwrap();
+        let mut out = String::new();
+        client.read_to_string(&mut out).unwrap();
+        server.join().unwrap();
+
+        assert!(out.contains("[fog] no captured log"));
+
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_file(&sock);
+    }
+
+    #[test]
+    fn test_stream_proxy_log_tail() {
+        let state = Arc::new(IpcState::new("dev".to_string(), None, None));
+        let q = Arc::new(Mutex::new(VecDeque::new()));
+        {
+            let mut lk = q.lock().unwrap();
+            lk.push_back(LogEntry {
+                method: "GET".into(),
+                path: "/api/bookings".into(),
+                upstream: "127.0.0.1:8000".into(),
+                status: 200,
+                latency_ms: 3,
+                ws: false,
+            });
+            lk.push_back(LogEntry {
+                method: "WS".into(),
+                path: "/ws".into(),
+                upstream: "127.0.0.1:8000".into(),
+                status: 101,
+                latency_ms: 1,
+                ws: true,
+            });
+        }
+        *state.proxy_logs.lock().unwrap() = Some(q);
+
+        let sock = unique("proxylog.sock");
+        let _ = fs::remove_file(&sock);
+        let listener = UnixListener::bind(&sock).unwrap();
+        let server_state = state.clone();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream_proxy_log(&mut stream, &server_state, 10, false);
+        });
+
+        let mut client = UnixStream::connect(&sock).unwrap();
+        let mut out = String::new();
+        client.read_to_string(&mut out).unwrap();
+        server.join().unwrap();
+
+        assert!(out.contains("GET"));
+        assert!(out.contains("/api/bookings"));
+        assert!(out.contains("200"));
+        assert!(out.contains("3ms"));
+        assert!(out.contains("WS"));
+        assert!(out.contains("/ws"));
+
+        let _ = fs::remove_file(&sock);
+    }
+
+    #[test]
+    fn test_logs_request_missing_file_roundtrip() {
+        let state = Arc::new(IpcState::new("dev".to_string(), None, None));
+        let sock = unique("logsreq.sock");
+        let _ = fs::remove_file(&sock);
+        let listener = UnixListener::bind(&sock).unwrap();
+        let server_state = state.clone();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            handle_connection(stream, server_state);
+        });
+
+        let mut client = UnixStream::connect(&sock).unwrap();
+        client
+            .write_all(b"{\"type\":\"logs\",\"service\":\"nonexistent\",\"follow\":false}\n")
+            .unwrap();
+        let mut out = String::new();
+        client.read_to_string(&mut out).unwrap();
+        server.join().unwrap();
+
+        assert!(out.contains("[fog] no captured log"));
+        let _ = fs::remove_file(&sock);
     }
 }
