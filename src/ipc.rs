@@ -1122,7 +1122,7 @@ mod tests {
         let listener = UnixListener::bind(&path).unwrap();
         let server_state = state.clone();
         let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
+            let (stream, _) = listener.accept().unwrap();
             handle_connection(stream, server_state);
         });
 
@@ -1435,7 +1435,7 @@ mod tests {
         let listener = UnixListener::bind(&sock).unwrap();
         let server_state = state.clone();
         let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
+            let (stream, _) = listener.accept().unwrap();
             handle_connection(stream, server_state);
         });
 

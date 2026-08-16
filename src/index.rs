@@ -446,6 +446,11 @@ fn discover_entries(shared_network: &str) -> Vec<IndexEntry> {
         }
     }
 
+    // Cache the git-derived project per working directory: containers from the
+    // same compose dir (and different worktrees of the same repo) share it.
+    let mut git_projects: std::collections::HashMap<String, Option<String>> =
+        std::collections::HashMap::new();
+
     for name in names {
         // Skip the router itself.
         let labels = match container_labels(&name) {
@@ -459,7 +464,15 @@ fn discover_entries(shared_network: &str) -> Vec<IndexEntry> {
         if !has_traefik && !expose {
             continue;
         }
-        let (project, worktree, shared) = derive_group(&labels, &name);
+        let git_project = labels
+            .get("com.docker.compose.project.working_dir")
+            .and_then(|wd| {
+                git_projects
+                    .entry(wd.clone())
+                    .or_insert_with(|| git_project_for(wd))
+                    .clone()
+            });
+        let (project, worktree, shared) = derive_group(&labels, &name, git_project.as_deref());
         let service = labels
             .get("com.docker.compose.service")
             .cloned()
@@ -548,14 +561,15 @@ fn discover_entries(shared_network: &str) -> Vec<IndexEntry> {
 /// Derives the display project name, worktree group and shared-infra flag for a
 /// container from its compose labels.
 ///
-/// Project = the repo root basename of `com.docker.compose.project.working_dir`
-/// (e.g. `/Users/.../GEMS` -> `gems`). Infra compose files live in an `infra/`
-/// subdirectory, so those are flagged `shared` and grouped under the repo root's
-/// project. Worktree = the compose project name after the first `-` (e.g.
-/// `gems-main` -> `main`, `gems-feature-x` -> `feature-x`), ignored for shared.
+/// `git_project` — the git-common-dir-derived project name, when the compose
+/// `working_dir` sits inside a repository — takes precedence over the
+/// label-derived name. This groups all worktrees of the same repo (e.g.
+/// `admin/` and `ui/` of red-fox) under one project, matching fog's own
+/// instance identity.
 fn derive_group(
     labels: &std::collections::HashMap<String, String>,
     container_name: &str,
+    git_project: Option<&str>,
 ) -> (String, String, bool) {
     let wd = labels
         .get("com.docker.compose.project.working_dir")
@@ -566,26 +580,31 @@ fn derive_group(
         .map(String::as_str)
         .unwrap_or(container_name);
     let is_infra = wd.ends_with("/infra") || wd.ends_with("\\infra");
-    let project = if wd.is_empty() {
-        // No working-dir label: fall back to the compose project name with any
-        // trailing `-<worktree>` stripped.
-        project_name
-            .split_once('-')
-            .map(|(p, _)| p.to_string())
-            .unwrap_or_else(|| project_name.to_string())
-    } else if is_infra {
-        // Repo root is the parent of `infra/`.
-        let repo = std::path::Path::new(wd)
-            .parent()
-            .and_then(|p| p.file_name())
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| project_name.to_string());
-        repo.to_lowercase()
-    } else {
-        std::path::Path::new(wd)
-            .file_name()
-            .map(|s| s.to_string_lossy().to_lowercase().to_owned())
-            .unwrap_or_else(|| project_name.to_string())
+    let project = match git_project.filter(|p| !p.is_empty()) {
+        Some(p) => p.to_string(),
+        None => {
+            if wd.is_empty() {
+                // No working-dir label: fall back to the compose project name
+                // with any trailing `-<worktree>` stripped.
+                project_name
+                    .split_once('-')
+                    .map(|(p, _)| p.to_string())
+                    .unwrap_or_else(|| project_name.to_string())
+            } else if is_infra {
+                // Repo root is the parent of `infra/`.
+                let repo = std::path::Path::new(wd)
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| project_name.to_string());
+                repo.to_lowercase()
+            } else {
+                std::path::Path::new(wd)
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_lowercase().to_owned())
+                    .unwrap_or_else(|| project_name.to_string())
+            }
+        }
     };
     if is_infra {
         (project, "shared".to_string(), true)
@@ -595,6 +614,31 @@ fn derive_group(
             .map(|(_, w)| w.to_string())
             .unwrap_or_else(|| "main".to_string());
         (project, worktree, false)
+    }
+}
+
+/// Resolves the display project name from the git repository containing a
+/// compose working directory, using the same identity fog uses for instances
+/// (the git common dir — shared by every worktree of the repo). Returns
+/// `None` when the directory isn't in a git repo or git is unavailable.
+fn git_project_for(working_dir: &str) -> Option<String> {
+    let common_dir = crate::project::detect(std::path::Path::new(working_dir))?;
+    Some(project_name_from_common_dir(&common_dir))
+}
+
+/// Maps a git common-dir path (e.g. `/repo/.git`) to a display project name
+/// (e.g. `repo`), lowercased to match the directory page's grouping.
+fn project_name_from_common_dir(common_dir: &str) -> String {
+    let path = std::path::Path::new(common_dir);
+    if path.file_name().is_some_and(|n| n == ".git") {
+        path.parent()
+            .and_then(std::path::Path::file_name)
+            .map(|n| n.to_string_lossy().to_lowercase())
+            .unwrap_or_else(|| common_dir.to_string())
+    } else {
+        path.file_name()
+            .map(|n| n.to_string_lossy().to_lowercase())
+            .unwrap_or_else(|| common_dir.to_string())
     }
 }
 
@@ -1668,7 +1712,7 @@ mod tests {
             ("com.docker.compose.project", "gems-main"),
         ]);
         assert_eq!(
-            derive_group(&l, "gems-main-api-1"),
+            derive_group(&l, "gems-main-api-1", None),
             ("gems".into(), "main".into(), false)
         );
     }
@@ -1683,7 +1727,7 @@ mod tests {
             ("com.docker.compose.project", "gems-feature-x"),
         ]);
         assert_eq!(
-            derive_group(&l, "gems-feature-x-api-1"),
+            derive_group(&l, "gems-feature-x-api-1", None),
             ("gems".into(), "feature-x".into(), false)
         );
     }
@@ -1698,7 +1742,7 @@ mod tests {
             ("com.docker.compose.project", "gems-infra"),
         ]);
         assert_eq!(
-            derive_group(&l, "gems-postgres"),
+            derive_group(&l, "gems-postgres", None),
             ("gems".into(), "shared".into(), true)
         );
     }
@@ -1715,7 +1759,7 @@ mod tests {
             ("com.docker.compose.project", "redfox-main"),
         ]);
         assert_eq!(
-            derive_group(&app, "redfox-main-api-1"),
+            derive_group(&app, "redfox-main-api-1", None),
             ("red-fox".into(), "main".into(), false)
         );
 
@@ -1727,7 +1771,7 @@ mod tests {
             ("com.docker.compose.project", "red-fox-infra"),
         ]);
         assert_eq!(
-            derive_group(&infra, "red-fox-infra-postgres-1"),
+            derive_group(&infra, "red-fox-infra-postgres-1", None),
             ("red-fox".into(), "shared".into(), true)
         );
     }
@@ -1735,16 +1779,64 @@ mod tests {
     #[test]
     fn test_derive_group_no_labels_falls_back_to_name() {
         let l = labels(&[]);
-        let (p, w, s) = derive_group(&l, "barecontainer");
+        let (p, w, s) = derive_group(&l, "barecontainer", None);
         assert_eq!(p, "barecontainer");
         assert_eq!(w, "main");
         assert!(!s);
 
         // A dashed name without a working-dir falls back to the base (prefix
         // before the first `-`).
-        let (p, w, _) = derive_group(&l, "gems-main");
+        let (p, w, _) = derive_group(&l, "gems-main", None);
         assert_eq!(p, "gems");
         assert_eq!(w, "main");
+    }
+
+    #[test]
+    fn test_derive_group_git_project_unifies_worktrees() {
+        // admin/ and ui/ are separate worktrees of the same repo; the
+        // git-derived project groups both under red-fox.
+        let app = labels(&[
+            (
+                "com.docker.compose.project.working_dir",
+                "/Users/naputt/code/red-fox/ui",
+            ),
+            ("com.docker.compose.project", "redfox-ui"),
+        ]);
+        let (p, w, s) = derive_group(&app, "redfox-ui-frontend-1", Some("red-fox"));
+        assert_eq!((p.as_str(), w.as_str(), s), ("red-fox", "ui", false));
+
+        // Shared infra of any worktree stays under the same project.
+        let infra = labels(&[
+            (
+                "com.docker.compose.project.working_dir",
+                "/Users/naputt/code/red-fox/ui/infra",
+            ),
+            ("com.docker.compose.project", "red-fox-infra"),
+        ]);
+        let (p, w, s) = derive_group(&infra, "red-fox-infra-postgres-1", Some("red-fox"));
+        assert_eq!((p.as_str(), w.as_str(), s), ("red-fox", "shared", true));
+
+        // Without the git override, the working-dir basename wins (old
+        // behavior) — the override is what fixes the multi-worktree case.
+        let (p, w, s) = derive_group(&app, "redfox-ui-frontend-1", None);
+        assert_eq!((p.as_str(), w.as_str(), s), ("ui", "ui", false));
+    }
+
+    #[test]
+    fn test_project_name_from_common_dir() {
+        assert_eq!(
+            project_name_from_common_dir("/Users/naputt/code/red-fox/.git"),
+            "red-fox"
+        );
+        assert_eq!(
+            project_name_from_common_dir("/Users/naputt/git/GEMS/.git"),
+            "gems"
+        );
+        // A non-`.git` path uses its own basename.
+        assert_eq!(
+            project_name_from_common_dir("/repo/my-project"),
+            "my-project"
+        );
     }
 
     #[test]
