@@ -168,6 +168,18 @@ service on the left, or jump straight to one with
 Full field reference and both sections are documented in
 [Configuration](https://github.com/Naputt1/fog/blob/main/docs/configuration.md).
 
+## Web UI
+
+fog ships a web UI for the service directory, live logs, scripts, health and
+status, served by the embedded Rust (hyper) index server at
+`http://127.0.0.1:18080`.
+
+- **Stack** — [React 19](https://react.dev) + [shadcn/ui](https://ui.shadcn.com) + [Tailwind CSS 4](https://tailwindcss.com), with [TanStack Router](https://tanstack.com/router) and [TanStack Query](https://tanstack.com/query). The SPA lives in `ui/`.
+- **Build** — `cd ui && pnpm install && pnpm build` produces `ui/dist/`, which `build.rs` embeds into the binary at compile time. When `ui/dist` is absent the server falls back to the legacy generated service-directory page.
+- **Serving** — the compiled binary serves the SPA + JSON API from the hyper server on `index_port` (default `127.0.0.1:18080`).
+- **API** — `GET /api/services`, `/api/status`, `/api/scripts`, `/api/config`, `/api/health`, plus `/logs/stream` (SSE) for live logs.
+- **Dev workflow** — run the Rust server, then `cd ui && pnpm install && pnpm dev`; Vite serves the SPA on `:5173` and proxies `/api` and `/logs/stream` to `127.0.0.1:18080`.
+
 ## Usage
 
 ```bash

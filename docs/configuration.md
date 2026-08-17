@@ -440,6 +440,23 @@ links — handy for opening dev apps from a phone on the tailnet.
 - Traefik routes unmatched hosts to it via a low-priority catch-all router
   (`Host(\`*\`)`, `priority = 1`), so specific app routers always win.
 
+#### Web UI & JSON API
+
+The index server also serves the **fog web UI** — a React SPA (see `ui/`) that
+renders the service directory, live logs, scripts, health and status. It exposes
+a small JSON API consumed by the SPA:
+
+- `GET /api/services` — live service directory
+- `GET /api/status` — running fog instances
+- `GET /api/scripts` — configured scripts
+- `GET /api/config` — loaded configuration
+- `GET /api/health` — per-service health
+- `/logs/stream` — SSE stream of a service's logs
+
+Build the SPA with `cd ui && pnpm install && pnpm build`; `build.rs` embeds
+`ui/dist/` into the binary at compile time. Without a build the server falls
+back to the generated directory page above.
+
 ## Theme
 
 ```json
