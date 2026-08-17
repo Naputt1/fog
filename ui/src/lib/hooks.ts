@@ -9,7 +9,6 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   fetchServices,
   fetchStatus,
-  fetchScripts,
   fetchConfig,
   fetchHealth,
   fetchLaunchTargets,
@@ -39,15 +38,6 @@ export function useStatus() {
     queryKey: ["status"],
     queryFn: fetchStatus,
     refetchInterval: POLL_MS,
-  });
-}
-
-/** Scripts configuration. */
-export function useScripts() {
-  return useQuery({
-    queryKey: ["scripts"],
-    queryFn: fetchScripts,
-    staleTime: 30_000,
   });
 }
 

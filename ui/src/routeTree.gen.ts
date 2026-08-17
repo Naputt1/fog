@@ -12,7 +12,6 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as HealthRouteImport } from './routes/health'
 import { Route as LogsRouteImport } from './routes/logs'
-import { Route as ScriptsRouteImport } from './routes/scripts'
 import { Route as StatusRouteImport } from './routes/status'
 
 const IndexRoute = IndexRouteImport.update({
@@ -30,11 +29,6 @@ const LogsRoute = LogsRouteImport.update({
   path: '/logs',
   getParentRoute: () => rootRouteImport,
 } as any)
-const ScriptsRoute = ScriptsRouteImport.update({
-  id: '/scripts',
-  path: '/scripts',
-  getParentRoute: () => rootRouteImport,
-} as any)
 const StatusRoute = StatusRouteImport.update({
   id: '/status',
   path: '/status',
@@ -45,14 +39,12 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/health': typeof HealthRoute
   '/logs': typeof LogsRoute
-  '/scripts': typeof ScriptsRoute
   '/status': typeof StatusRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/health': typeof HealthRoute
   '/logs': typeof LogsRoute
-  '/scripts': typeof ScriptsRoute
   '/status': typeof StatusRoute
 }
 export interface FileRoutesById {
@@ -60,22 +52,20 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/health': typeof HealthRoute
   '/logs': typeof LogsRoute
-  '/scripts': typeof ScriptsRoute
   '/status': typeof StatusRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/health' | '/logs' | '/scripts' | '/status'
+  fullPaths: '/' | '/health' | '/logs' | '/status'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/health' | '/logs' | '/scripts' | '/status'
-  id: '__root__' | '/' | '/health' | '/logs' | '/scripts' | '/status'
+  to: '/' | '/health' | '/logs' | '/status'
+  id: '__root__' | '/' | '/health' | '/logs' | '/status'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   HealthRoute: typeof HealthRoute
   LogsRoute: typeof LogsRoute
-  ScriptsRoute: typeof ScriptsRoute
   StatusRoute: typeof StatusRoute
 }
 
@@ -102,13 +92,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof LogsRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/scripts': {
-      id: '/scripts'
-      path: '/scripts'
-      fullPath: '/scripts'
-      preLoaderRoute: typeof ScriptsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
     '/status': {
       id: '/status'
       path: '/status'
@@ -123,7 +106,6 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   HealthRoute: HealthRoute,
   LogsRoute: LogsRoute,
-  ScriptsRoute: ScriptsRoute,
   StatusRoute: StatusRoute,
 }
 export const routeTree = rootRouteImport

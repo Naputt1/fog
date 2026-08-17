@@ -73,40 +73,6 @@ export interface StatusSnapshot {
   instances: InstanceStatus[];
 }
 
-/** One route inside a script's proxy block. */
-export interface ProxyRoute {
-  /** Path prefix the route matches. */
-  path: string;
-  /** Host header to match, or null when the route matches any host. */
-  host: string | null;
-  /** Upstream target (host:port or URL). */
-  upstream: string;
-  /** Whether the route upgrades to WebSocket, null when unspecified. */
-  ws: boolean | null;
-}
-
-/** Proxy block of a script (null when the script exposes no proxy). */
-export interface ProxyConfig {
-  /** Port the proxy listens on. */
-  port: number;
-  routes: ProxyRoute[];
-}
-
-/** Script definition returned by GET /api/scripts. */
-export interface ScriptConfig {
-  /** Whether services run concurrently or sequentially. */
-  concurrent: boolean;
-  /** Services this script starts. */
-  services: string[];
-  /** Proxy block, or null when the script exposes no proxy. */
-  proxy: ProxyConfig | null;
-}
-
-/** Response envelope of GET /api/scripts keyed by script name. */
-export interface ScriptsResponse {
-  scripts: Record<string, ScriptConfig>;
-}
-
 /** Sidebar layout section of the fog config (null when unset). */
 export interface SidebarConfig {
   min_width: number;
@@ -257,11 +223,6 @@ export function fetchServices(): Promise<Service[]> {
 /** IPC status snapshot. */
 export function fetchStatus(): Promise<StatusSnapshot> {
   return fetchJson<StatusSnapshot>("/api/status");
-}
-
-/** Scripts configuration keyed by script name. */
-export function fetchScripts(): Promise<ScriptsResponse> {
-  return fetchJson<ScriptsResponse>("/api/scripts");
 }
 
 /** Fog config summary. */

@@ -492,7 +492,6 @@ async fn serve_index(
         "/logs/stream" => Ok(serve_logs_stream(&req).await),
         "/api/services" => Ok(api_services(network)),
         "/api/status" => Ok(api_status()),
-        "/api/scripts" => Ok(api_scripts()),
         "/api/config" => Ok(api_config()),
         "/api/health" => Ok(api_health()),
         "/api/launch/targets" => Ok(api_launch_targets_method(&method)),
@@ -897,50 +896,6 @@ fn api_health() -> Response<RespBody> {
         }
     }
     json_response(&serde_json::json!({ "health": health }))
-}
-
-/// `GET /api/scripts`: a summary of the configured scripts (names, concurrency,
-/// services, proxy routes) loaded best-effort from the fog config.
-fn api_scripts() -> Response<RespBody> {
-    let cfg = load_runtime_config();
-    let mut scripts = serde_json::Map::new();
-    for (name, script) in &cfg.scripts {
-        let services: Vec<String> = script
-            .service
-            .as_ref()
-            .map(|entries| {
-                entries
-                    .iter()
-                    .map(|e| {
-                        e.name.clone().unwrap_or_else(|| {
-                            std::path::Path::new(&e.path)
-                                .file_name()
-                                .unwrap_or_default()
-                                .to_string_lossy()
-                                .into_owned()
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        scripts.insert(
-            name.clone(),
-            serde_json::json!({
-                "concurrent": script.concurrent,
-                "services": services,
-                "proxy": script.proxy.as_ref().map(|p| serde_json::json!({
-                    "port": p.port,
-                    "routes": p.routes.iter().map(|r| serde_json::json!({
-                        "path": r.path,
-                        "host": r.host,
-                        "upstream": r.upstream,
-                        "ws": r.ws,
-                    })).collect::<Vec<_>>(),
-                })),
-            }),
-        );
-    }
-    json_response(&serde_json::json!({ "scripts": scripts }))
 }
 
 /// `GET /api/config`: a summary of the loaded fog configuration.
