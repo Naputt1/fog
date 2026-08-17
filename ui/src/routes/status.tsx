@@ -150,7 +150,15 @@ function ServiceActions({
   );
 }
 
-/** Nested table of the services spawned by one IPC instance. */
+/**
+ * Nested table of the services spawned by one IPC instance.
+ *
+ * Responsive: on `sm+` renders the scrollable table (the shared `Table`
+ * primitive already wraps itself in an `overflow-x-auto` container, so we
+ * only pin a `min-w` here to keep the columns from squishing on narrow-but-not-
+ * mobile widths). On `<sm` we swap to a card list so the Start/Stop/Restart
+ * actions don't force horizontal scrolling on phones.
+ */
 function ServiceTable({
   pid,
   services,
@@ -159,34 +167,62 @@ function ServiceTable({
   services: InstanceServiceStatus[];
 }) {
   return (
-    <Table>
-      <TableHeader>
-        <TableRow>
-          <TableHead>Service</TableHead>
-          <TableHead>Running</TableHead>
-          <TableHead>Health</TableHead>
-          <TableHead className="text-right">Actions</TableHead>
-        </TableRow>
-      </TableHeader>
-      <TableBody>
+    <>
+      {/* Desktop/tablet: horizontally scrollable table */}
+      <div className="hidden sm:block">
+        <Table className="min-w-[600px]">
+          <TableHeader>
+            <TableRow>
+              <TableHead>Service</TableHead>
+              <TableHead>Running</TableHead>
+              <TableHead>Health</TableHead>
+              <TableHead className="text-right">Actions</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {services.map((svc) => (
+              <TableRow key={svc.name}>
+                <TableCell className="font-mono font-medium">{svc.name}</TableCell>
+                <TableCell>
+                  <StatusBadge status={svc.running ? "running" : "stopped"} />
+                </TableCell>
+                <TableCell>
+                  <HealthBadge health={svc.health} />
+                </TableCell>
+                <TableCell className="text-right">
+                  <div className="flex justify-end">
+                    <ServiceActions pid={pid} svc={svc} />
+                  </div>
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </div>
+
+      {/* Mobile (<sm): card-based fallback so actions stay tap-friendly */}
+      <div className="space-y-3 sm:hidden">
         {services.map((svc) => (
-          <TableRow key={svc.name}>
-            <TableCell className="font-mono font-medium">{svc.name}</TableCell>
-            <TableCell>
+          <div
+            key={svc.name}
+            className="border-border rounded-lg border p-3"
+          >
+            <div className="flex items-center justify-between gap-2">
+              <span className="font-mono text-sm font-medium">
+                {svc.name}
+              </span>
               <StatusBadge status={svc.running ? "running" : "stopped"} />
-            </TableCell>
-            <TableCell>
+            </div>
+            <div className="mt-2">
               <HealthBadge health={svc.health} />
-            </TableCell>
-            <TableCell className="text-right">
-              <div className="flex justify-end">
-                <ServiceActions pid={pid} svc={svc} />
-              </div>
-            </TableCell>
-          </TableRow>
+            </div>
+            <div className="mt-3 border-t pt-3">
+              <ServiceActions pid={pid} svc={svc} />
+            </div>
+          </div>
         ))}
-      </TableBody>
-    </Table>
+      </div>
+    </>
   );
 }
 
@@ -431,7 +467,7 @@ function InstanceCard({
 
   return (
     <Card className="gap-3 py-4">
-      <CardHeader className="flex-row items-center justify-between gap-2 px-5">
+      <CardHeader className="flex-row flex-wrap items-center justify-between gap-2 px-5">
         <CardTitle className="flex flex-wrap items-baseline gap-x-2 font-mono text-sm">
           {inst.script}
           <span className="text-muted-foreground font-mono text-xs">

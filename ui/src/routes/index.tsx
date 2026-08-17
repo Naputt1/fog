@@ -16,7 +16,6 @@ import {
 } from "@/components/ui/table";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { ScrollArea } from "@/components/ui/scroll-area";
 
 export const Route = createFileRoute("/")({
   component: ServicesPage,
@@ -148,7 +147,7 @@ function StatsStrip({ services }: { services: Service[] }) {
   ];
 
   return (
-    <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
       {stats.map((stat) => (
         <div
           key={stat.label}
@@ -170,8 +169,8 @@ function ServicesTable({ services }: { services: Service[] }) {
   const groups = groupByProjectAndWorktree(services);
 
   return (
-    <Card className="gap-0 overflow-hidden py-0">
-      <ScrollArea className="max-h-[70vh]">
+    <Card className="gap-0 overflow-x-auto py-0">
+      <div className="max-h-[70vh] overflow-auto">
         <Table className="min-w-[720px]">
           <TableHeader className="[&_th]:bg-card sticky top-0 z-10 [&_th]:shadow-[inset_0_-1px_0_var(--color-border)]">
             <TableRow>
@@ -261,8 +260,93 @@ function ServicesTable({ services }: { services: Service[] }) {
             ))}
           </TableBody>
         </Table>
-      </ScrollArea>
+      </div>
     </Card>
+  );
+}
+
+/**
+ * Mobile (<lg) fallback for the services table. The wide table only fits once
+ * the sidebar has room, so below that we render grouped cards instead — the
+ * same project/worktree grouping as the table, without forcing horizontal
+ * scrolling on narrow viewports.
+ */
+function ServiceCardList({ services }: { services: Service[] }) {
+  const groups = groupByProjectAndWorktree(services);
+
+  return (
+    <div className="space-y-4">
+      {groups.map((project) => (
+        <Card key={project.project} className="gap-0 py-0">
+          <div className="border-primary/50 bg-secondary/40 border-b border-l-2 px-3 py-1.5">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex min-w-0 items-center gap-2 font-mono text-sm font-semibold">
+                <span className="text-primary/70 shrink-0">▓</span>
+                <span className="truncate">{project.project}</span>
+              </div>
+              <span className="border-primary/30 bg-primary/10 text-primary shrink-0 rounded-full border px-2 font-mono text-[10px]">
+                {project.total}
+              </span>
+            </div>
+          </div>
+
+          <div className="flex flex-col gap-4 px-3 py-3">
+            {project.worktrees.map((worktree) => (
+              <div key={`${project.project}:${worktree.worktree}`}>
+                <div className="text-muted-foreground flex items-center gap-1.5 font-mono text-[11px] tracking-wider uppercase">
+                  <GitBranch className="size-3 shrink-0" />
+                  <span className="truncate">
+                    {worktree.worktree || DEFAULT_WORKTREE}
+                  </span>
+                  <span className="text-muted-foreground/60">
+                    {worktree.services.length}
+                  </span>
+                </div>
+
+                <div className="mt-1.5 space-y-2">
+                  {worktree.services.map((svc) => (
+                    <div
+                      key={`${svc.project}/${svc.worktree}/${svc.service}`}
+                      className="border-border rounded-md border px-3 py-2"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="min-w-0 truncate font-mono text-sm font-medium">
+                          {svc.service}
+                        </span>
+                        <StatusBadge status={svc.status} />
+                      </div>
+                      {svc.url ? (
+                        <div className="mt-1.5 flex items-center gap-1">
+                          <a
+                            href={svc.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            title={svc.url}
+                            className="text-primary min-w-0 font-mono text-xs break-all underline-offset-4 hover:underline"
+                          >
+                            {svc.url}
+                          </a>
+                          <CopyUrlButton url={svc.url} />
+                        </div>
+                      ) : (
+                        <div className="text-muted-foreground mt-1.5 font-mono text-xs">
+                          —
+                        </div>
+                      )}
+                      {svc.ports.length > 0 ? (
+                        <div className="text-muted-foreground mt-1.5 font-mono text-xs break-all">
+                          {svc.ports.join(", ")}
+                        </div>
+                      ) : null}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </Card>
+      ))}
+    </div>
   );
 }
 
@@ -271,14 +355,14 @@ function ServicesPage() {
   const running = data?.filter((s) => s.status === "running").length ?? 0;
 
   return (
-    <div className="space-y-6">
+    <div className="min-w-0 space-y-6">
       <PageHeader
         title="Services"
         description="Docker-discovered containers managed by fog, grouped by project and worktree."
         actions={
           data && data.length > 0 ? (
-            <div className="border-primary/30 bg-primary/10 text-primary flex items-center gap-1.5 rounded-full border px-3 py-1 font-mono text-xs">
-              <span className="bg-primary size-1.5 animate-pulse rounded-full" />
+            <div className="border-primary/30 bg-primary/10 text-primary flex items-center gap-1.5 rounded-full border px-3 py-1 font-mono text-xs whitespace-nowrap">
+              <span className="bg-primary size-1.5 shrink-0 animate-pulse rounded-full" />
               {running}/{data.length} running
             </div>
           ) : undefined
@@ -307,7 +391,12 @@ function ServicesPage() {
       ) : (
         <>
           <StatsStrip services={data} />
-          <ServicesTable services={data} />
+          <div className="hidden lg:block">
+            <ServicesTable services={data} />
+          </div>
+          <div className="lg:hidden">
+            <ServiceCardList services={data} />
+          </div>
         </>
       )}
     </div>

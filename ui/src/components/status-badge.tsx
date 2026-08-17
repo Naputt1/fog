@@ -24,12 +24,12 @@ export function StatusBadge({ status }: { status: ServiceStatus }) {
     <Badge
       variant="outline"
       className={cn(
-        "gap-1.5 font-mono capitalize",
+        "gap-1.5 min-w-0 max-w-full font-mono capitalize",
         STATUS_STYLE[status] ?? "border-border text-muted-foreground"
       )}
     >
-      <span className={cn("size-1.5 rounded-full", dot)} />
-      {status}
+      <span className={cn("size-1.5 shrink-0 rounded-full", dot)} />
+      <span className="truncate">{status}</span>
     </Badge>
   );
 }

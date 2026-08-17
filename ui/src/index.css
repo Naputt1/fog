@@ -100,6 +100,14 @@
   }
   html {
     color-scheme: dark;
+    /*
+     * Horizontal-overflow safety net for narrow viewports.
+     * `overflow-x: clip` (not `hidden`) intentionally does NOT create a scroll
+     * container, so `position: sticky` / `position: fixed` descendants (e.g.
+     * sticky table headers) keep working while stray wide content is clipped
+     * at the viewport edge.
+     */
+    overflow-x: clip;
   }
   body {
     background-color: var(--color-background);
@@ -108,6 +116,8 @@
     font-feature-settings:
       "rlig" 1,
       "calt" 1;
+    /* Same guard on body for content that escapes the html scroll box. */
+    overflow-x: clip;
   }
 }
 

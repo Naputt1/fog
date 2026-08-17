@@ -50,7 +50,7 @@ function Brand() {
   );
 }
 
-function SidebarNav() {
+function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
   const location = useLocation();
 
   return (
@@ -65,6 +65,7 @@ function SidebarNav() {
           <Link
             key={item.to}
             to={item.to}
+            onClick={onNavigate}
             className={cn(
               "text-muted-foreground hover:bg-accent hover:text-accent-foreground flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm font-medium transition-colors",
               active &&
@@ -81,13 +82,13 @@ function SidebarNav() {
   );
 }
 
-function SidebarContent() {
+function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
   return (
     <div className="flex h-full flex-col gap-4">
       <div className="border-border flex h-14 items-center border-b px-4">
         <Brand />
       </div>
-      <SidebarNav />
+      <SidebarNav onNavigate={onNavigate} />
       <div className="border-border mt-auto border-t p-4">
         <div className="text-muted-foreground flex items-center gap-2 font-mono text-xs">
           <Cog className="size-3.5" />
@@ -110,7 +111,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   return (
     <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
-      <div className="bg-background text-foreground flex min-h-dvh">
+      <div className="bg-background text-foreground flex min-h-dvh w-full overflow-x-hidden">
         {/* Desktop sidebar */}
         <aside className="border-border bg-card hidden w-60 shrink-0 border-r md:block">
           <SidebarContent />
@@ -125,9 +126,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               </Button>
             </SheetTrigger>
 
-            <div className="flex items-center gap-2 font-mono">
+            <div className="flex min-w-0 items-center gap-2 font-mono">
               <span className="text-primary">~</span>
-              <span className="text-foreground text-sm">
+              <span className="text-foreground truncate text-sm">
                 /{current.label.toLowerCase()}
               </span>
             </div>
@@ -143,7 +144,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </header>
 
           <ScrollArea className="flex-1">
-            <main className="mx-auto w-full max-w-6xl p-4 md:p-6">
+            <main className="mx-auto w-full min-w-0 max-w-6xl p-4 md:p-6">
               {children}
             </main>
           </ScrollArea>
@@ -152,7 +153,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
       {/* Mobile sidebar (fixed overlay, side="left") */}
       <SheetContent side="left" className="w-60 p-0">
-        <SidebarContent />
+        <SidebarContent onNavigate={() => setMobileOpen(false)} />
       </SheetContent>
     </Sheet>
   );

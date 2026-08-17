@@ -14,7 +14,7 @@ export function PageHeader({
 }) {
   return (
     <div className="flex flex-wrap items-start justify-between gap-3">
-      <div>
+      <div className="min-w-0">
         <h1 className="font-mono text-xl font-semibold tracking-tight">
           {title}
         </h1>
@@ -25,7 +25,7 @@ export function PageHeader({
         ) : null}
       </div>
       {actions ? (
-        <div className="flex items-center gap-2">{actions}</div>
+        <div className="flex flex-wrap items-center gap-2">{actions}</div>
       ) : null}
     </div>
   );
@@ -54,9 +54,9 @@ export function ErrorState({
 }) {
   return (
     <Card className={cn("border-destructive/40", className)}>
-      <CardContent className="flex items-center gap-3 py-4">
+      <CardContent className="flex min-w-0 items-center gap-3 py-4">
         <AlertCircle className="text-destructive size-4 shrink-0" />
-        <div className="text-muted-foreground font-mono text-sm">
+        <div className="text-muted-foreground min-w-0 font-mono text-sm">
           {message ?? "Failed to load data."}
         </div>
       </CardContent>

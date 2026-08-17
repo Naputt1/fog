@@ -1,10 +1,10 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useHealth } from "@/lib/hooks";
+import type { HealthItem } from "@/lib/api";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page-state";
 import { StatusBadge } from "@/components/status-badge";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Table,
   TableBody,
@@ -65,6 +65,41 @@ function StatChip({
   );
 }
 
+/**
+ * Mobile (<lg) fallback for the results table: one compact card per result so
+ * no horizontal scrolling is needed on narrow viewports.
+ */
+function HealthCardList({ results }: { results: HealthItem[] }) {
+  return (
+    <div className="space-y-2">
+      {results.map((h) => (
+        <div
+          key={`${h.pid}/${h.script}/${h.service}`}
+          className="border-border rounded-lg border p-3"
+        >
+          <div className="flex items-center justify-between gap-2">
+            <span className="min-w-0 truncate font-mono text-sm font-medium">
+              {h.service}
+            </span>
+            <StatusBadge status={h.running ? "running" : "stopped"} />
+          </div>
+          <div className="mt-2 flex flex-wrap items-center gap-1.5">
+            <HealthBadge health={h.health} />
+            <span className="border-border text-muted-foreground rounded-full border px-2 py-0.5 font-mono text-[11px]">
+              pid {h.pid}
+            </span>
+          </div>
+          <div className="text-muted-foreground mt-2 flex min-w-0 flex-wrap gap-x-2 font-mono text-[11px]">
+            <span className="truncate">{h.script}</span>
+            {h.project ? <span>· {h.project}</span> : null}
+            {h.branch ? <span>@{h.branch}</span> : null}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function HealthPage() {
   const { data, isLoading, isError, error } = useHealth();
 
@@ -86,7 +121,7 @@ function HealthPage() {
   ).length;
 
   return (
-    <div className="space-y-6">
+    <div className="min-w-0 space-y-6">
       <PageHeader
         title="Health"
         description="Per-service health check results across all fog instances."
@@ -119,57 +154,63 @@ function HealthPage() {
             <StatChip label="unknown" value={unknown} />
           </div>
 
-          <Card className="gap-3 py-4">
-            <CardHeader className="gap-0.5 px-5">
-              <CardTitle className="font-mono text-sm">results</CardTitle>
-            </CardHeader>
-            <CardContent className="px-5">
-              <ScrollArea className="max-h-[70vh]">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Script</TableHead>
-                      <TableHead>Project</TableHead>
-                      <TableHead>Branch</TableHead>
-                      <TableHead>Service</TableHead>
-                      <TableHead>Instance</TableHead>
-                      <TableHead>Running</TableHead>
-                      <TableHead>Health</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {results.map((h) => (
-                      <TableRow key={`${h.pid}/${h.script}/${h.service}`}>
-                        <TableCell className="text-muted-foreground font-mono">
-                          {h.script}
-                        </TableCell>
-                        <TableCell className="text-muted-foreground font-mono">
-                          {h.project ?? ""}
-                        </TableCell>
-                        <TableCell className="text-muted-foreground font-mono">
-                          {h.branch ?? ""}
-                        </TableCell>
-                        <TableCell className="font-mono font-medium">
-                          {h.service}
-                        </TableCell>
-                        <TableCell className="text-muted-foreground font-mono">
-                          pid {h.pid}
-                        </TableCell>
-                        <TableCell>
-                          <StatusBadge
-                            status={h.running ? "running" : "stopped"}
-                          />
-                        </TableCell>
-                        <TableCell>
-                          <HealthBadge health={h.health} />
-                        </TableCell>
+          <div className="hidden lg:block">
+            <Card className="gap-3 py-4">
+              <CardHeader className="gap-0.5 px-5">
+                <CardTitle className="font-mono text-sm">results</CardTitle>
+              </CardHeader>
+              <CardContent className="px-5">
+                <div className="max-h-[70vh] min-w-full overflow-auto">
+                  <Table className="min-w-[700px]">
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Script</TableHead>
+                        <TableHead>Project</TableHead>
+                        <TableHead>Branch</TableHead>
+                        <TableHead>Service</TableHead>
+                        <TableHead>Instance</TableHead>
+                        <TableHead>Running</TableHead>
+                        <TableHead>Health</TableHead>
                       </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </ScrollArea>
-            </CardContent>
-          </Card>
+                    </TableHeader>
+                    <TableBody>
+                      {results.map((h) => (
+                        <TableRow key={`${h.pid}/${h.script}/${h.service}`}>
+                          <TableCell className="text-muted-foreground font-mono">
+                            {h.script}
+                          </TableCell>
+                          <TableCell className="text-muted-foreground font-mono">
+                            {h.project ?? ""}
+                          </TableCell>
+                          <TableCell className="text-muted-foreground font-mono">
+                            {h.branch ?? ""}
+                          </TableCell>
+                          <TableCell className="font-mono font-medium">
+                            {h.service}
+                          </TableCell>
+                          <TableCell className="text-muted-foreground font-mono">
+                            pid {h.pid}
+                          </TableCell>
+                          <TableCell>
+                            <StatusBadge
+                              status={h.running ? "running" : "stopped"}
+                            />
+                          </TableCell>
+                          <TableCell>
+                            <HealthBadge health={h.health} />
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+
+          <div className="lg:hidden">
+            <HealthCardList results={results} />
+          </div>
         </div>
       )}
     </div>
