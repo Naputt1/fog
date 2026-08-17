@@ -39,7 +39,7 @@ export interface Service {
   /** Externally reachable URL (e.g. http://main.acme:8080), null when none. */
   url: string | null;
   /** Exposed ports (empty array when none). */
-  ports: number[];
+  ports: string[];
   /** Free-form health detail from docker ("unknown" until real health check). */
   health: string;
 }
@@ -60,6 +60,10 @@ export interface InstanceStatus {
   pid: number;
   /** Script the instance was started with. */
   script: string;
+  /** Git project identity (repo name) of the instance, if reported. */
+  project?: string | null;
+  /** Branch the instance serves, if reported. */
+  branch?: string | null;
   /** Services spawned by this instance. */
   services: InstanceServiceStatus[];
 }
@@ -156,6 +160,10 @@ export interface HealthItem {
   pid: number;
   /** Script the instance was started with. */
   script: string;
+  /** Git project identity (repo name) of the instance, if reported. */
+  project?: string | null;
+  /** Branch the instance serves, if reported. */
+  branch?: string | null;
   /** Service name. */
   service: string;
   /** Whether the service process is running. */
@@ -169,6 +177,22 @@ export interface HealthResponse {
   health: HealthItem[];
 }
 
+/** Service control actions accepted by POST /api/instances/{pid}/services/{name}/action. */
+export type ServiceAction = "start" | "stop" | "restart";
+
+/** Result of a service control action (200 even when ok is false). */
+export interface ServiceActionResult {
+  ok: boolean;
+  reason?: string;
+}
+
+/** Kill an entire fog instance (sends graceful shutdown over IPC). */
+export async function postKillInstance(
+  pid: number
+): Promise<{ ok: boolean }> {
+  return postJson<{ ok: boolean }>(`/api/instances/${pid}/kill`, {});
+}
+
 export class ApiError extends Error {
   readonly status: number;
   constructor(status: number, message: string) {
@@ -178,7 +202,20 @@ export class ApiError extends Error {
   }
 }
 
-/** Shared fetch helper: resolves JSON or throws a descriptive ApiError. */
+/** Parse a non-2xx response into a descriptive ApiError (reads {"error"} body). */
+async function parseErrorResponse(res: Response, path: string): Promise<ApiError> {
+  let detail = res.statusText;
+  try {
+    const body = await res.json();
+    if (typeof body?.error === "string") detail = body.error;
+    else if (typeof body?.message === "string") detail = body.message;
+  } catch {
+    // ignore non-JSON error bodies
+  }
+  return new ApiError(res.status, detail || `Request to ${path} failed`);
+}
+
+/** Shared GET helper: resolves JSON or throws a descriptive ApiError. */
 async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
   let res: Response;
   try {
@@ -189,17 +226,26 @@ async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
   } catch (cause) {
     throw new Error(`Network error fetching ${path}: ${String(cause)}`);
   }
-  if (!res.ok) {
-    let detail = res.statusText;
-    try {
-      const body = await res.json();
-      if (typeof body?.error === "string") detail = body.error;
-      else if (typeof body?.message === "string") detail = body.message;
-    } catch {
-      // ignore non-JSON error bodies
-    }
-    throw new ApiError(res.status, detail || `Request to ${path} failed`);
+  if (!res.ok) throw await parseErrorResponse(res, path);
+  return (await res.json()) as T;
+}
+
+/** Shared POST helper: sends a JSON body and resolves JSON or throws a descriptive ApiError. */
+async function postJson<T>(path: string, body: unknown): Promise<T> {
+  let res: Response;
+  try {
+    res = await fetch(path, {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+  } catch (cause) {
+    throw new Error(`Network error posting ${path}: ${String(cause)}`);
   }
+  if (!res.ok) throw await parseErrorResponse(res, path);
   return (await res.json()) as T;
 }
 
@@ -226,6 +272,81 @@ export function fetchConfig(): Promise<ConfigResponse> {
 /** Per-service health results. */
 export function fetchHealth(): Promise<HealthResponse> {
   return fetchJson<HealthResponse>("/api/health");
+}
+
+/**
+ * Send a service control action (start/stop/restart) to a running fog instance.
+ *
+ * The backend responds 200 with `{ok:false, reason}` even when the action
+ * could not be applied, and throws 400/404 with `{"error":...}` for invalid
+ * actions / unknown instances — those surface as ApiError via `postJson`.
+ */
+export function postServiceAction(
+  pid: number,
+  name: string,
+  action: ServiceAction
+): Promise<ServiceActionResult> {
+  return postJson<ServiceActionResult>(
+    `/api/instances/${pid}/services/${encodeURIComponent(name)}/action`,
+    { action }
+  );
+}
+
+/** One git worktree (or the main checkout) of a launchable project. */
+export interface LaunchWorktree {
+  /** Absolute path of the worktree. */
+  path: string;
+  /** Git branch name, null for the main checkout. */
+  branch: string | null;
+  /** Script names available to launch in this worktree. */
+  scripts: string[];
+}
+
+/** A known project with launchable worktrees. */
+export interface LaunchProject {
+  /** Absolute path of the project root. */
+  path: string;
+  /** Basename of the project. */
+  name: string;
+  worktrees: LaunchWorktree[];
+}
+
+/** Response envelope of GET /api/launch/targets. */
+export interface LaunchTargets {
+  projects: LaunchProject[];
+}
+
+/** Result of POST /api/launch (200 success, or ApiError for 400/404/500). */
+export interface LaunchResult {
+  ok: boolean;
+  /** Process id of the started instance, present when ok. */
+  pid?: number;
+  /** Error detail, present when the backend returned a non-ok body. */
+  error?: string;
+}
+
+/** List the projects/worktrees/scripts a fog instance can be launched on. */
+export function fetchLaunchTargets(): Promise<LaunchTargets> {
+  return fetchJson<LaunchTargets>("/api/launch/targets");
+}
+
+/**
+ * Launch a fog instance on a config dir.
+ *
+ * `branch` is optional: null/undefined launches the main checkout, otherwise a
+ * named worktree. The backend responds 200 `{ok,pid}`, or throws 400/404/500
+ * with `{"error":...}` — those surface as ApiError via `postJson`.
+ */
+export function postLaunch(
+  configDir: string,
+  script: string,
+  branch?: string | null
+): Promise<LaunchResult> {
+  return postJson<LaunchResult>("/api/launch", {
+    config_dir: configDir,
+    script,
+    branch: branch ?? null,
+  });
 }
 
 /** Live log line delivered via the SSE stream. */

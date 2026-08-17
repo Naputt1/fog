@@ -713,11 +713,12 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
         eprintln!("warning: could not set Ctrl+C handler");
     }
 
-    let ipc_state = Arc::new(ipc::IpcState::new(
-        name.to_string(),
-        project.clone(),
-        branch.clone(),
-    ));
+    // Publish the config dir over IPC so the web UI can discover launchable
+    // projects for this instance. Set once on the (still unshared) state,
+    // before the IPC server spawns.
+    let mut ipc_state = ipc::IpcState::new(name.to_string(), project.clone(), branch.clone());
+    ipc_state.config_dir = Some(config_dir.to_string_lossy().into_owned());
+    let ipc_state = Arc::new(ipc_state);
     ipc::spawn_server(ipc_state.clone())?;
 
     if !detached {

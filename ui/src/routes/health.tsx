@@ -129,6 +129,8 @@ function HealthPage() {
                   <TableHeader>
                     <TableRow>
                       <TableHead>Script</TableHead>
+                      <TableHead>Project</TableHead>
+                      <TableHead>Branch</TableHead>
                       <TableHead>Service</TableHead>
                       <TableHead>Instance</TableHead>
                       <TableHead>Running</TableHead>
@@ -140,6 +142,12 @@ function HealthPage() {
                       <TableRow key={`${h.pid}/${h.script}/${h.service}`}>
                         <TableCell className="text-muted-foreground font-mono">
                           {h.script}
+                        </TableCell>
+                        <TableCell className="text-muted-foreground font-mono">
+                          {h.project ?? ""}
+                        </TableCell>
+                        <TableCell className="text-muted-foreground font-mono">
+                          {h.branch ?? ""}
                         </TableCell>
                         <TableCell className="font-mono font-medium">
                           {h.service}

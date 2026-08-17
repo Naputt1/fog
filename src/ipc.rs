@@ -16,6 +16,9 @@ const READ_TIMEOUT_SECS: u64 = 5;
 /// How long the reclaiming side waits for the replaced instance to prepare
 /// and send its handoffs before giving up.
 const HANDOFF_PREPARE_TIMEOUT_SECS: u64 = 30;
+/// How long the IPC thread waits for the App to execute a per-service
+/// `start`/`stop`/`restart` request before answering with a timeout.
+const CONTROL_TIMEOUT_SECS: u64 = 30;
 /// Maximum accepted length for a single IPC request line.
 const MAX_IPC_LINE_LEN: usize = 8192;
 /// Default trailing lines emitted by a `logs` request before following.
@@ -84,6 +87,10 @@ pub struct IpcState {
     pub project: Option<String>,
     /// Branch this instance serves, if any.
     pub branch: Option<String>,
+    /// Absolute path to the directory holding this instance's `fog.json`
+    /// (its config dir). Set once before the IPC server spawns; stable for
+    /// the lifetime of the process.
+    pub config_dir: Option<String>,
     /// Epoch milliseconds when this instance started.
     pub started_at: u64,
     /// Set to `true` when a kill request is received.
@@ -102,6 +109,14 @@ pub struct IpcState {
     pub handoff_prepared: Arc<AtomicBool>,
     /// Set by the IPC thread once handoffs have been sent to the requester.
     pub handoff_done: Arc<AtomicBool>,
+    /// Per-service control request published by the IPC thread for the App to
+    /// execute; cleared by the App once it has been taken.
+    pub control_req: Arc<Mutex<Option<ServiceActionRequest>>>,
+    /// The App's result for the last control request. The App is the only
+    /// writer; the IPC thread takes it once `control_done` is set.
+    pub control_result: Arc<Mutex<Option<ControlResponse>>>,
+    /// Set by the App once the control request has been executed.
+    pub control_done: Arc<AtomicBool>,
 }
 
 impl IpcState {
@@ -114,6 +129,7 @@ impl IpcState {
             script,
             project,
             branch,
+            config_dir: None,
             started_at: crate::lock::now_ms(),
             kill_flag: Arc::new(AtomicBool::new(false)),
             reuse_skip: Arc::new(Mutex::new(Vec::new())),
@@ -122,6 +138,9 @@ impl IpcState {
             handoff_claimed: Arc::new(AtomicBool::new(false)),
             handoff_prepared: Arc::new(AtomicBool::new(false)),
             handoff_done: Arc::new(AtomicBool::new(false)),
+            control_req: Arc::new(Mutex::new(None)),
+            control_result: Arc::new(Mutex::new(None)),
+            control_done: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -143,6 +162,10 @@ pub struct StatusResponse {
     /// Branch the instance serves, if any.
     #[serde(default)]
     pub branch: Option<String>,
+    /// Absolute path to the directory holding this instance's `fog.json`
+    /// (its config dir), if known.
+    #[serde(default)]
+    pub config_dir: Option<String>,
     /// Epoch milliseconds when the instance started (0 for older versions).
     #[serde(default)]
     pub started_at: u64,
@@ -170,6 +193,12 @@ enum Request {
         #[serde(default)]
         follow: bool,
     },
+    ServiceAction {
+        /// Display name of the target service (or `"proxy"`).
+        name: String,
+        /// The action to perform.
+        action: ServiceAction,
+    },
 }
 
 /// The response sent back to a `kill` request.
@@ -179,6 +208,39 @@ struct KillResponse {
     /// Human-readable reason when `ok` is false.
     #[serde(default)]
     reason: String,
+}
+
+/// The action a `service_action` request asks the App to perform on a single
+/// service.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceAction {
+    /// Start the service (fails if it is already running).
+    Start,
+    /// Stop the service without respawning it.
+    Stop,
+    /// Stop the service and spawn it again.
+    Restart,
+}
+
+/// The response sent back to a `service_action` request.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ControlResponse {
+    /// Whether the action was executed.
+    pub ok: bool,
+    /// Human-readable reason when `ok` is false (or a timeout occurred).
+    #[serde(default)]
+    pub reason: String,
+}
+
+/// A per-service control request published by the IPC thread for the App to
+/// execute. The App is the only consumer of these fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceActionRequest {
+    /// Display name of the target service (or `"proxy"`).
+    pub name: String,
+    /// The action to perform.
+    pub action: ServiceAction,
 }
 
 /// Returns the socket path for a given PID: `$TMPDIR/fog-<pid>.sock`.
@@ -282,6 +344,7 @@ fn handle_connection(mut stream: UnixStream, state: Arc<IpcState>) {
                 proxy,
                 project: state.project.clone(),
                 branch: state.branch.clone(),
+                config_dir: state.config_dir.clone(),
                 started_at: state.started_at,
             })
             .unwrap_or_default();
@@ -326,6 +389,40 @@ fn handle_connection(mut stream: UnixStream, state: Arc<IpcState>) {
             tail,
             follow,
         } => handle_logs(stream, state, &service, tail, follow),
+        Request::ServiceAction { name, action } => {
+            // Reset `control_done` BEFORE publishing the request so the App
+            // can never complete this request before its completion signal is
+            // cleared (the App is the only writer of the completion signal).
+            state.control_done.store(false, Ordering::SeqCst);
+            *state.control_req.lock().unwrap_or_else(|e| e.into_inner()) =
+                Some(ServiceActionRequest { name, action });
+            // Wait for the App to execute the action, mirroring the wait loop
+            // in `send_handoffs`. An empty result after the wait means the App
+            // never took the request (or never finished it).
+            let deadline = std::time::Instant::now() + Duration::from_secs(CONTROL_TIMEOUT_SECS);
+            loop {
+                if state.control_done.load(Ordering::SeqCst)
+                    || std::time::Instant::now() >= deadline
+                {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            let resp = state
+                .control_result
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+                .unwrap_or(ControlResponse {
+                    ok: false,
+                    reason: "timed out".to_string(),
+                });
+            let _ = writeln!(
+                stream,
+                "{}",
+                serde_json::to_string(&resp).unwrap_or_default()
+            );
+        }
     };
 }
 
@@ -747,6 +844,54 @@ pub fn send_kill_with_reuse(path: &Path, reuse: &[String]) -> io::Result<()> {
     Ok(())
 }
 
+/// Connects to a fog instance socket and asks it to `start`, `stop`, or
+/// `restart` a single service, returning the instance's verdict.
+///
+/// The read timeout covers the App's whole `CONTROL_TIMEOUT_SECS` execution
+/// window (the server answers "timed out" itself when the App never takes the
+/// request), so a slow-but-legitimate action is not cut short.
+///
+/// # Errors
+/// Returns an error if the connection fails, the response is malformed, or
+/// the instance does not answer within its control window.
+pub fn send_service_action(
+    path: &Path,
+    name: &str,
+    action: ServiceAction,
+) -> io::Result<ControlResponse> {
+    send_service_action_with_timeout(
+        path,
+        name,
+        action,
+        Duration::from_secs(CONTROL_TIMEOUT_SECS + 5),
+    )
+}
+
+/// Like [`send_service_action`], but with an explicit client read timeout
+/// (used by tests to fail fast on the timeout path).
+fn send_service_action_with_timeout(
+    path: &Path,
+    name: &str,
+    action: ServiceAction,
+    read_timeout: Duration,
+) -> io::Result<ControlResponse> {
+    let mut stream = UnixStream::connect(path)?;
+    stream.set_read_timeout(Some(read_timeout))?;
+    // Serialize both fields through serde_json so a hostile name or a
+    // non-default action can never break out of the JSON line.
+    let name = serde_json::to_string(name).unwrap_or_else(|_| "\"\"".to_string());
+    let action = serde_json::to_string(&action).unwrap_or_else(|_| "\"start\"".to_string());
+    let line = format!(r#"{{"type":"service_action","name":{name},"action":{action}}}"#);
+    stream.write_all(line.as_bytes())?;
+    stream.write_all(b"\n")?;
+    stream.flush()?;
+
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line)?;
+    serde_json::from_str(line.trim()).map_err(|e| io::Error::other(e.to_string()))
+}
+
 /// The handoff message as received by the reclaiming client.
 #[derive(Debug, Deserialize)]
 struct HandoffMsgReply {
@@ -1038,7 +1183,10 @@ mod tests {
 
     #[test]
     fn test_server_and_client_roundtrip() {
-        let state = Arc::new(IpcState::new("dev".to_string(), None, None));
+        // Build the state before wrapping it in an Arc so the plain `config_dir`
+        // field (which is set once, before the server shares the state) can be
+        // populated, mirroring `run_script`.
+        let mut state = IpcState::new("dev".to_string(), None, None);
         state.services.lock().unwrap().push(ServiceStatus {
             name: "web".into(),
             running: true,
@@ -1048,13 +1196,15 @@ mod tests {
             running: true,
             port: 8080,
         });
+        state.config_dir = Some("/srv/example".to_string());
+        let state = Arc::new(state);
 
         let path = std::env::temp_dir().join("fog-test-roundtrip.sock");
         let _ = fs::remove_file(&path);
         let listener = UnixListener::bind(&path).unwrap();
         let server_state = state.clone();
         let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
+            let (stream, _) = listener.accept().unwrap();
             handle_connection(stream, server_state);
         });
 
@@ -1064,6 +1214,7 @@ mod tests {
         assert_eq!(resp.script, "dev");
         assert_eq!(resp.pid, std::process::id());
         assert!(resp.started_at > 0);
+        assert_eq!(resp.config_dir.as_deref(), Some("/srv/example"));
         assert_eq!(resp.services.len(), 1);
         assert_eq!(resp.services[0].name, "web");
         assert_eq!(resp.services[0].health, "healthy");
@@ -1082,7 +1233,7 @@ mod tests {
         let listener = UnixListener::bind(&path).unwrap();
         let server_state = state.clone();
         let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
+            let (stream, _) = listener.accept().unwrap();
             handle_connection(stream, server_state);
         });
 
@@ -1272,6 +1423,100 @@ mod tests {
         assert_eq!(outcome.handoffs[0].name, "db");
         // SAFETY: the returned fd is owned by the test.
         unsafe { libc::close(outcome.handoffs[0].fd) };
+    }
+
+    #[test]
+    fn test_service_action_roundtrip() {
+        let state = Arc::new(IpcState::new("dev".to_string(), None, None));
+        let path = unique("svcaction.sock");
+        let _ = fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).unwrap();
+        let server_state = state.clone();
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            handle_connection(stream, server_state);
+        });
+
+        let client_path = path.clone();
+        let client = thread::spawn(move || {
+            send_service_action(&client_path, "web", ServiceAction::Restart).unwrap()
+        });
+
+        // The test main thread acts as the App loop: wait for the request to
+        // be published, then answer it.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let req = loop {
+            if let Some(req) = state
+                .control_req
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+            {
+                break req;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "control request was never published"
+            );
+            thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(req.name, "web");
+        assert_eq!(req.action, ServiceAction::Restart);
+        *state
+            .control_result
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(ControlResponse {
+            ok: true,
+            reason: String::new(),
+        });
+        state.control_done.store(true, Ordering::SeqCst);
+
+        let resp = client.join().unwrap();
+        server.join().unwrap();
+        assert!(resp.ok);
+        assert!(resp.reason.is_empty());
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_service_action_timeout() {
+        let state = Arc::new(IpcState::new("dev".to_string(), None, None));
+        let path = unique("svcaction-timeout.sock");
+        let _ = fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).unwrap();
+        let server_state = state.clone();
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            handle_connection(stream, server_state);
+        });
+
+        // The App loop never sets `control_done`: the server would answer
+        // "timed out" only after the full CONTROL_TIMEOUT_SECS. Give the
+        // client a short read timeout so the test fails fast instead of
+        // blocking the whole window when the wait misbehaves.
+        let res = send_service_action_with_timeout(
+            &path,
+            "web",
+            ServiceAction::Stop,
+            Duration::from_millis(300),
+        );
+        assert!(
+            res.is_err(),
+            "client must give up when the App never answers, got: {res:?}"
+        );
+        // The request must still have been published for the App loop.
+        assert!(
+            state
+                .control_req
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some(),
+            "control request must be published before the wait"
+        );
+
+        drop(server);
+        let _ = fs::remove_file(&path);
     }
 
     fn unique(name: &str) -> PathBuf {

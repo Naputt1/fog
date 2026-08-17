@@ -1353,6 +1353,25 @@ impl Terminal {
         self.spawn_into(&path, &cmd)
     }
 
+    /// Stops the command process in this terminal without respawning it:
+    /// kills the running process and runs the `shutdown_cmd`, then marks the
+    /// terminal stopped so its status reports not-running.
+    ///
+    /// This is what [`restart`](Self::restart) does minus the fresh spawn.
+    ///
+    /// # Errors
+    /// Always succeeds; the signature mirrors [`restart`](Self::restart) so the
+    /// two can be handled uniformly.
+    pub fn stop(&mut self) -> io::Result<()> {
+        self.kill_inner();
+        // Tear down the previous incarnation (e.g. `docker compose down`) just
+        // like restart does, so a stopped compose-style service does not leave
+        // its containers running.
+        self.run_shutdown_cmd();
+        self.stopped = true;
+        Ok(())
+    }
+
     /// Returns the current health status.
     pub fn get_health_status(&self) -> HealthStatus {
         *self.health_status.lock().unwrap_or_else(|e| e.into_inner())

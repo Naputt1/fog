@@ -451,7 +451,62 @@ a small JSON API consumed by the SPA:
 - `GET /api/scripts` — configured scripts
 - `GET /api/config` — loaded configuration
 - `GET /api/health` — per-service health
+- `GET /api/launch/targets` — launchable projects/worktrees/scripts (see below)
+- `POST /api/launch` — start a new detached fog instance (see below)
+- `POST /api/instances/{pid}/services/{name}/action` — start/stop/restart a service of a running instance (see below)
 - `/logs/stream` — SSE stream of a service's logs
+
+##### Service controls
+
+The `/status` page shows **Start**, **Stop** and **Restart** buttons on each
+service row — the services of a running fog instance, as listed by
+`GET /api/status` → `instances[].services[]`. The buttons call
+`POST /api/instances/{pid}/services/{name}/action` with a JSON body:
+
+```json
+{ "action": "start" | "stop" | "restart" }
+```
+
+The index server forwards the request to the running fog instance over its IPC
+Unix socket (localhost only) and responds `{"ok": true}` on success, or
+`{"ok": false, "reason": "..."}` on failure; a pid that is not a running fog
+instance yields `404`.
+
+> **Localhost only** — the index server listens on `127.0.0.1` only, so the
+> write path is available to local processes only. Any local process could
+> issue these actions, so do not expose the index port (`18080`) externally.
+
+##### Start instances
+
+The `/status` page includes a **Start instance** card with two modes:
+
+1. **Known project** — pick a project, then a branch/worktree, then one of
+   the scripts that worktree's `fog.json` defines, and press **Start**.
+2. **New project** — enter an absolute config directory path and a script
+   name (optionally a branch), and press **Start**.
+
+Either mode spawns a new **detached** fog instance. Launching on a *different*
+branch uses the existing [concurrent/share/reuse machinery](#concurrent-mode--sharing-services) —
+different branches always run concurrently, so the freshly launched branch
+instance runs side by side with any already-running ones.
+
+The UI is backed by two endpoints:
+
+- `GET /api/launch/targets` — returns
+  `{"projects":[{"path","name","worktrees":[{"path","branch","scripts":[...]}]}]}`,
+  enumerating launchable projects grouped by git repository: all worktrees/
+  branches of the same repo (discovered from running fog instances' config dirs
+  plus docker compose `working_dir` labels) appear under a single project named
+  after the repo, each with its git worktrees and the scripts each worktree's
+  `fog.json` defines.
+- `POST /api/launch` — body
+  `{"config_dir":"/abs/path","script":"dev","branch":"feature-x"|null}`; spawns
+  a detached fog daemon and waits until its IPC socket serves status, replying
+  `{"ok":true,"pid":1234}` on success or `400`/`500 {"error":"..."}` on failure.
+
+Like the service-action endpoint, this is a **localhost-only write path** — the
+index server binds to `127.0.0.1` only, so any local process could start fog
+instances. Do not expose the index port (`18080`) externally.
 
 Build the SPA with `cd ui && pnpm install && pnpm build`; `build.rs` embeds
 `ui/dist/` into the binary at compile time. Without a build the server falls

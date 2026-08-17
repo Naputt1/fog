@@ -235,7 +235,7 @@ fn serve_blocking(port: u16, dir: PathBuf, network: String) -> io::Result<()> {
                 let svc = service_fn(move |req: Request<hyper::body::Incoming>| {
                     let dir = dir.clone();
                     let network = network.clone();
-                    async move { serve_index(&dir, &network, &req).await }
+                    async move { serve_index(&dir, &network, req).await }
                 });
                 let _ = http1::Builder::new()
                     .serve_connection(io, svc)
@@ -484,81 +484,113 @@ fn discover_entries(shared_network: &str) -> Vec<IndexEntry> {
             .cloned()
             .unwrap_or_else(|| "app".to_string());
         let published = docker_ports(&name);
+        let raw_port = docker_host_port(&name);
+        entries.extend(reachable_entries_from(
+            &labels, &name, project, worktree, shared, service, published, raw_port,
+        ));
+    }
+    entries
+}
 
-        // Raw-TCP services exposed via `fog.expose` have no Traefik HTTP
-        // router; they are reached by hostname + published host port.
-        if expose {
-            let Some(hostname) = labels.get("fog.hostname").cloned() else {
-                continue;
-            };
-            let Some(raw_port) = docker_host_port(&name) else {
-                continue;
-            };
+/// Extracts every reachable entry for one container from its labels: raw
+/// `fog.expose` entries (reached by hostname + published host port) and
+/// Traefik router host/port/tls entries. Returns an empty vector when the
+/// container neither exposes via `fog.expose` nor defines a reachable Traefik
+/// router — the caller then falls back to a label-only entry.
+///
+/// Shared by [`discover_entries`] (the directory page) and
+/// [`discover_compose_containers`] (`/api/services`) so both report the same
+/// routed URLs. `project`/`worktree`/`shared` are the already-derived group;
+/// `published` and `raw_port` are the container's docker host bindings.
+#[allow(clippy::too_many_arguments)] // grouped container facts; explicit args keep it pure/testable
+fn reachable_entries_from(
+    labels: &std::collections::HashMap<String, String>,
+    container_name: &str,
+    project: String,
+    worktree: String,
+    shared: bool,
+    service: String,
+    published: Vec<String>,
+    raw_port: Option<String>,
+) -> Vec<IndexEntry> {
+    let mut entries = Vec::new();
+    let has_traefik = labels
+        .keys()
+        .any(|k| k.starts_with("traefik.http.routers."));
+    let expose = labels.get("fog.expose").is_some_and(|v| v == "true");
+
+    // Raw-TCP services exposed via `fog.expose` have no Traefik HTTP router;
+    // they are reached by hostname + published host port.
+    if expose {
+        let Some(hostname) = labels.get("fog.hostname").cloned() else {
+            return entries;
+        };
+        let Some(raw_port) = raw_port.clone() else {
+            return entries;
+        };
+        entries.push(IndexEntry {
+            project: project.clone(),
+            worktree: worktree.clone(),
+            shared,
+            container: container_name.to_string(),
+            service: service.clone(),
+            hostname,
+            port: String::new(),
+            published: published.clone(),
+            raw_port: Some(raw_port),
+            tls: false,
+        });
+        if !has_traefik {
+            return entries;
+        }
+    }
+
+    // First pass: collect service ports.
+    let mut service_port: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for (k, v) in labels {
+        if let Some(rest) = k
+            .strip_prefix("traefik.http.services.")
+            .and_then(|r| r.strip_suffix(".loadbalancer.server.port"))
+        {
+            service_port.insert(rest.to_string(), v.clone());
+        }
+    }
+    // Second pass: routers -> host(s) + port + tls. The router may name a
+    // different service explicitly; default to the same-name service.
+    for (k, v) in labels {
+        let Some(rest) = k.strip_prefix("traefik.http.routers.") else {
+            continue;
+        };
+        let Some((router, "rule")) = rest.split_once('.') else {
+            continue;
+        };
+        let svc = labels
+            .get(&format!("traefik.http.routers.{router}.service"))
+            .map(String::as_str)
+            .unwrap_or(router);
+        // Routers whose service has no load balancer port (e.g. an
+        // HTTP->HTTPS redirect router) are skipped: they don't terminate at
+        // a backend we can open.
+        let Some(port) = service_port.get(svc) else {
+            continue;
+        };
+        let tls = labels
+            .get(&format!("traefik.http.routers.{router}.tls"))
+            .is_some_and(|t| t == "true");
+        for host in extract_hosts(v) {
             entries.push(IndexEntry {
                 project: project.clone(),
                 worktree: worktree.clone(),
                 shared,
-                container: name.clone(),
+                container: container_name.to_string(),
                 service: service.clone(),
-                hostname,
-                port: String::new(),
+                hostname: host,
+                port: port.clone(),
                 published: published.clone(),
-                raw_port: Some(raw_port),
-                tls: false,
+                raw_port: raw_port.clone(),
+                tls,
             });
-            if !has_traefik {
-                continue;
-            }
-        }
-
-        // First pass: collect service ports.
-        let mut service_port: std::collections::HashMap<String, String> =
-            std::collections::HashMap::new();
-        for (k, v) in &labels {
-            if let Some(rest) = k
-                .strip_prefix("traefik.http.services.")
-                .and_then(|r| r.strip_suffix(".loadbalancer.server.port"))
-            {
-                service_port.insert(rest.to_string(), v.clone());
-            }
-        }
-        // Second pass: routers -> host(s) + port + tls. The router may name a
-        // different service explicitly; default to the same-name service.
-        for (k, v) in &labels {
-            let Some(rest) = k.strip_prefix("traefik.http.routers.") else {
-                continue;
-            };
-            let Some((router, "rule")) = rest.split_once('.') else {
-                continue;
-            };
-            let svc = labels
-                .get(&format!("traefik.http.routers.{router}.service"))
-                .map(String::as_str)
-                .unwrap_or(router);
-            // Routers whose service has no load balancer port (e.g. an
-            // HTTP->HTTPS redirect router) are skipped: they don't terminate at
-            // a backend we can open.
-            let Some(port) = service_port.get(svc) else {
-                continue;
-            };
-            let tls = labels
-                .get(&format!("traefik.http.routers.{router}.tls"))
-                .is_some_and(|t| t == "true");
-            let raw_port = docker_host_port(&name);
-            for host in extract_hosts(v) {
-                entries.push(IndexEntry {
-                    project: project.clone(),
-                    worktree: worktree.clone(),
-                    shared,
-                    container: name.clone(),
-                    service: service.clone(),
-                    hostname: host,
-                    port: port.clone(),
-                    published: published.clone(),
-                    raw_port: raw_port.clone(),
-                    tls,
-                });
-            }
         }
     }
     entries
@@ -736,16 +768,21 @@ fn container_labels(name: &str) -> Option<std::collections::HashMap<String, Stri
 ///   - `/logs`        → the live-log viewer page
 ///   - `/logs/stream` → SSE stream of a container's `docker logs -f`
 ///   - `/api/...`     → JSON API endpoints consumed by the SPA
+///   - `/api/instances/{pid}/services/{name}/action` → `POST` a service action
+///     to a running fog instance over its IPC socket
 ///   - any other path → an embedded SPA asset if present, else the generated
 ///     directory page (client-side routing fallback)
 ///
 /// The `Host` header (e.g. `100.86.26.45` on a phone, `127.0.0.1` on the
 /// laptop) determines the raw-link base so those are always reachable from
 /// the client.
+///
+/// The request is taken by value so the `action` route can consume its body;
+/// every other route ignores it.
 async fn serve_index(
     _dir: &std::path::Path,
     network: &str,
-    req: &Request<Incoming>,
+    req: Request<Incoming>,
 ) -> Result<Response<RespBody>, Infallible> {
     let base_host = req
         .headers()
@@ -758,17 +795,204 @@ async fn serve_index(
         ..RouterConfig::default()
     };
 
-    let path = req.uri().path();
-    match path {
-        "/logs" => Ok(serve_logs_page(&cfg, req)),
-        "/logs/stream" => Ok(serve_logs_stream(req).await),
+    let method = req.method().clone();
+    let path = req.uri().path().to_string();
+
+    // The action route consumes the request body (and forwards to a blocking
+    // IPC call), so handle it before the path-only dispatch below.
+    if let Some((pid, name)) = parse_action_route(&path) {
+        let (_, body) = req.into_parts();
+        let bytes = match body.collect().await {
+            Ok(collected) => collected.to_bytes(),
+            Err(_) => Bytes::new(),
+        };
+        return Ok(
+            handle_action_request(&method, pid, name, &bytes, resolve_instance_socket).await,
+        );
+    }
+
+    // The kill route is a no-body POST forwarded to the IPC socket.
+    if let Some(pid) = parse_kill_route(&path) {
+        return Ok(handle_kill_request(&method, pid).await);
+    }
+
+    // The launch route consumes the request body and can block for up to ~60s
+    // while waiting for the daemon to become ready, so handle it before the
+    // path-only dispatch below.
+    if path == "/api/launch" {
+        let (_, body) = req.into_parts();
+        let bytes = match body.collect().await {
+            Ok(collected) => collected.to_bytes(),
+            Err(_) => Bytes::new(),
+        };
+        return Ok(handle_launch_request(&method, &bytes).await);
+    }
+
+    match path.as_str() {
+        "/logs" => Ok(serve_logs_page(&cfg, &req)),
+        "/logs/stream" => Ok(serve_logs_stream(&req).await),
         "/api/services" => Ok(api_services(network)),
         "/api/status" => Ok(api_status()),
         "/api/scripts" => Ok(api_scripts()),
         "/api/config" => Ok(api_config()),
         "/api/health" => Ok(api_health()),
+        "/api/launch/targets" => Ok(api_launch_targets_method(&method)),
         _ if path.starts_with("/api/") => Ok(api_not_found()),
-        _ => Ok(serve_spa_fallback(&cfg, path, base_host.as_deref())),
+        _ => Ok(serve_spa_fallback(&cfg, &path, base_host.as_deref())),
+    }
+}
+
+/// Parses `/api/instances/{pid}/services/{name}/action` from a path, returning
+/// the raw `pid` and service `name` segments on a structural match.
+fn parse_action_route(path: &str) -> Option<(&str, &str)> {
+    let rest = path.strip_prefix("/api/instances/")?;
+    let mut seg = rest.split('/');
+    let pid = seg.next()?;
+    if seg.next() != Some("services") {
+        return None;
+    }
+    let name = seg.next()?;
+    if seg.next() != Some("action") {
+        return None;
+    }
+    // No trailing segments allowed.
+    if seg.next().is_some() {
+        return None;
+    }
+    Some((pid, name))
+}
+
+/// Resolves the IPC socket path for a fog instance PID, defaulting to the
+/// standard `$TMPDIR/fog-<pid>.sock` location. Factored out so tests can point
+/// the action handler at a custom socket.
+fn resolve_instance_socket(pid: u32) -> PathBuf {
+    crate::ipc::socket_path(pid)
+}
+
+/// Request body for `POST /api/instances/{pid}/services/{name}/action`.
+///
+/// The action uses [`crate::ipc::ServiceAction`] (serde `snake_case`), so only
+/// `start` / `stop` / `restart` deserialize; anything else (or a missing
+/// `action`) fails to parse and is rejected with a 400.
+#[derive(serde::Deserialize)]
+struct ServiceActionBody {
+    action: crate::ipc::ServiceAction,
+}
+
+/// Parses `/api/instances/{pid}/kill` from a path, returning the pid string.
+fn parse_kill_route(path: &str) -> Option<&str> {
+    let rest = path.strip_prefix("/api/instances/")?;
+    let (pid, tail) = rest.split_once('/')?;
+    if tail != "kill" {
+        return None;
+    }
+    Some(pid)
+}
+
+/// Handles `POST /api/instances/{pid}/kill` — sends a graceful shutdown
+/// over the instance's IPC socket.
+///
+///   - non-`POST` → 404
+///   - non-numeric pid → 400
+///   - no socket file → 404
+///   - success → 200 `{"ok":true}`
+///   - IPC error → 502
+async fn handle_kill_request(
+    method: &hyper::Method,
+    pid_str: &str,
+) -> Response<RespBody> {
+    if method != hyper::Method::POST {
+        return api_not_found();
+    }
+
+    let Ok(pid) = pid_str.parse::<u32>() else {
+        return api_error(StatusCode::BAD_REQUEST, "invalid pid");
+    };
+
+    let socket = resolve_instance_socket(pid);
+    if !socket.exists() {
+        return api_error(StatusCode::NOT_FOUND, "instance not found");
+    }
+
+    let outcome = tokio::task::spawn_blocking(move || crate::ipc::send_kill(&socket))
+        .await
+        .unwrap_or_else(|e| Err(io::Error::other(e.to_string())));
+
+    match outcome {
+        Ok(()) => json_response(&serde_json::json!({"ok":true})),
+        Err(e) => api_error(StatusCode::BAD_GATEWAY, &e.to_string()),
+    }
+}
+
+/// Handles `POST /api/instances/{pid}/services/{name}/action`.
+///
+/// Forward the action to the fog instance owning `pid` over its IPC socket.
+/// Status code contract:
+///   - non-`POST` method → 404 (treated like an unknown route, matching the
+///     other path-only handlers)
+///   - non-numeric `pid` → 400 `{"error":"invalid pid"}`
+///   - invalid/missing `action` in the body → 400 `{"error":"invalid action"}`
+///   - no socket file for the pid → 404 `{"error":"instance not found"}`
+///   - success (even with `ok:false`) → 200 `{"ok":..,"reason":".."}`
+///   - `send_service_action` io error (socket exists but the instance is
+///     unreachable / connect fails / times out) → 502 `{"error":"<err>"}`
+///
+/// The 502 choice mirrors a reverse-proxy `BAD_GATEWAY`: the request reached a
+/// real endpoint but the upstream fog instance did not answer — consistent with
+/// the proxy treating an unreachable upstream as a gateway error. The 404 above
+/// is reserved for the unambiguous "no instance socket at all" case.
+async fn handle_action_request<F>(
+    method: &hyper::Method,
+    pid: &str,
+    name: &str,
+    body: &[u8],
+    resolve: F,
+) -> Response<RespBody>
+where
+    F: Fn(u32) -> PathBuf,
+{
+    // The action route only fires on POST; any other method is treated like an
+    // unknown API route (404), matching the existing path-only handlers.
+    if method != hyper::Method::POST {
+        return api_not_found();
+    }
+
+    let Ok(pid) = pid.parse::<u32>() else {
+        return api_error(StatusCode::BAD_REQUEST, "invalid pid");
+    };
+
+    // Parse the body into a typed request so the action must be a real
+    // `ServiceAction` (`start`/`stop`/`restart`).
+    let req: ServiceActionBody = match serde_json::from_slice(body) {
+        Ok(r) => r,
+        Err(_) => return api_error(StatusCode::BAD_REQUEST, "invalid action"),
+    };
+
+    let socket = resolve(pid);
+    if !socket.exists() {
+        return api_error(StatusCode::NOT_FOUND, "instance not found");
+    }
+
+    // send_service_action blocks for up to ~35s (IPC 30s control window +
+    // margin); move it onto a blocking thread so the HTTP task is never
+    // blocked. A panic inside is surfaced as an io error, never an unwrap.
+    let socket_task = socket.clone();
+    let name_task = name.to_string();
+    let action = req.action;
+    let outcome = tokio::task::spawn_blocking(move || {
+        crate::ipc::send_service_action(&socket_task, &name_task, action)
+    })
+    .await
+    .unwrap_or_else(|e| Err(io::Error::other(e.to_string())));
+
+    match outcome {
+        // The instance's verdict is reported verbatim: 200 even when the action
+        // was refused (`ok:false`) with a human-readable reason.
+        Ok(resp) => json_response(&serde_json::json!({
+            "ok": resp.ok,
+            "reason": resp.reason,
+        })),
+        Err(e) => api_error(StatusCode::BAD_GATEWAY, &e.to_string()),
     }
 }
 
@@ -927,24 +1151,41 @@ fn discover_compose_containers() -> Vec<IndexEntry> {
                     .clone()
             });
         let (project, worktree, shared) = derive_group(&labels, &name, git_project.as_deref());
-        // No traefik route → no real router hostname; fall back to the compose
-        // service name so the entry still has a meaningful `url`/label.
-        let hostname = labels
-            .get("fog.hostname")
-            .cloned()
-            .unwrap_or_else(|| service.clone());
-        entries.push(IndexEntry {
-            project,
-            worktree,
+        let published = docker_ports(&name);
+        let raw_port = docker_host_port(&name);
+        let reachable = reachable_entries_from(
+            &labels,
+            &name,
+            project.clone(),
+            worktree.clone(),
             shared,
-            container: name.clone(),
-            service: service.clone(),
-            hostname,
-            port: String::new(),
-            published: docker_ports(&name),
-            raw_port: docker_host_port(&name),
-            tls: false,
-        });
+            service.clone(),
+            published.clone(),
+            raw_port.clone(),
+        );
+        if reachable.is_empty() {
+            // No traefik route → no real router hostname; fall back to the
+            // compose service name so the entry still has a meaningful
+            // `url`/label and the logs picker can still select it.
+            let hostname = labels
+                .get("fog.hostname")
+                .cloned()
+                .unwrap_or_else(|| service.clone());
+            entries.push(IndexEntry {
+                project,
+                worktree,
+                shared,
+                container: name.clone(),
+                service,
+                hostname,
+                port: String::new(),
+                published,
+                raw_port,
+                tls: false,
+            });
+        } else {
+            entries.extend(reachable);
+        }
     }
     entries
 }
@@ -964,6 +1205,10 @@ fn api_services(_network: &str) -> Response<RespBody> {
 struct ApiInstance {
     pid: u32,
     script: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    branch: Option<String>,
     services: Vec<crate::ipc::ServiceStatus>,
 }
 
@@ -974,6 +1219,8 @@ fn api_status() -> Response<RespBody> {
         .map(|i| ApiInstance {
             pid: i.pid,
             script: i.script,
+            project: i.project.map(|p| project_name_from_common_dir(&p)),
+            branch: i.branch,
             services: i.services,
         })
         .collect();
@@ -984,10 +1231,13 @@ fn api_status() -> Response<RespBody> {
 fn api_health() -> Response<RespBody> {
     let mut health = Vec::new();
     for inst in discover_fog_instances() {
+        let proj = inst.project.as_deref().map(project_name_from_common_dir);
         for svc in inst.services {
             health.push(serde_json::json!({
                 "pid": inst.pid,
                 "script": inst.script,
+                "project": proj,
+                "branch": inst.branch,
                 "service": svc.name,
                 "running": svc.running,
                 "health": svc.health,
@@ -1119,6 +1369,18 @@ fn api_not_found() -> Response<RespBody> {
         .expect("response builder failed")
 }
 
+/// Builds a JSON error response `{"error":"<message>"}` with the given status.
+/// Used by the service-action route for its validation and upstream failures.
+fn api_error(status: StatusCode, message: &str) -> Response<RespBody> {
+    let body = serde_json::to_vec(&serde_json::json!({ "error": message }))
+        .unwrap_or_else(|_| b"{}".to_vec());
+    Response::builder()
+        .status(status)
+        .header("content-type", "application/json")
+        .body(Full::new(Bytes::from(body)).boxed())
+        .expect("response builder failed")
+}
+
 /// The service-directory page: discovers the running services on `network`,
 /// renders them with raw `http://{host}:{port}/` links derived from the
 /// request's `Host` header, and returns the HTML.
@@ -1160,6 +1422,13 @@ struct FogInstance {
     script: String,
     /// Live service status snapshots.
     services: Vec<crate::ipc::ServiceStatus>,
+    /// Absolute path to the instance's config dir (its `fog.json`'s parent),
+    /// if reported by the instance.
+    config_dir: Option<String>,
+    /// Git project identity of the instance (from `IpcState.project`).
+    project: Option<String>,
+    /// Branch the instance serves (from `IpcState.branch`).
+    branch: Option<String>,
 }
 
 /// Discovers running fog instances by scanning their IPC sockets.
@@ -1172,11 +1441,382 @@ fn discover_fog_instances() -> Vec<FogInstance> {
                     pid,
                     script: status.script,
                     services: status.services,
+                    config_dir: status.config_dir,
+                    project: status.project,
+                    branch: status.branch,
                 });
             }
         }
     }
     out
+}
+
+/// A launchable worktree (or the single non-git fallback) reported by
+/// `GET /api/launch/targets`.
+#[derive(serde::Serialize)]
+struct LaunchWorktree {
+    path: String,
+    branch: Option<String>,
+    scripts: Vec<String>,
+}
+
+/// A launchable project reported by `GET /api/launch/targets`.
+#[derive(serde::Serialize)]
+struct LaunchProject {
+    path: String,
+    name: String,
+    worktrees: Vec<LaunchWorktree>,
+}
+
+/// The response body for `GET /api/launch/targets`.
+#[derive(serde::Serialize)]
+struct LaunchTargets {
+    projects: Vec<LaunchProject>,
+}
+
+/// Collects the compose `working_dir` roots of every running compose
+/// container (`com.docker.compose.project.working_dir` label). These are the
+/// config dirs of projects currently up, so they are launchable even when no
+/// `fog` instance is currently running for them.
+fn compose_project_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    let out = match Command::new("docker")
+        .args(["ps", "--format", "{{.Names}}"])
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return roots,
+    };
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let name = line.trim();
+        if name.is_empty() {
+            continue;
+        }
+        if let Some(labels) = container_labels(name)
+            && let Some(wd) = labels.get("com.docker.compose.project.working_dir")
+        {
+            roots.push(PathBuf::from(wd));
+        }
+    }
+    roots
+}
+
+/// Reads the sorted script names from a worktree's `fog.json`, best-effort.
+/// Returns an empty array when the config is missing or unparseable, so one
+/// bad project can never fail the whole discovery request.
+fn worktree_scripts(path: &std::path::Path) -> Vec<String> {
+    let cfg_path = path.join("fog.json");
+    if !cfg_path.is_file() {
+        return Vec::new();
+    }
+    let mut scripts: Vec<String> = match crate::config::load(&cfg_path) {
+        Ok(cfg) => cfg.scripts.keys().cloned().collect(),
+        Err(_) => return Vec::new(),
+    };
+    scripts.sort();
+    scripts
+}
+
+/// Builds the launchable targets: one project per unique (canonicalized)
+/// config dir, drawn from running fog instances and running compose
+/// containers, each with its git worktrees (or a single non-git fallback).
+fn discover_launch_targets() -> LaunchTargets {
+    // Collect and canonicalize candidate roots, deduplicating by canonical
+    // path so a project running both as a fog instance and a compose project
+    // is listed once.
+    let mut roots: Vec<PathBuf> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut push = |roots: &mut Vec<PathBuf>, p: &std::path::Path| {
+        let canon = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+        if seen.insert(canon.clone()) {
+            roots.push(canon);
+        }
+    };
+
+    for inst in discover_fog_instances() {
+        if let Some(cfg) = inst.config_dir {
+            push(&mut roots, std::path::Path::new(&cfg));
+        }
+    }
+    for root in compose_project_roots() {
+        push(&mut roots, &root);
+    }
+
+    roots.sort();
+    build_launch_targets(&roots, crate::project::detect)
+}
+
+/// Groups candidate launch roots into projects by git repository identity:
+/// every root inside the same repo collapses to one project (named after the
+/// repo, e.g. `red-fox`) whose `worktrees` list all of that repo's worktrees.
+/// Roots outside a git repository stay standalone single-worktree projects.
+///
+/// `detect` maps a root to its git common-dir (`None` for non-git roots), and
+/// is injectable so the grouping logic is testable without a real git repo.
+fn build_launch_targets(
+    roots: &[PathBuf],
+    detect: impl Fn(&std::path::Path) -> Option<String>,
+) -> LaunchTargets {
+    let mut by_common: std::collections::BTreeMap<String, Vec<PathBuf>> =
+        std::collections::BTreeMap::new();
+    let mut non_git: Vec<PathBuf> = Vec::new();
+    for root in roots {
+        match detect(root) {
+            Some(common_dir) => by_common.entry(common_dir).or_default().push(root.clone()),
+            None => non_git.push(root.clone()),
+        }
+    }
+    let mut projects: Vec<LaunchProject> = by_common
+        .into_iter()
+        .map(|(common_dir, group)| launch_project_for_repo(&common_dir, &group))
+        .chain(non_git.iter().map(|root| launch_project_for(root)))
+        .collect();
+    // Sort projects by name for a stable, readable listing.
+    projects.sort_by(|a, b| a.name.cmp(&b.name));
+    LaunchTargets { projects }
+}
+
+/// Builds a single launchable project from a canonicalized root path: its
+/// git worktrees (or a single non-git fallback entry) and each worktree's
+/// scripts. Factored out so tests can exercise it with a temp dir.
+fn launch_project_for(root: &std::path::Path) -> LaunchProject {
+    let name = root
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| root.to_string_lossy().into_owned());
+
+    let worktrees: Vec<LaunchWorktree> = match crate::worktree::list(root) {
+        Some(list) => list
+            .into_iter()
+            .map(|wt| LaunchWorktree {
+                path: wt.path.to_string_lossy().into_owned(),
+                branch: wt.branch,
+                scripts: worktree_scripts(&wt.path),
+            })
+            .collect(),
+        // Non-git (or git unavailable): a single entry pointing at the
+        // root itself.
+        None => vec![LaunchWorktree {
+            path: root.to_string_lossy().into_owned(),
+            branch: None,
+            scripts: worktree_scripts(root),
+        }],
+    };
+
+    LaunchProject {
+        path: root.to_string_lossy().into_owned(),
+        name,
+        worktrees,
+    }
+}
+
+/// Builds a single launchable project for one git repository, given its
+/// common-dir identity and the config-dir roots inside it. Lists *all* of the
+/// repo's worktrees (so `admin`/`ui`/`infra` appear as one project, not
+/// three) and names the project after the repo. Falls back to a single
+/// worktree at the representative root if the repo cannot be enumerated.
+fn launch_project_for_repo(common_dir: &str, roots: &[PathBuf]) -> LaunchProject {
+    let name = project_name_from_common_dir(common_dir);
+    // Any root inside the repo can enumerate all of its worktrees.
+    let rep = &roots[0];
+    let worktrees: Vec<LaunchWorktree> = match crate::worktree::list(rep) {
+        Some(list) => list
+            .into_iter()
+            .map(|wt| LaunchWorktree {
+                path: wt.path.to_string_lossy().into_owned(),
+                branch: wt.branch,
+                scripts: worktree_scripts(&wt.path),
+            })
+            .collect(),
+        None => vec![LaunchWorktree {
+            path: rep.to_string_lossy().into_owned(),
+            branch: None,
+            scripts: worktree_scripts(rep),
+        }],
+    };
+    // Prefer the main worktree's path as the project path, else the first
+    // worktree, else the representative root.
+    let path = worktrees
+        .iter()
+        .find(|w| w.branch.as_deref() == Some("main"))
+        .map(|w| w.path.clone())
+        .or_else(|| worktrees.first().map(|w| w.path.clone()))
+        .unwrap_or_else(|| rep.to_string_lossy().into_owned());
+    LaunchProject {
+        path,
+        name,
+        worktrees,
+    }
+}
+
+/// `GET /api/launch/targets`: the launchable projects, worktrees, and scripts.
+/// Any method other than GET is treated like an unknown route (404).
+fn api_launch_targets_method(method: &hyper::Method) -> Response<RespBody> {
+    if method != hyper::Method::GET {
+        return api_not_found();
+    }
+    json_response(&discover_launch_targets())
+}
+
+/// Request body for `POST /api/launch`.
+#[derive(serde::Deserialize)]
+struct LaunchBody {
+    /// Absolute path to a config directory (or to a `fog.json` file).
+    config_dir: String,
+    /// Name of the script to run.
+    script: String,
+    /// Optional branch to launch; resolves to that branch's worktree.
+    #[serde(default)]
+    branch: Option<String>,
+}
+
+/// How long a launched daemon may take to become ready before we give up.
+const LAUNCH_READY_TIMEOUT_SECS: u64 = 60;
+/// How long we poll for readiness (ms).
+const LAUNCH_READY_POLL_MS: u64 = 100;
+
+/// Resolves a launch request's effective config path and validates the script
+/// against the config's `scripts`, returning a human-readable error message on
+/// failure. Mirrors `run_script`'s config resolution so the web UI launches
+/// exactly what the CLI would.
+fn resolve_launch_target(body: &LaunchBody) -> Result<PathBuf, String> {
+    let config_dir = std::path::Path::new(&body.config_dir);
+    // Accept a directory (config dir) or a direct path to `fog.json`.
+    let config_path = if config_dir.is_dir() {
+        config_dir.join("fog.json")
+    } else {
+        config_dir.to_path_buf()
+    };
+    // The config dir must exist (or the `<dir>/fog.json` path must exist).
+    if !config_path.exists() {
+        return Err(format!("config directory not found: {}", body.config_dir));
+    }
+
+    // If a branch is requested, resolve it to a worktree and point the config
+    // at that worktree's `fog.json` (the branch may live in another worktree
+    // whose config differs).
+    let effective_config =
+        if let Some(branch) = body.branch.as_deref().filter(|b| !b.trim().is_empty()) {
+            match crate::worktree::resolve(config_dir, branch) {
+                Some(wt) => wt.path.join("fog.json"),
+                None => return Err(format!("no worktree is checked out on branch '{branch}'")),
+            }
+        } else {
+            config_path
+        };
+
+    let cfg = crate::config::load(&effective_config)
+        .map_err(|_| format!("could not read config '{}'", effective_config.display()))?;
+    if !cfg.scripts.contains_key(&body.script) {
+        return Err(format!("unknown script '{}'", body.script));
+    }
+    Ok(effective_config)
+}
+
+/// Spawns `fog <script>` detached (mirroring `daemonize`), waits until its IPC
+/// socket serves a status reply, and returns its PID. Returns `io::Error` on
+/// spawn failure or if the child exits / never becomes ready during startup.
+fn spawn_detached(config_path: &std::path::Path, script: &str) -> io::Result<u32> {
+    use std::os::unix::process::CommandExt;
+
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("fog"));
+    let mut cmd = Command::new(&exe);
+    cmd.arg("--config")
+        .arg(config_path)
+        .arg(script)
+        .env("FOG_DAEMON_CHILD", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // Detach from the controlling terminal / session, exactly like
+    // `daemonize`'s `pre_exec`.
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| io::Error::other(format!("could not start detached fog: {e}")))?;
+    let pid = child.id();
+
+    // Wait until the daemon's socket serves a status reply.
+    let socket = crate::ipc::socket_path(pid);
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_secs(LAUNCH_READY_TIMEOUT_SECS);
+    loop {
+        if crate::ipc::query_status(&socket).is_ok() {
+            break;
+        }
+        if child.try_wait().ok().flatten().is_some() {
+            return Err(io::Error::other(format!(
+                "detached fog '{script}' (pid {pid}) exited during startup; logs: {}",
+                crate::ipc::instance_log_dir(pid).display()
+            )));
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(io::Error::other(format!(
+                "detached fog '{script}' (pid {pid}) did not become ready within {}s; logs: {}",
+                LAUNCH_READY_TIMEOUT_SECS,
+                crate::ipc::instance_log_dir(pid).display()
+            )));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(LAUNCH_READY_POLL_MS));
+    }
+    Ok(pid)
+}
+
+/// Handles `POST /api/launch`.
+///
+/// Status code contract:
+///   - non-`POST` method → 404 (unknown route)
+///   - missing `config_dir`/`script` → 400 `{"error":"config_dir and script are required"}`
+///   - nonexistent config dir → 400 `{"error":"config directory not found: <path>"}`
+///   - unknown branch → 400 `{"error":"no worktree is checked out on branch '<branch>'"}`
+///   - unreadable config / unknown script → 400
+///   - spawn failure → 500 `{"error":"could not start detached fog: <err>"}`
+///   - child exits during startup → 500
+///   - readiness timeout → 500
+///   - success → 200 `{"ok":true,"pid":<pid>}`
+async fn handle_launch_request(method: &hyper::Method, body: &[u8]) -> Response<RespBody> {
+    if method != hyper::Method::POST {
+        return api_not_found();
+    }
+
+    let parsed: LaunchBody = match serde_json::from_slice(body) {
+        Ok(b) => b,
+        Err(_) => {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "config_dir and script are required",
+            );
+        }
+    };
+    if parsed.config_dir.trim().is_empty() || parsed.script.trim().is_empty() {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "config_dir and script are required",
+        );
+    }
+
+    let config_path = match resolve_launch_target(&parsed) {
+        Ok(p) => p,
+        Err(msg) => return api_error(StatusCode::BAD_REQUEST, &msg),
+    };
+
+    let script = parsed.script.clone();
+    let config_task = config_path.clone();
+    // The spawn + readiness wait can block for up to ~60s; move it onto a
+    // blocking thread so the HTTP task is never blocked.
+    let outcome = tokio::task::spawn_blocking(move || spawn_detached(&config_task, &script))
+        .await
+        .unwrap_or_else(|e| Err(io::Error::other(e.to_string())));
+
+    match outcome {
+        Ok(pid) => json_response(&serde_json::json!({ "ok": true, "pid": pid })),
+        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    }
 }
 
 /// Streams one service's logs as Server-Sent Events.
@@ -2341,6 +2981,9 @@ mod tests {
                     health: "stopped".into(),
                 },
             ],
+            config_dir: None,
+            project: None,
+            branch: None,
         }];
         let html = logs_page_html(&entries, &instances, "redfox-main-api-1");
         assert!(html.contains("red-fox"));
@@ -2509,5 +3152,414 @@ mod tests {
             ct.starts_with("text/html"),
             "expected text/html for client route, got {ct:?}"
         );
+    }
+
+    /// Reads a response body to bytes for assertions.
+    async fn body_bytes(resp: Response<RespBody>) -> Vec<u8> {
+        use http_body_util::BodyExt;
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec()
+    }
+
+    #[tokio::test]
+    async fn test_action_route_dispatch() {
+        // A resolver that always returns a socket path that does not exist, so
+        // the handler reaches the "instance not found" branch for valid POSTs.
+        let no_socket = |_: u32| std::env::temp_dir().join("fog-action-nonexistent-zz.sock");
+
+        // Valid POST to a pid with no socket file -> 404 (instance not found);
+        // this proves the handler runs past method/pid/action parsing.
+        let resp = handle_action_request(
+            &hyper::Method::POST,
+            "424242",
+            "web",
+            b"{\"action\":\"start\"}",
+            no_socket,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // Invalid action value -> 400 invalid action.
+        let resp = handle_action_request(
+            &hyper::Method::POST,
+            "424242",
+            "web",
+            b"{\"action\":\"fly\"}",
+            no_socket,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(String::from_utf8_lossy(&body_bytes(resp).await).contains("invalid action"));
+
+        // Missing action -> 400 invalid action.
+        let resp =
+            handle_action_request(&hyper::Method::POST, "424242", "web", b"{}", no_socket).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Non-numeric pid -> 400 invalid pid.
+        let resp = handle_action_request(
+            &hyper::Method::POST,
+            "not-a-pid",
+            "web",
+            b"{\"action\":\"start\"}",
+            no_socket,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(String::from_utf8_lossy(&body_bytes(resp).await).contains("invalid pid"));
+
+        // A non-POST method on the action path must not run an action: 404.
+        let resp = handle_action_request(
+            &hyper::Method::GET,
+            "424242",
+            "web",
+            b"{\"action\":\"start\"}",
+            no_socket,
+        )
+        .await;
+        assert_ne!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_action_route_parse() {
+        assert_eq!(
+            parse_action_route("/api/instances/1234/services/web/action"),
+            Some(("1234", "web"))
+        );
+        assert_eq!(
+            parse_action_route("/api/instances/1/services/a-b/action"),
+            Some(("1", "a-b"))
+        );
+        // Wrong shape / extra segments / wrong prefix must not match.
+        assert_eq!(parse_action_route("/api/instances/1234"), None);
+        assert_eq!(parse_action_route("/api/instances/1234/services/web"), None);
+        assert_eq!(
+            parse_action_route("/api/instances/1234/services/web/action/extra"),
+            None
+        );
+        assert_eq!(
+            parse_action_route("/api/instances/1234/other/web/action"),
+            None
+        );
+        assert_eq!(parse_action_route("/api/services"), None);
+        assert_eq!(parse_action_route("/"), None);
+    }
+
+    /// Binds a real `UnixListener` that mimics a fog instance's IPC socket:
+    /// accepts one connection, verifies the request is a `service_action` line,
+    /// and replies with the given `ControlResponse`-shaped JSON.
+    fn spawn_fake_instance(path: &std::path::Path, reply: &str) -> thread::JoinHandle<()> {
+        use std::io::{BufRead, Write};
+        let listener = std::os::unix::net::UnixListener::bind(path).unwrap();
+        let reply = reply.to_string();
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            assert!(
+                line.starts_with("{\"type\":\"service_action\""),
+                "unexpected request line: {line}"
+            );
+            writeln!(stream, "{reply}").unwrap();
+        })
+    }
+
+    #[tokio::test]
+    async fn test_action_route_forwards_ok() {
+        let path = std::env::temp_dir().join(format!("fog-action-ok-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let server = spawn_fake_instance(&path, r#"{"ok":true,"reason":""}"#);
+
+        let socket = path.clone();
+        let resp = handle_action_request(
+            &hyper::Method::POST,
+            "12345",
+            "web",
+            b"{\"action\":\"restart\"}",
+            move |_| socket.clone(),
+        )
+        .await;
+        server.join().unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+        assert_eq!(json["ok"], true);
+        assert_eq!(json["reason"], "");
+    }
+
+    #[tokio::test]
+    async fn test_action_route_forwards_refused() {
+        let path =
+            std::env::temp_dir().join(format!("fog-action-refused-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let server = spawn_fake_instance(&path, r#"{"ok":false,"reason":"boom"}"#);
+
+        let socket = path.clone();
+        let resp = handle_action_request(
+            &hyper::Method::POST,
+            "12345",
+            "web",
+            b"{\"action\":\"stop\"}",
+            move |_| socket.clone(),
+        )
+        .await;
+        server.join().unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        // The instance refused the action, but the forward itself succeeded:
+        // still a 200, with the verdict surfaced in the body.
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+        assert_eq!(json["ok"], false);
+        assert_eq!(json["reason"], "boom");
+    }
+
+    /// Creates a unique temp directory for a test and returns its path.
+    fn test_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("fog-launch-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn test_launch_target_non_git_fallback_with_scripts() {
+        // A plain directory (not a git repo) with a fog.json must surface as a
+        // single project with a single worktree (the root) and its scripts.
+        let dir = test_dir("non-git");
+        std::fs::write(
+            dir.join("fog.json"),
+            r#"{"scripts":{"dev":{},"prod":{},"lint":{}}}"#,
+        )
+        .unwrap();
+
+        let project = launch_project_for(&dir);
+        assert_eq!(project.name, dir.file_name().unwrap().to_string_lossy());
+        assert_eq!(project.path, dir.to_string_lossy());
+        assert_eq!(
+            project.worktrees.len(),
+            1,
+            "non-git fallback is one worktree"
+        );
+        let wt = &project.worktrees[0];
+        assert_eq!(wt.path, dir.to_string_lossy());
+        assert_eq!(wt.branch, None, "non-git fallback has no branch");
+        assert_eq!(
+            wt.scripts,
+            vec!["dev", "lint", "prod"],
+            "scripts are sorted"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_launch_target_empty_scripts_without_fog_json() {
+        // A directory without fog.json still appears as a launchable target,
+        // just with no scripts.
+        let dir = test_dir("no-config");
+        let project = launch_project_for(&dir);
+        assert_eq!(project.worktrees.len(), 1);
+        assert!(
+            project.worktrees[0].scripts.is_empty(),
+            "no fog.json -> empty scripts"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_build_launch_targets_groups_by_common_dir() {
+        // `ui/` and `admin/` are worktrees of the same repo -> they collapse to
+        // one project named after the repo; a non-git root stays standalone.
+        let base = std::env::temp_dir().join(format!("fog-grp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let ui = base.join("ui");
+        let admin = base.join("admin");
+        let neo = base.join("neo-backend");
+        std::fs::create_dir_all(&ui).unwrap();
+        std::fs::create_dir_all(&admin).unwrap();
+        std::fs::create_dir_all(&neo).unwrap();
+
+        let roots = vec![ui.clone(), admin.clone(), neo.clone()];
+        let ui_ref = ui.clone();
+        let admin_ref = admin.clone();
+        let targets = build_launch_targets(&roots, move |root: &std::path::Path| {
+            if root == ui_ref.as_path() || root == admin_ref.as_path() {
+                Some("/repo/red-fox/.git".to_string())
+            } else {
+                None
+            }
+        });
+
+        assert_eq!(
+            targets.projects.len(),
+            2,
+            "same-repo roots must collapse to one project"
+        );
+        // Sorted by name: neo-backend < red-fox.
+        assert_eq!(targets.projects[0].name, "neo-backend");
+        assert_eq!(targets.projects[1].name, "red-fox");
+        // The git group is a single project (not a real git repo here, so a
+        // single-worktree fallback) covering both roots' identity.
+        let rf = &targets.projects[1];
+        assert_eq!(rf.worktrees.len(), 1);
+        assert_eq!(rf.worktrees[0].path, ui.to_string_lossy());
+        // Non-git root keeps its own basename project.
+        let neo_p = &targets.projects[0];
+        assert_eq!(neo_p.worktrees.len(), 1);
+        assert_eq!(neo_p.worktrees[0].path, neo.to_string_lossy());
+        assert_eq!(neo_p.worktrees[0].branch, None);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_reachable_entries_traefik_tls_router() {
+        // A Traefik router with a Host rule + TLS + loadbalancer port yields a
+        // proper https entry (the /api/services url fix).
+        let l = labels(&[
+            ("traefik.http.routers.ui.rule", "Host(`ui.red-fox`)"),
+            ("traefik.http.routers.ui.tls", "true"),
+            ("traefik.http.services.ui.loadbalancer.server.port", "5173"),
+        ]);
+        let entries = reachable_entries_from(
+            &l,
+            "redfox-ui-frontend-1",
+            "red-fox".into(),
+            "ui".into(),
+            false,
+            "frontend".into(),
+            vec![],
+            None,
+        );
+        assert_eq!(entries.len(), 1);
+        let e = &entries[0];
+        assert_eq!(e.hostname, "ui.red-fox");
+        assert_eq!(e.port, "5173");
+        assert!(e.tls);
+        assert_eq!(e.service, "frontend");
+        assert_eq!(entry_url(e), "https://ui.red-fox/");
+    }
+
+    #[test]
+    fn test_reachable_entries_raw_expose() {
+        // `fog.expose` without Traefik yields a raw hostname + host-port entry.
+        let l = labels(&[("fog.expose", "true"), ("fog.hostname", "postgres.red-fox")]);
+        let entries = reachable_entries_from(
+            &l,
+            "redfox-postgres-1",
+            "red-fox".into(),
+            "shared".into(),
+            true,
+            "postgres".into(),
+            vec![],
+            Some("55274".into()),
+        );
+        assert_eq!(entries.len(), 1);
+        let e = &entries[0];
+        assert_eq!(e.hostname, "postgres.red-fox");
+        assert!(e.port.is_empty());
+        assert_eq!(e.raw_port.as_deref(), Some("55274"));
+        assert!(!e.tls);
+        assert_eq!(entry_url(e), "http://postgres.red-fox:55274/");
+    }
+
+    #[test]
+    fn test_reachable_entries_neither_empty() {
+        // A container with no Traefik router and no fog.expose has no reachable
+        // entries; the caller falls back to a label-only entry.
+        let l = labels(&[("com.docker.compose.service", "api")]);
+        let entries = reachable_entries_from(
+            &l,
+            "redfox-api-1",
+            "red-fox".into(),
+            "main".into(),
+            false,
+            "api".into(),
+            vec![],
+            None,
+        );
+        assert!(entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_launch_validation_errors() {
+        // Missing both fields -> 400.
+        let resp = handle_launch_request(&hyper::Method::POST, b"{}").await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(String::from_utf8_lossy(&body_bytes(resp).await).contains("config_dir and script"));
+
+        // Missing script -> 400.
+        let resp = handle_launch_request(&hyper::Method::POST, br#"{"config_dir":"/tmp"}"#).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(String::from_utf8_lossy(&body_bytes(resp).await).contains("config_dir and script"));
+
+        // Unparseable body -> 400.
+        let resp = handle_launch_request(&hyper::Method::POST, b"not json").await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Nonexistent config dir -> 400 config directory not found.
+        let resp = handle_launch_request(
+            &hyper::Method::POST,
+            br#"{"config_dir":"/nonexistent/zz/does-not-exist","script":"dev"}"#,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            String::from_utf8_lossy(&body_bytes(resp).await).contains("config directory not found")
+        );
+
+        // A real config dir but with an unknown script -> 400 unknown script.
+        let dir = test_dir("unknown-script");
+        std::fs::write(dir.join("fog.json"), r#"{"scripts":{"dev":{}}}"#).unwrap();
+        let body = serde_json::json!({
+            "config_dir": dir.to_string_lossy(),
+            "script": "prod",
+        });
+        let resp =
+            handle_launch_request(&hyper::Method::POST, &serde_json::to_vec(&body).unwrap()).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(String::from_utf8_lossy(&body_bytes(resp).await).contains("unknown script 'prod'"));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // A real config dir with a requested branch that is not checked out ->
+        // 400 no worktree on branch.
+        let dir = test_dir("unknown-branch");
+        std::fs::write(dir.join("fog.json"), r#"{"scripts":{"dev":{}}}"#).unwrap();
+        let body = serde_json::json!({
+            "config_dir": dir.to_string_lossy(),
+            "script": "dev",
+            "branch": "feature-nope",
+        });
+        let resp =
+            handle_launch_request(&hyper::Method::POST, &serde_json::to_vec(&body).unwrap()).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            String::from_utf8_lossy(&body_bytes(resp).await)
+                .contains("no worktree is checked out on branch 'feature-nope'")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_launch_dispatch_methods() {
+        // GET /api/launch/targets -> 200.
+        let resp = api_launch_targets_method(&hyper::Method::GET);
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // POST to /api/launch/targets -> 404 (GET only).
+        let resp = api_launch_targets_method(&hyper::Method::POST);
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // GET to /api/launch -> 404 (POST only).
+        let resp = handle_launch_request(&hyper::Method::GET, b"{}").await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 }

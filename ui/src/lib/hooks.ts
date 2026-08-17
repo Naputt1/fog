@@ -5,15 +5,20 @@
  * `useMutation` — the api module already isolates the transport layer.
  */
 import { useCallback, useEffect, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   fetchServices,
   fetchStatus,
   fetchScripts,
   fetchConfig,
   fetchHealth,
+  fetchLaunchTargets,
+  postLaunch,
+  postKillInstance,
+  postServiceAction,
   subscribeLogs,
   type LogLine,
+  type ServiceAction,
 } from "@/lib/api";
 
 /** Poll cadence for status-ish endpoints. */
@@ -64,7 +69,79 @@ export function useHealth() {
   });
 }
 
+/**
+ * Service control mutation (start/stop/restart). On success invalidates the
+ * `status` and `health` queries so the status table refetches the new running
+ * state. Callers read `mutation.error` / `mutation.isPending` to surface state.
+ */
+export function useServiceAction() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      pid,
+      name,
+      action,
+    }: {
+      pid: number;
+      name: string;
+      action: ServiceAction;
+    }) => postServiceAction(pid, name, action),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["status"] });
+      queryClient.invalidateQueries({ queryKey: ["health"] });
+    },
+  });
+}
+
+/**
+ * Kill an entire fog instance. On success invalidates `status` and `health`
+ * so the table drops the terminated instance.
+ */
+export function useKillInstance() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ pid }: { pid: number }) => postKillInstance(pid),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["status"] });
+      queryClient.invalidateQueries({ queryKey: ["health"] });
+    },
+  });
+}
+
 const MAX_LOG_LINES = 2_000;
+
+/** Launchable projects/worktrees/scripts (cached briefly, not polled). */
+export function useLaunchTargets() {
+  return useQuery({
+    queryKey: ["launch-targets"],
+    queryFn: fetchLaunchTargets,
+    staleTime: 30_000,
+  });
+}
+
+/**
+ * Launch mutation. On success invalidates `status` and `health` so the status
+ * table refetches the new running instance. Callers read `mutation.error` /
+ * `mutation.isPending` / `mutation.data` to surface state.
+ */
+export function useLaunch() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      configDir,
+      script,
+      branch,
+    }: {
+      configDir: string;
+      script: string;
+      branch?: string | null;
+    }) => postLaunch(configDir, script, branch),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["status"] });
+      queryClient.invalidateQueries({ queryKey: ["health"] });
+    },
+  });
+}
 
 /**
  * Subscribe to the live SSE log stream for a service.
