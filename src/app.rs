@@ -18,7 +18,7 @@ use crossterm::execute;
 use ratatui::{
     DefaultTerminal, Frame,
     layout::{Alignment, Constraint, Layout, Rect},
-    style::Style,
+    style::{Color, Style},
     symbols::border,
     text::{Line, Span, Text},
     widgets::{Block, Clear, Paragraph},
@@ -38,11 +38,20 @@ enum Mode {
 }
 
 /// An open worktree-switch popup: the repository's worktrees plus an
-/// incremental filter and a selected row.
+/// incremental fuzzy filter, a selected row, live-branch markers, and a
+/// transient status line. `f`-search mode feeds the filter (Esc returns to
+/// browsing); `d` terminates the selected branch's live instances.
 struct SwitchPopup {
     worktrees: Vec<Worktree>,
     filter: String,
     selected: usize,
+    searching: bool,
+    /// Branches that currently have a live fog instance serving them,
+    /// rendered with a green asterisk.
+    running: Vec<String>,
+    /// Transient status message (e.g. the terminate outcome), cleared by the
+    /// next key press.
+    status: Option<String>,
 }
 
 impl SwitchPopup {
@@ -51,16 +60,29 @@ impl SwitchPopup {
         if self.filter.is_empty() {
             return self.worktrees.clone();
         }
-        let f = self.filter.to_lowercase();
         self.worktrees
             .iter()
             .filter(|w| {
-                w.label().to_lowercase().contains(&f)
-                    || w.path.to_string_lossy().to_lowercase().contains(&f)
+                subsequence_match(&w.label(), &self.filter)
+                    || subsequence_match(&w.path.to_string_lossy(), &self.filter)
             })
             .cloned()
             .collect()
     }
+}
+
+/// Case-insensitive subsequence test: every char of `needle` appears in
+/// `haystack` in order, not necessarily contiguously.
+fn subsequence_match(haystack: &str, needle: &str) -> bool {
+    let mut needle = needle.chars().flat_map(char::to_lowercase);
+    let mut expected = needle.next();
+    for c in haystack.chars().flat_map(char::to_lowercase) {
+        let Some(exp) = expected else { return true };
+        if c == exp {
+            expected = needle.next();
+        }
+    }
+    expected.is_none()
 }
 
 /// A service waiting for its dependencies to become ready.
@@ -714,9 +736,12 @@ impl App {
         match worktree::list(&config_dir) {
             Some(worktrees) if !worktrees.is_empty() => {
                 self.switch_popup = Some(SwitchPopup {
+                    running: self.running_branches(),
                     worktrees,
                     filter: String::new(),
                     selected: 0,
+                    searching: false,
+                    status: None,
                 });
             }
             _ => {
@@ -726,9 +751,51 @@ impl App {
         }
     }
 
-    /// Handles keys while the worktree-switch popup is open.
+    /// Branches with a live fog instance serving this project's script,
+    /// discovered by scanning the project's IPC sockets. The instance
+    /// scanning already excludes this process, so the current branch is only
+    /// listed when a second instance serves it.
+    fn running_branches(&self) -> Vec<String> {
+        let Some(project) = self.ipc_state.project.as_deref() else {
+            return Vec::new();
+        };
+        let mut running = Vec::new();
+        for (_, _, status) in ipc::find_instances_any_branch(project, &self.ipc_state.script) {
+            if let Some(branch) = status.branch
+                && !running.contains(&branch)
+            {
+                running.push(branch);
+            }
+        }
+        running
+    }
+
+    /// Handles keys while the worktree-switch popup is open. In search mode
+    /// (`f` toggled) typing filters the list; browsing accepts `f`, arrows,
+    /// Enter (switch), `d` (terminate), and Esc.
     fn handle_switch_key(&mut self, key: KeyEvent) {
+        // A status message lingers only until the next key press.
+        if let Some(p) = &mut self.switch_popup {
+            p.status = None;
+        }
+        let searching = self
+            .switch_popup
+            .as_ref()
+            .map(|p| p.searching)
+            .unwrap_or(false);
         match key.code {
+            KeyCode::Char('f') if !searching => {
+                if let Some(p) = &mut self.switch_popup {
+                    p.searching = true;
+                    p.selected = 0;
+                }
+            }
+            KeyCode::Char('d') if !searching => self.terminate_selected_branch(),
+            KeyCode::Esc if searching => {
+                if let Some(p) = &mut self.switch_popup {
+                    p.searching = false;
+                }
+            }
             KeyCode::Esc => {
                 self.switch_popup = None;
             }
@@ -758,19 +825,63 @@ impl App {
                     }
                 }
             }
-            KeyCode::Backspace => {
+            KeyCode::Backspace if searching => {
                 if let Some(p) = &mut self.switch_popup {
                     p.filter.pop();
                     p.selected = 0;
                 }
             }
-            KeyCode::Char(c) if !c.is_control() => {
+            KeyCode::Char(c) if searching && !c.is_control() => {
                 if let Some(p) = &mut self.switch_popup {
                     p.filter.push(c);
                     p.selected = 0;
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Terminates every live fog instance serving the selected worktree's
+    /// branch (via IPC kill requests with a SIGTERM fallback) and reports the
+    /// outcome in the popup's transient status line. This instance is never
+    /// a target: the instance scan excludes the current process.
+    fn terminate_selected_branch(&mut self) {
+        let branch = {
+            let Some(popup) = &self.switch_popup else {
+                return;
+            };
+            let matches = popup.matches();
+            if matches.is_empty() {
+                return;
+            }
+            matches[popup.selected.min(matches.len() - 1)]
+                .branch
+                .clone()
+        };
+        let Some(branch) = branch else {
+            if let Some(popup) = &mut self.switch_popup {
+                popup.status = Some("no branch to terminate (detached)".to_string());
+            }
+            return;
+        };
+        let project = self.ipc_state.project.clone();
+        let script = self.ipc_state.script.clone();
+        let instances = match project {
+            Some(project) => {
+                ipc::find_instances_with_status(&project, &script, Some(branch.as_str()))
+                    .into_iter()
+                    .map(|(pid, path, _)| (pid, path))
+                    .collect::<Vec<_>>()
+            }
+            None => Vec::new(),
+        };
+        let terminated = ipc::terminate_instances(&instances);
+        if let Some(popup) = &mut self.switch_popup {
+            popup.status = Some(match terminated {
+                0 => "no running instances on this branch".to_string(),
+                1 => "terminated 1 instance".to_string(),
+                n => format!("terminated {n} instances"),
+            });
         }
     }
 
@@ -1254,24 +1365,47 @@ impl App {
             ];
             for (i, wt) in matches.iter().enumerate() {
                 let is_current = wt.contains(config_dir);
-                let marker = if is_current { " *" } else { "" };
+                let is_running = popup
+                    .running
+                    .iter()
+                    .any(|b| wt.branch.as_deref() == Some(b.as_str()));
                 let (prefix, label_style) = if i == popup.selected {
                     (" >", Style::default().fg(self.theme.highlight).bold())
                 } else {
                     ("  ", Style::default())
                 };
-                let line = Line::from(vec![
-                    Span::styled(format!("{prefix} {}{marker}", wt.label()), label_style),
-                    Span::styled(format!("  {}", wt.path.display()), Style::default().dim()),
-                ]);
-                lines.push(line);
+                // The current-worktree `*` and the live-branch green `*` are
+                // distinct spans, so a selected/current running branch keeps
+                // both readable.
+                let mut label = format!("{prefix} {}", wt.label());
+                if is_current {
+                    label.push_str(" *");
+                }
+                let mut spans = vec![Span::styled(label, label_style)];
+                if is_running {
+                    spans.push(Span::styled(
+                        " *",
+                        Style::default().fg(self.theme.terminal).bold(),
+                    ));
+                }
+                spans.push(Span::styled(
+                    format!("  {}", wt.path.display()),
+                    Style::default().dim(),
+                ));
+                lines.push(Line::from(spans));
             }
             if matches.is_empty() {
                 lines.push(Line::from("  (no matching worktrees)"));
             }
             lines.push(Line::from(""));
+            if let Some(status) = &popup.status {
+                lines.push(Line::from(Span::styled(
+                    format!(" {status}"),
+                    Style::default().fg(Color::Yellow),
+                )));
+            }
             lines.push(Line::from(Span::styled(
-                " Enter switch   Esc cancel ",
+                " Enter switch   d terminate   Esc cancel ",
                 Style::default().dim(),
             )));
 
@@ -1587,6 +1721,9 @@ mod tests {
             ],
             filter: "feature".to_string(),
             selected: 0,
+            searching: false,
+            running: Vec::new(),
+            status: None,
         };
         let matches = popup.matches();
         assert_eq!(matches.len(), 1);
@@ -1602,6 +1739,9 @@ mod tests {
             }],
             filter: String::new(),
             selected: 0,
+            searching: false,
+            running: Vec::new(),
+            status: None,
         };
         assert_eq!(popup.matches().len(), 1);
     }
@@ -1615,6 +1755,9 @@ mod tests {
             }],
             filter: "detached".to_string(),
             selected: 0,
+            searching: false,
+            running: Vec::new(),
+            status: None,
         };
         assert_eq!(popup.matches().len(), 1);
     }
@@ -1628,7 +1771,180 @@ mod tests {
             }],
             filter: "zzz".to_string(),
             selected: 0,
+            searching: false,
+            running: Vec::new(),
+            status: None,
         };
         assert!(popup.matches().is_empty());
+    }
+
+    #[test]
+    fn test_switch_popup_fuzzy_subsequence() {
+        let popup = SwitchPopup {
+            worktrees: vec![
+                Worktree {
+                    path: PathBuf::from("/repo/fog"),
+                    branch: Some("main".to_string()),
+                },
+                Worktree {
+                    path: PathBuf::from("/repo/fog-feature"),
+                    branch: Some("feature-x".to_string()),
+                },
+                Worktree {
+                    path: PathBuf::from("/repo/fog-detached"),
+                    branch: Some("detached-cleanup".to_string()),
+                },
+            ],
+            filter: "ftx".to_string(),
+            selected: 0,
+            searching: false,
+            running: Vec::new(),
+            status: None,
+        };
+        let matches = popup.matches();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].branch.as_deref(), Some("feature-x"));
+    }
+
+    #[test]
+    fn test_switch_popup_fuzzy_subsequence_case_insensitive() {
+        let popup = SwitchPopup {
+            worktrees: vec![Worktree {
+                path: PathBuf::from("/repo/fog-feature"),
+                branch: Some("feature-x".to_string()),
+            }],
+            filter: "FTX".to_string(),
+            selected: 0,
+            searching: false,
+            running: Vec::new(),
+            status: None,
+        };
+        assert_eq!(popup.matches().len(), 1);
+    }
+
+    #[test]
+    fn test_switch_popup_search_mode_keys() {
+        let tabs = ClickTab::new(vec!["svc".into()], 10, 30);
+        let mut app = make_app(vec![], None, tabs, Mode::Normal, Rect::default());
+        app.switch_popup = Some(SwitchPopup {
+            worktrees: vec![Worktree {
+                path: PathBuf::from("/repo/fog"),
+                branch: Some("main".to_string()),
+            }],
+            filter: String::new(),
+            selected: 0,
+            searching: false,
+            running: Vec::new(),
+            status: None,
+        });
+        // 'f' enters search mode; typing appends to the filter.
+        app.handle_switch_key(KeyEvent::from(KeyCode::Char('n')));
+        assert!(!app.switch_popup.as_ref().unwrap().searching);
+        assert!(app.switch_popup.as_ref().unwrap().filter.is_empty());
+        app.handle_switch_key(KeyEvent::from(KeyCode::Char('f')));
+        assert!(app.switch_popup.as_ref().unwrap().searching);
+        app.handle_switch_key(KeyEvent::from(KeyCode::Char('a')));
+        assert_eq!(app.switch_popup.as_ref().unwrap().filter, "a");
+        // Backspace clears the filter while searching.
+        app.handle_switch_key(KeyEvent::from(KeyCode::Backspace));
+        assert!(app.switch_popup.as_ref().unwrap().filter.is_empty());
+        // Esc exits search mode but keeps the popup open.
+        app.handle_switch_key(KeyEvent::from(KeyCode::Esc));
+        assert!(app.switch_popup.is_some());
+        assert!(!app.switch_popup.as_ref().unwrap().searching);
+        // Typing outside search mode does nothing.
+        app.handle_switch_key(KeyEvent::from(KeyCode::Char('x')));
+        assert!(app.switch_popup.as_ref().unwrap().filter.is_empty());
+        // Esc while browsing closes the popup.
+        app.handle_switch_key(KeyEvent::from(KeyCode::Esc));
+        assert!(app.switch_popup.is_none());
+    }
+
+    #[test]
+    fn test_switch_popup_d_while_searching_is_filter_input() {
+        let tabs = ClickTab::new(vec!["svc".into()], 10, 30);
+        let mut app = make_app(vec![], None, tabs, Mode::Normal, Rect::default());
+        app.switch_popup = Some(SwitchPopup {
+            worktrees: vec![Worktree {
+                path: PathBuf::from("/repo/fog"),
+                branch: Some("main".to_string()),
+            }],
+            filter: String::new(),
+            selected: 0,
+            searching: true,
+            running: Vec::new(),
+            status: None,
+        });
+        // While searching `d` is filter input, never a terminate.
+        app.handle_switch_key(KeyEvent::from(KeyCode::Char('d')));
+        let popup = app.switch_popup.as_ref().unwrap();
+        assert_eq!(popup.filter, "d");
+        assert!(popup.status.is_none());
+    }
+
+    #[test]
+    fn test_switch_popup_status_cleared_on_next_key() {
+        let tabs = ClickTab::new(vec!["svc".into()], 10, 30);
+        let mut app = make_app(vec![], None, tabs, Mode::Normal, Rect::default());
+        app.switch_popup = Some(SwitchPopup {
+            worktrees: vec![Worktree {
+                path: PathBuf::from("/repo/fog"),
+                branch: Some("main".to_string()),
+            }],
+            filter: String::new(),
+            selected: 0,
+            searching: false,
+            running: Vec::new(),
+            status: Some("terminated 1 instance".to_string()),
+        });
+        // Any key press clears the transient status before handling itself.
+        app.handle_switch_key(KeyEvent::from(KeyCode::Down));
+        assert!(app.switch_popup.as_ref().unwrap().status.is_none());
+    }
+
+    #[test]
+    fn test_switch_popup_d_reports_no_instances() {
+        // make_app's IpcState has no project, so no instance can match: `d`
+        // reports the zero-outcome status without touching any process.
+        let tabs = ClickTab::new(vec!["svc".into()], 10, 30);
+        let mut app = make_app(vec![], None, tabs, Mode::Normal, Rect::default());
+        app.switch_popup = Some(SwitchPopup {
+            worktrees: vec![Worktree {
+                path: PathBuf::from("/repo/fog"),
+                branch: Some("main".to_string()),
+            }],
+            filter: String::new(),
+            selected: 0,
+            searching: false,
+            running: Vec::new(),
+            status: None,
+        });
+        app.handle_switch_key(KeyEvent::from(KeyCode::Char('d')));
+        assert_eq!(
+            app.switch_popup.as_ref().unwrap().status.as_deref(),
+            Some("no running instances on this branch")
+        );
+    }
+
+    #[test]
+    fn test_switch_popup_d_on_detached_worktree() {
+        let tabs = ClickTab::new(vec!["svc".into()], 10, 30);
+        let mut app = make_app(vec![], None, tabs, Mode::Normal, Rect::default());
+        app.switch_popup = Some(SwitchPopup {
+            worktrees: vec![Worktree {
+                path: PathBuf::from("/repo/fog-detached"),
+                branch: None,
+            }],
+            filter: String::new(),
+            selected: 0,
+            searching: false,
+            running: Vec::new(),
+            status: None,
+        });
+        app.handle_switch_key(KeyEvent::from(KeyCode::Char('d')));
+        assert_eq!(
+            app.switch_popup.as_ref().unwrap().status.as_deref(),
+            Some("no branch to terminate (detached)")
+        );
     }
 }

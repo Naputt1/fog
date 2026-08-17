@@ -689,6 +689,26 @@ pub fn wait_for_exit(pid: u32, timeout: Duration) -> bool {
     !crate::process::is_pid_alive(pid)
 }
 
+/// Terminates the given fog instances, returning how many were signalled.
+///
+/// Each instance is first asked to shut down gracefully over its IPC socket
+/// (the same path `fog kill <pid>` uses, so services tear down cleanly). An
+/// instance that has not exited within [`wait_for_exit`]'s grace period is
+/// force-stopped with SIGTERM, so a hung or unresponsive instance cannot
+/// survive.
+pub fn terminate_instances(instances: &[(u32, PathBuf)]) -> usize {
+    if instances.is_empty() {
+        return 0;
+    }
+    for (pid, path) in instances {
+        let _ = send_kill(path);
+        if !wait_for_exit(*pid, Duration::from_secs(2)) && crate::process::is_pid_alive(*pid) {
+            crate::process::try_kill_process_group(*pid, libc::SIGTERM);
+        }
+    }
+    instances.len()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -764,6 +784,30 @@ mod tests {
         server.join().unwrap();
 
         assert!(state.kill_flag.load(Ordering::SeqCst));
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_terminate_instances_sends_kill_request() {
+        // A live socket server must receive the kill request even though the
+        // instance PID is long gone; the nonexistent PID also exercises the
+        // signal fallback path without signalling anything real.
+        let state = Arc::new(IpcState::new("dev".to_string(), None, None));
+        let path = std::env::temp_dir().join("fog-test-terminate.sock");
+        let _ = fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).unwrap();
+        let server_state = state.clone();
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            handle_connection(stream, server_state);
+        });
+
+        let n = terminate_instances(&[(999_999_u32, path.clone())]);
+        server.join().unwrap();
+
+        assert!(state.kill_flag.load(Ordering::SeqCst));
+        assert_eq!(n, 1);
 
         let _ = fs::remove_file(&path);
     }

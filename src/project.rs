@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Resolves the canonical path of a possibly-relative git dir.
 fn canonicalize_path(base: &Path, value: &str) -> Option<String> {
@@ -55,6 +55,17 @@ pub fn display(config_dir: &Path) -> String {
         }
     }
     config_dir.to_string_lossy().into_owned()
+}
+
+/// Returns the main working-tree root of the git repository containing `dir`,
+/// regardless of which worktree `dir` is checked out in.
+///
+/// Linked worktrees all share the main repository's git common dir (e.g.
+/// `/repo/.git`); its parent is the main working tree. Returns `None` when
+/// `dir` is not inside a git repository.
+pub fn repo_root(dir: &Path) -> Option<PathBuf> {
+    let common = PathBuf::from(detect(dir)?);
+    common.parent().map(Path::to_path_buf)
 }
 
 /// Fallback identity when the directory is not a git repository: the
@@ -124,6 +135,75 @@ mod tests {
             "identity should be detected in a git repo"
         );
         assert_eq!(repo_id, worktree_id, "worktrees must share identity");
+
+        let _ = Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["worktree", "remove", "--force", &worktree.to_string_lossy()])
+            .output();
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_repo_root_is_main_worktree_across_worktrees() {
+        let git = Command::new("git").arg("--version").output();
+        if git.map(|o| !o.status.success()).unwrap_or(true) {
+            eprintln!("skipping: git not available");
+            return;
+        }
+
+        let base = std::env::temp_dir().join(format!("fog-root-test-{}", std::process::id()));
+        let repo = base.join("red-fox");
+        fs::create_dir_all(&repo).unwrap();
+
+        let run = |dir: &Path, args: &[&str]| {
+            Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(args)
+                .output()
+                .map(|o| {
+                    (
+                        o.status.success(),
+                        String::from_utf8_lossy(&o.stdout).trim().to_string(),
+                    )
+                })
+                .unwrap_or((false, String::new()))
+        };
+
+        run(&repo, &["init", "-q", "-b", "main"]);
+        run(&repo, &["config", "user.email", "test@example.com"]);
+        run(&repo, &["config", "user.name", "Test"]);
+        fs::write(repo.join("fog.json"), "{}").unwrap();
+        run(&repo, &["add", "fog.json"]);
+        run(&repo, &["commit", "-q", "-m", "init"]);
+
+        let worktree = base.join("ui");
+        let added = run(
+            &repo,
+            &["worktree", "add", "-q", &worktree.to_string_lossy()],
+        );
+        if !added.0 {
+            eprintln!("skipping: could not add worktree");
+            let _ = fs::remove_dir_all(&base);
+            return;
+        }
+
+        // The worktree checkout dir is named after its branch, not the repo,
+        // but both must resolve to the same main working-tree root.
+        let root = repo_root(&repo);
+        let wt_root = repo_root(&worktree);
+        assert!(root.is_some(), "root should resolve inside a git repo");
+        assert_eq!(
+            root, wt_root,
+            "linked worktrees must resolve to the main working-tree root"
+        );
+        assert_eq!(
+            root.unwrap()
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned()),
+            Some("red-fox".to_string())
+        );
 
         let _ = Command::new("git")
             .arg("-C")

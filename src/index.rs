@@ -518,8 +518,11 @@ fn discover_entries(shared_network: &str) -> Vec<IndexEntry> {
 /// Derives the display project name, worktree group and shared-infra flag for a
 /// container from its compose labels.
 ///
-/// Project = the repo root basename of `com.docker.compose.project.working_dir`
-/// (e.g. `/Users/.../GEMS` -> `gems`). Infra compose files live in an `infra/`
+/// Project = the git repo root basename containing
+/// `com.docker.compose.project.working_dir` (e.g. `/Users/.../GEMS` -> `gems`,
+/// and a linked worktree checkout like `.../worktree/<hash>/ui` still -> the
+/// repo's `red-fox`). When the working dir is not inside a git repository the
+/// legacy basename rule applies. Infra compose files live in an `infra/`
 /// subdirectory, so those are flagged `shared` and grouped under the repo root's
 /// project. Worktree = the compose project name after the first `-` (e.g.
 /// `gems-main` -> `main`, `gems-feature-x` -> `feature-x`), ignored for shared.
@@ -543,6 +546,12 @@ fn derive_group(
             .split_once('-')
             .map(|(p, _)| p.to_string())
             .unwrap_or_else(|| project_name.to_string())
+    } else if let Some(repo) = git_repo_name(wd) {
+        // Prefer the git repo root: containers started from a linked worktree
+        // whose checkout dir is named after the branch (e.g.
+        // `.../worktree/<hash>/ui`) must still group under the repository's
+        // project (e.g. `red-fox`), not their own directory name.
+        repo
     } else if is_infra {
         // Repo root is the parent of `infra/`.
         let repo = std::path::Path::new(wd)
@@ -566,6 +575,15 @@ fn derive_group(
             .unwrap_or_else(|| "main".to_string());
         (project, worktree, false)
     }
+}
+
+/// Lowercased repo-root basename of the git repository containing `wd`,
+/// resolved via the shared git common dir so linked worktrees map back to the
+/// main repo (e.g. a worktree checkout named `ui` still yields `red-fox`).
+/// `None` when `wd` is not inside a git repository.
+fn git_repo_name(wd: &str) -> Option<String> {
+    let root = crate::project::repo_root(std::path::Path::new(wd))?;
+    root.file_name().map(|n| n.to_string_lossy().to_lowercase())
 }
 
 /// Extracts hostnames from a Traefik `Host(...)` / `HostRegexp(...)` rule.
@@ -830,6 +848,73 @@ mod tests {
             derive_group(&infra, "red-fox-infra-postgres-1"),
             ("red-fox".into(), "shared".into(), true)
         );
+    }
+
+    #[test]
+    fn test_derive_group_worktree_resolves_to_repo_root() {
+        // Build a real repo + linked worktree so the git-based project
+        // resolution runs: the worktree checkout dir is named after its branch
+        // (`ui`) and must map back to the repository's project (`red-fox`).
+        let base = std::env::temp_dir().join(format!("fog-index-derive-{}", std::process::id()));
+        let repo = base.join("red-fox");
+        std::fs::create_dir_all(&repo).unwrap();
+        let run = |dir: &std::path::Path, args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(args)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        };
+        if !run(&repo, &["init", "-q", "-b", "main"])
+            || !run(&repo, &["config", "user.email", "test@example.com"])
+            || !run(&repo, &["config", "user.name", "Test"])
+        {
+            let _ = std::fs::remove_dir_all(&base);
+            eprintln!("skipping: could not init repo");
+            return;
+        }
+        std::fs::write(repo.join("fog.json"), "{}").unwrap();
+        run(&repo, &["add", "fog.json"]);
+        run(&repo, &["commit", "-q", "-m", "init"]);
+        let worktree = base.join("ui");
+        if !run(
+            &repo,
+            &["worktree", "add", "-q", &worktree.to_string_lossy()],
+        ) {
+            let _ = std::fs::remove_dir_all(&base);
+            eprintln!("skipping: could not add worktree");
+            return;
+        }
+
+        let app = labels(&[
+            (
+                "com.docker.compose.project.working_dir",
+                worktree.to_str().unwrap(),
+            ),
+            ("com.docker.compose.project", "redfox-ui"),
+        ]);
+        assert_eq!(
+            derive_group(&app, "redfox-ui-frontend-1"),
+            ("red-fox".into(), "ui".into(), false)
+        );
+
+        let infra_dir = worktree.join("infra");
+        std::fs::create_dir_all(&infra_dir).unwrap();
+        let infra = labels(&[
+            (
+                "com.docker.compose.project.working_dir",
+                infra_dir.to_str().unwrap(),
+            ),
+            ("com.docker.compose.project", "red-fox-infra"),
+        ]);
+        assert_eq!(
+            derive_group(&infra, "red-fox-infra-postgres-1"),
+            ("red-fox".into(), "shared".into(), true)
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

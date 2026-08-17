@@ -19,7 +19,7 @@ Default mode. Navigate tabs, scroll, and access commands.
 | `R` | Restart current service or proxy |
 | `t` / `Ctrl+t` | Open a new shell tab |
 | `d` | Close current shell tab (shells only) |
-| `s` | Open worktree switch popup (type to filter, `Enter` to switch) |
+| `s` | Open worktree switch popup (`f` fuzzy search, `Enter` to switch) |
 | `↑` | Scroll output up |
 | `↓` | Scroll output down |
 | `PageUp` | Scroll up by one page |
@@ -56,17 +56,19 @@ The filter is case-insensitive and matches against method, path, status code, an
 
 ## Worktree switch popup
 
-Opened by pressing `s` in normal mode on a service tab. Lists every worktree of the current repository.
+Opened by pressing `s` in normal mode on a service tab. Lists every worktree of the current repository. Press `f` to enter fuzzy search: typing filters the list with a case-insensitive subsequence match on the branch label or path.
 
 | Key | Action |
 |-----|--------|
-| Any character | Appends to filter (matches branch or path) |
-| `Backspace` | Removes last character |
-| `↑` / `↓` | Move selection |
-| `Enter` | Switch to the selected worktree |
-| `Esc` | Close the popup |
+| `f` | Enter fuzzy search mode |
+| Any character (searching) | Appends to filter (case-insensitive subsequence match on branch or path) |
+| `Backspace` (searching) | Removes last filter character |
+| `↑` / `↓` | Move selection (wraps around) |
+| `Enter` | Switch to the highlighted worktree (exits search) |
+| `Esc` | Exit search back to browsing, or close the popup while browsing |
+| `d` | Terminate all running instances on the selected branch |
 
-Switching reloads the script's config from the target worktree in place: non-reuse services are torn down, `reuse` services are handed over (their processes keep running), and tabs/proxy are rebuilt. The current worktree is marked with `*`.
+Switching reloads the script's config from the target worktree in place: non-reuse services are torn down, `reuse` services are handed over (their processes keep running), and tabs/proxy are rebuilt. The current worktree is marked with `*`; a green `*` marks a branch that has running instances.
 
 ## Mouse
 
