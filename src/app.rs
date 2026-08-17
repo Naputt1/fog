@@ -7,7 +7,7 @@ use crate::proxy::ProxyInstance;
 use crate::render;
 use crate::runtime;
 use crate::selection;
-use crate::terminal::{HealthStatus, Terminal};
+use crate::terminal::{HealthStatus, Init, Terminal};
 use crate::theme::Theme;
 use crate::worktree::{self, Worktree};
 use crossterm::event::{
@@ -335,6 +335,7 @@ impl App {
             {
                 break;
             }
+            self.handle_control_request();
             for i in 0..self.items.len() {
                 if let Err(e) = self.items[i].maybe_auto_start() {
                     self.errors.push(format!("auto-start error: {}", e));
@@ -420,6 +421,7 @@ impl App {
             {
                 break;
             }
+            self.handle_control_request();
             for i in 0..self.items.len() {
                 if let Err(e) = self.items[i].maybe_auto_start() {
                     self.errors.push(format!("auto-start error: {}", e));
@@ -1453,6 +1455,126 @@ impl App {
             running: p.is_running(),
             port: p.port,
         });
+    }
+
+    /// Executes one per-service control request published by the IPC thread
+    /// (if any) and publishes the verdict back to the waiting connection.
+    ///
+    /// The app loop is the ONLY writer of `control_result`/`control_done`;
+    /// the IPC thread only publishes the request and waits for the signal.
+    fn handle_control_request(&mut self) {
+        let req = self
+            .ipc_state
+            .control_req
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        let Some(req) = req else {
+            return;
+        };
+        let resp = self.execute_service_action(&req);
+        *self
+            .ipc_state
+            .control_result
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(resp);
+        self.ipc_state.control_done.store(true, Ordering::SeqCst);
+    }
+
+    /// Runs a single control action against the named service and returns the
+    /// [`ipc::ControlResponse`] to report back to the requesting client.
+    fn execute_service_action(&mut self, req: &ipc::ServiceActionRequest) -> ipc::ControlResponse {
+        if req.name == "proxy" {
+            return ipc::ControlResponse {
+                ok: false,
+                reason: "unsupported".to_string(),
+            };
+        }
+        let Some(idx) = self.items.iter().position(|t| t.name == req.name) else {
+            return ipc::ControlResponse {
+                ok: false,
+                reason: "unknown service".to_string(),
+            };
+        };
+        match req.action {
+            ipc::ServiceAction::Stop => match self.items[idx].stop() {
+                Ok(()) => ipc::ControlResponse {
+                    ok: true,
+                    reason: String::new(),
+                },
+                Err(e) => ipc::ControlResponse {
+                    ok: false,
+                    reason: e.to_string(),
+                },
+            },
+            ipc::ServiceAction::Restart => match self.items[idx].restart() {
+                Ok(()) => ipc::ControlResponse {
+                    ok: true,
+                    reason: String::new(),
+                },
+                Err(e) => ipc::ControlResponse {
+                    ok: false,
+                    reason: e.to_string(),
+                },
+            },
+            ipc::ServiceAction::Start => {
+                let item = &self.items[idx];
+                if !item.stopped && item.process_running {
+                    return ipc::ControlResponse {
+                        ok: false,
+                        reason: "already running".to_string(),
+                    };
+                }
+                // The terminal remembers the command it was spawned with; a
+                // not-yet-started pending service still holds its real
+                // path/cmd in `pending_services`.
+                let (path, cmd) = match &item.init {
+                    Init::Command { path, cmd } if !path.is_empty() && !cmd.is_empty() => {
+                        (path.clone(), cmd.clone())
+                    }
+                    _ => match self.pending_services.iter().find(|ps| ps.name == req.name) {
+                        Some(ps) => (ps.path.clone(), ps.cmd.clone()),
+                        None => {
+                            return ipc::ControlResponse {
+                                ok: false,
+                                reason: "cannot start service: no command configured".to_string(),
+                            };
+                        }
+                    },
+                };
+                match self.items[idx].start(&path, &cmd) {
+                    Ok(()) => {
+                        // If this was still a pending service, promote it exactly
+                        // like `check_pending` would so it is not started twice
+                        // once its dependencies become ready.
+                        if let Some(ps_idx) = self
+                            .pending_services
+                            .iter()
+                            .position(|ps| ps.name == req.name)
+                        {
+                            let ps = self.pending_services.remove(ps_idx);
+                            let item = &mut self.items[idx];
+                            item.log_dir = ps.log_dir.clone();
+                            item.health_checks = ps.health_checks;
+                            item.shutdown_cmd = ps.shutdown_cmd;
+                            item.dep_names = ps.dep_names.clone();
+                            item.save_logs = ps.save_logs;
+                            if !item.health_checks.is_empty() {
+                                item.start_health_checks();
+                            }
+                        }
+                        ipc::ControlResponse {
+                            ok: true,
+                            reason: String::new(),
+                        }
+                    }
+                    Err(e) => ipc::ControlResponse {
+                        ok: false,
+                        reason: e.to_string(),
+                    },
+                }
+            }
+        }
     }
 
     /// Checks pending services and starts them once all dependencies are ready.

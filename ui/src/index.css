@@ -1,0 +1,129 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+/*
+ * fog web UI — dark, dev-tool hybrid theme.
+ *
+ * Dark-first dashboard with terminal-tinged details. `:root` already carries
+ * the dark palette (we never ship a light mode), so the app is dark by
+ * default with no `dark:` class needed on the body. The `.dark` selector is
+ * kept so shadcn components that reference `dark:` variants resolve.
+ */
+
+:root,
+.dark {
+  /* Base surfaces — deep near-black with a faint cool-green cast. */
+  --background: oklch(0.145 0.012 165);
+  --foreground: oklch(0.93 0.008 165);
+
+  --card: oklch(0.175 0.014 165);
+  --card-foreground: oklch(0.93 0.008 165);
+
+  --popover: oklch(0.175 0.014 165);
+  --popover-foreground: oklch(0.93 0.008 165);
+
+  /* Terminal-accent primary (green). */
+  --primary: oklch(0.79 0.19 150);
+  --primary-foreground: oklch(0.16 0.03 150);
+
+  --secondary: oklch(0.24 0.02 165);
+  --secondary-foreground: oklch(0.93 0.008 165);
+
+  --muted: oklch(0.22 0.016 165);
+  --muted-foreground: oklch(0.62 0.02 165);
+
+  --accent: oklch(0.24 0.04 180);
+  --accent-foreground: oklch(0.93 0.008 165);
+
+  /* Destructive / status colors. */
+  --destructive: oklch(0.63 0.23 25);
+  --destructive-foreground: oklch(0.98 0.01 25);
+
+  --success: oklch(0.72 0.17 150);
+  --warning: oklch(0.8 0.15 85);
+  --info: oklch(0.7 0.12 230);
+
+  --border: oklch(0.27 0.02 165);
+  --input: oklch(0.27 0.02 165);
+  --ring: oklch(0.79 0.19 150);
+
+  --radius: 0.5rem;
+
+  /* Fonts */
+  --font-sans:
+    "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  --font-mono:
+    "JetBrains Mono", ui-monospace, "SF Mono", "SFMono-Regular", Menlo,
+    Consolas, "Liberation Mono", monospace;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-info: var(--info);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+}
+
+/* Log / terminal surfaces: high-contrast black with a green-ish glow border. */
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+  html {
+    color-scheme: dark;
+    /*
+     * Horizontal-overflow safety net for narrow viewports.
+     * `overflow-x: clip` (not `hidden`) intentionally does NOT create a scroll
+     * container, so `position: sticky` / `position: fixed` descendants (e.g.
+     * sticky table headers) keep working while stray wide content is clipped
+     * at the viewport edge.
+     */
+    overflow-x: clip;
+  }
+  body {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+    font-family: var(--font-sans);
+    font-feature-settings:
+      "rlig" 1,
+      "calt" 1;
+    /* Same guard on body for content that escapes the html scroll box. */
+    overflow-x: clip;
+  }
+}
+
+@layer utilities {
+  .terminal-surface {
+    background-color: oklch(0.12 0.012 165);
+    border: 1px solid color-mix(in oklch, var(--color-primary) 25%, transparent);
+  }
+}

@@ -356,6 +356,13 @@ impl ProxyInstance {
         lk.iter().cloned().collect()
     }
 
+    /// Returns a clone of the live request-log handle so other threads (e.g.
+    /// the IPC server) can tail the proxy log in real time. The handle is
+    /// stable across `restart()`: config hot-reloads reuse the same queue.
+    pub fn logs_handle(&self) -> Arc<Mutex<VecDeque<LogEntry>>> {
+        self.logs.clone()
+    }
+
     /// Number of log entries matching the given filter (empty filter = all),
     /// used to keep the scrollbar in sync with what the renderer displays.
     pub fn filtered_log_len(&self, filter: &str) -> usize {

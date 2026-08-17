@@ -154,8 +154,53 @@ auto-discovers them and routes each branch, and is **never** torn down when a
 project or branch exits. Open the dashboard at
 `http://router.acme:8080` (or `127.0.0.1:8080`).
 
+Unmatched hosts (or any path on the router) are served the **fog web UI**
+from a small embedded server: a **service directory** listing every running
+service grouped by project and branch (with copy-to-clipboard links), plus a
+**live-log viewer** at `http://<router>/logs` that streams any service's
+output in real time — colored ANSI, auto-scrolling, pause-on-scroll and copy —
+the way the TUI shows service tabs. Containerized services stream via
+`docker logs -f`; running fog instances (interactive or detached) expose their
+captured logs, their `daemon.log`, and the proxy's live request log. Pick a
+service on the left, or jump straight to one with
+`http://<router>/logs?service=<container>`.
+
 Full field reference and both sections are documented in
 [Configuration](https://github.com/Naputt1/fog/blob/main/docs/configuration.md).
+
+## Web UI
+
+fog ships a web UI for the service directory, live logs, scripts, health and
+status, served by the embedded Rust (hyper) index server at
+`http://127.0.0.1:18080`.
+
+- **Stack** — [React 19](https://react.dev) + [shadcn/ui](https://ui.shadcn.com) + [Tailwind CSS 4](https://tailwindcss.com), with [TanStack Router](https://tanstack.com/router) and [TanStack Query](https://tanstack.com/query). The SPA lives in `ui/`.
+- **Build** — `cd ui && pnpm install && pnpm build` produces `ui/dist/`, which `build.rs` embeds into the binary at compile time. When `ui/dist` is absent the server falls back to the legacy generated service-directory page.
+- **Serving** — the compiled binary serves the SPA + JSON API from the hyper server on `index_port` (default `127.0.0.1:18080`).
+- **API** — `GET /api/services`, `/api/status`, `/api/scripts`, `/api/config`, `/api/health`, `GET /api/launch/targets`, `POST /api/launch`, `POST /api/instances/{pid}/services/{name}/action`, plus `/logs/stream` (SSE) for live logs.
+- **Dev workflow** — run the Rust server, then `cd ui && pnpm install && pnpm dev`; Vite serves the SPA on `:5173` and proxies `/api` and `/logs/stream` to `127.0.0.1:18080`.
+
+### Service controls
+
+The `/status` page lists every running fog instance and its services (from `GET /api/status` → `instances[].services[]`). Each service row has **Start**, **Stop** and **Restart** buttons that call `POST /api/instances/{pid}/services/{name}/action` with a JSON body of `{"action": "start" | "stop" | "restart"}`. The index server forwards the request to the running fog instance over its IPC Unix socket and replies `{"ok": true}` on success, `{"ok": false, "reason": "..."}` on failure, and `404` when the pid is not a running fog instance.
+
+> **Localhost only** — the index server binds to `127.0.0.1` only (`index_port`, default `18080`), so the write path is never exposed beyond it. Any local process could issue these actions, so do not expose the index port externally.
+
+### Start instances
+
+The `/status` page also has a **Start instance** card with two modes:
+
+1. **Pick a known project** — choose a project, then a branch/worktree, then one of the scripts that worktree's `fog.json` defines, and press **Start**.
+2. **New project** — enter an absolute config directory path and a script name (optionally a branch), and press **Start**.
+
+Either way, starting spawns a new **detached** fog instance. Launching on a *different* branch reuses the existing concurrent/share/reuse machinery described in the [Features](#features) section — different branches always run concurrently, so a freshly launched branch instance runs side by side with any already-running ones.
+
+The UI is backed by two endpoints:
+
+- `GET /api/launch/targets` — returns `{"projects":[{"path","name","worktrees":[{"path","branch","scripts":[...]}]}]}`, enumerating launchable projects grouped by git repository: all worktrees/branches of the same repo (discovered from running fog instances' config dirs plus docker compose `working_dir` labels) appear under a single project named after the repo, each with its git worktrees and the scripts each worktree's `fog.json` defines.
+- `POST /api/launch` — body `{"config_dir":"/abs/path","script":"dev","branch":"feature-x"|null}`; spawns a detached fog daemon and waits until its IPC socket serves status, replying `{"ok":true,"pid":1234}` on success or `400`/`500 {"error":"..."}` on failure.
+
+Like the service-action endpoint, this is a **localhost-only write path** (the index server binds to `127.0.0.1`), so do not expose the index port (`18080`) externally.
 
 ## Usage
 
