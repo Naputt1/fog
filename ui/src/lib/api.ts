@@ -28,6 +28,12 @@ export interface Service {
   worktree: string;
   /** Service name. */
   service: string;
+  /**
+   * Docker container name (e.g. `redfox-main-api-1`). `/logs/stream` streams a
+   * container's logs by this name, so the picker must pass `container` (not the
+   * compose service name) when subscribing.
+   */
+  container: string;
   /** Docker-reported status — always "running" for listed services. */
   status: ServiceStatus;
   /** Externally reachable URL (e.g. http://main.acme:8080), null when none. */

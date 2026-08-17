@@ -850,6 +850,10 @@ struct ApiService {
     project: String,
     worktree: String,
     service: String,
+    /// Docker container name (e.g. `redfox-main-api-1`). `/logs/stream`
+    /// streams a container's logs by this name, so the picker must pass it
+    /// rather than the compose service name.
+    container: String,
     status: String,
     url: String,
     ports: Vec<String>,
@@ -866,6 +870,7 @@ fn api_service_from(e: IndexEntry) -> ApiService {
         project: e.project,
         worktree: e.worktree,
         service: e.service,
+        container: e.container,
         status: "running".to_string(),
         url,
         ports,
@@ -873,9 +878,81 @@ fn api_service_from(e: IndexEntry) -> ApiService {
     }
 }
 
-/// `GET /api/services`: the live docker-discovered service directory as JSON.
-fn api_services(network: &str) -> Response<RespBody> {
-    let list: Vec<ApiService> = discover_entries(network)
+/// Discovers every running compose-managed container — not just the reachable
+/// (traefik / `fog.expose`) ones used by the directory page. `/api/services`
+/// uses this so the logs picker can stream from *any* service (e.g. `api`,
+/// `minio`) even when it exposes no router route and sits off the router
+/// network.
+///
+/// Enumerates *all* running containers and keeps only those carrying a
+/// `com.docker.compose.service` label (this also excludes the router itself and
+/// unrelated docker containers like a stray `mongodb`).
+fn discover_compose_containers() -> Vec<IndexEntry> {
+    let mut names: Vec<String> = Vec::new();
+    let out = match Command::new("docker")
+        .args(["ps", "--format", "{{.Names}}"])
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return Vec::new(),
+    };
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let line = line.trim();
+        if !line.is_empty() && !names.contains(&line.to_string()) {
+            names.push(line.to_string());
+        }
+    }
+
+    // Cache the git-derived project per working directory (shared by every
+    // worktree of the same repo), matching `discover_entries`.
+    let mut git_projects: std::collections::HashMap<String, Option<String>> =
+        std::collections::HashMap::new();
+
+    let mut entries = Vec::new();
+    for name in names {
+        let Some(labels) = container_labels(&name) else {
+            continue;
+        };
+        let Some(service) = labels.get("com.docker.compose.service").cloned() else {
+            // Not a compose-managed container (e.g. the router, or an
+            // unrelated docker container): not a selectable service.
+            continue;
+        };
+        let git_project = labels
+            .get("com.docker.compose.project.working_dir")
+            .and_then(|wd| {
+                git_projects
+                    .entry(wd.clone())
+                    .or_insert_with(|| git_project_for(wd))
+                    .clone()
+            });
+        let (project, worktree, shared) = derive_group(&labels, &name, git_project.as_deref());
+        // No traefik route → no real router hostname; fall back to the compose
+        // service name so the entry still has a meaningful `url`/label.
+        let hostname = labels
+            .get("fog.hostname")
+            .cloned()
+            .unwrap_or_else(|| service.clone());
+        entries.push(IndexEntry {
+            project,
+            worktree,
+            shared,
+            container: name.clone(),
+            service: service.clone(),
+            hostname,
+            port: String::new(),
+            published: docker_ports(&name),
+            raw_port: docker_host_port(&name),
+            tls: false,
+        });
+    }
+    entries
+}
+
+/// `GET /api/services`: every running compose service as JSON, so the SPA logs
+/// picker can stream logs from any container.
+fn api_services(_network: &str) -> Response<RespBody> {
+    let list: Vec<ApiService> = discover_compose_containers()
         .into_iter()
         .map(api_service_from)
         .collect();
@@ -2359,6 +2436,7 @@ mod tests {
         assert_eq!(json["project"], "gems");
         assert_eq!(json["worktree"], "main");
         assert_eq!(json["service"], "api");
+        assert_eq!(json["container"], "gems-main-api-1");
         assert_eq!(json["status"], "running");
         assert_eq!(json["url"], "https://main.gems/");
         assert_eq!(json["ports"][0], "0.0.0.0:8082->8082/tcp");

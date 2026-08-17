@@ -411,14 +411,23 @@ function LogsPage() {
   const navigate = useNavigate();
   const search = Route.useSearch();
   const { data: services, isLoading, isError } = useServices();
-  const serviceNames = useMemo(
-    () => (services ?? []).map((s) => s.service),
-    [services]
-  );
 
-  // URL ?service= wins; otherwise fall back to the first running service.
-  const active =
-    search.service ?? (serviceNames.length > 0 ? serviceNames[0] : null);
+  // Resolve the active selection to a docker container name. The picker shows
+  // friendly service names, but `/logs/stream` needs the container name.
+  // `?service=` deep-links accept either the container name or (legacy) the
+  // service name; missing matches fall back to the first running service.
+  const active = useMemo(() => {
+    const list = services ?? [];
+    if (list.length === 0) return null;
+    const byContainer = new Map(list.map((s) => [s.container, s]));
+    const byService = new Map(list.map((s) => [s.service, s]));
+    if (search.service) {
+      const svc = byContainer.get(search.service) ?? byService.get(search.service);
+      if (svc) return { container: svc.container, label: svc.service };
+    }
+    const first = list[0];
+    return { container: first.container, label: first.service };
+  }, [services, search.service]);
 
   const [conn, setConn] = useState<ConnState>("idle");
   const [connNote, setConnNote] = useState<string | null>(null);
@@ -462,7 +471,7 @@ function LogsPage() {
       });
     };
 
-    cleanup = subscribeLogs(active, {
+    cleanup = subscribeLogs(active.container, {
       onOpen: () => {
         setConn("streaming");
         setConnNote(null);
@@ -567,7 +576,7 @@ function LogsPage() {
                 disabled={isLoading && !active}
               >
                 <span className="max-w-56 truncate">
-                  {active ?? "select service…"}
+                  {active ? active.label : "select service…"}
                 </span>
                 <ChevronsUpDown className="size-3.5 opacity-60" />
               </Button>
@@ -583,9 +592,9 @@ function LogsPage() {
                 </DropdownMenuLabel>
               ) : (
                 <DropdownMenuRadioGroup
-                  value={active ?? undefined}
-                  onValueChange={(name) =>
-                    void navigate({ to: "/logs", search: { service: name } })
+                  value={active?.container ?? undefined}
+                  onValueChange={(container) =>
+                    void navigate({ to: "/logs", search: { service: container } })
                   }
                 >
                   {groups.map((project) => (
@@ -603,8 +612,8 @@ function LogsPage() {
                           </DropdownMenuLabel>
                           {wt.services.map((svc) => (
                             <DropdownMenuRadioItem
-                              key={svc.service}
-                              value={svc.service}
+                              key={svc.container}
+                              value={svc.container}
                               className="font-mono text-xs"
                             >
                               {svc.service}
@@ -628,7 +637,7 @@ function LogsPage() {
       >
         <div className="border-border/60 flex flex-wrap items-center gap-x-3 gap-y-2 border-b px-3 py-2">
           <span className="text-muted-foreground font-mono text-xs">
-            {active ? `${active}.log` : "no service selected"}
+            {active ? `${active.label}.log` : "no service selected"}
           </span>
           <span
             className="text-muted-foreground flex items-center gap-1.5 font-mono text-[11px]"
