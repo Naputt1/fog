@@ -665,9 +665,6 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
         for msg in fog::router::ensure(router, &domains) {
             eprintln!("{msg}");
         }
-        // Service-directory index: unmatched hosts (e.g. the raw tailnet IP)
-        // get a page listing every running service and the port DNS forwards
-        // to it, with click-to-copy links.
         for msg in fog::index::ensure(router) {
             eprintln!("{msg}");
         }
@@ -771,15 +768,6 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
             .unwrap_or_else(|e| e.into_inner()) = Some(proxy.logs_handle());
     }
 
-    // Containers are now starting; refresh the service index once after a short
-    // grace so this instance's frontend appears in the directory page. The stop
-    // flag halts the loop on teardown so a stale refresh cannot overwrite the
-    // teardown regeneration.
-    let index_refresh_stop = config
-        .router
-        .as_ref()
-        .map(fog::index::refresh_after_startup);
-
     // Services are up: release the owner lock so a later worktree switch can
     // replace this instance.
     drop(owner_lock);
@@ -812,12 +800,6 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
         ratatui::run(|terminal| app.run(terminal))?;
     }
 
-    // Refresh the service index on teardown so stopped instances disappear from
-    // the directory page on the next manual browser refresh. Halt the startup
-    // refresh loop first so it cannot clobber this regeneration.
-    if let Some(stop) = index_refresh_stop {
-        stop.store(true, std::sync::atomic::Ordering::SeqCst);
-    }
     if let Some(router) = config.router.as_ref() {
         for msg in fog::index::ensure(router) {
             eprintln!("{msg}");
@@ -918,9 +900,9 @@ fn daemonize(script: &str) -> io::Result<()> {
 }
 
 fn main() -> io::Result<()> {
-    // `fog index serve` runs the standalone service-directory server. It is
-    // dispatched before clap so `serve` is not misparsed as the `[PID]`
-    // positional (which expects a number).
+    // `fog index serve` runs the standalone SPA server. It is dispatched before
+    // clap so `serve` is not misparsed as the `[PID]` positional (which expects
+    // a number).
     let argv: Vec<String> = std::env::args().skip(1).collect();
     if argv.first().map(String::as_str) == Some("index")
         && argv.get(1).map(String::as_str) == Some("serve")

@@ -10,7 +10,7 @@
 //!     (with `index.html` also served at `/`).
 //!   - If `ui/dist/` is absent, an empty module is emitted so `cargo build`,
 //!     `cargo clippy -D warnings` and `cargo test` all still succeed. The server
-//!     then falls back to its generated service-directory page.
+//!     returns 404 for non-API routes when no SPA is embedded.
 //!
 //! The generated module is pulled into `src/index.rs` via
 //! `include!(concat!(env!("OUT_DIR"), "/fog_embedded.rs"))`.
