@@ -1407,12 +1407,12 @@ impl App {
                 )));
             }
             lines.push(Line::from(Span::styled(
-                " Enter switch   d terminate   Esc cancel ",
+                " f search   d terminate ",
                 Style::default().dim(),
             )));
 
             let overlay_width = 64u16.min(area.width.saturating_sub(4));
-            let overlay_height = (lines.len() as u16).min(area.height.saturating_sub(2));
+            let overlay_height = ((lines.len() as u16) + 2).min(area.height);
             let overlay_x = (area.width.saturating_sub(overlay_width)) / 2;
             let overlay_y = (area.height.saturating_sub(overlay_height)) / 2;
             let overlay_area = Rect {
