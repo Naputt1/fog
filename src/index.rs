@@ -350,9 +350,7 @@ pub fn ensure(cfg: &RouterConfig) -> Vec<String> {
         Ok(()) => messages.push(format!(
             "  + service index server on http://127.0.0.1:{port}"
         )),
-        Err(e) => messages.push(format!(
-            "⚠ could not start index server on :{port} ({e})"
-        )),
+        Err(e) => messages.push(format!("⚠ could not start index server on :{port} ({e})")),
     }
     messages
 }
@@ -555,10 +553,7 @@ fn parse_kill_route(path: &str) -> Option<&str> {
 ///   - no socket file → 404
 ///   - success → 200 `{"ok":true}`
 ///   - IPC error → 502
-async fn handle_kill_request(
-    method: &hyper::Method,
-    pid_str: &str,
-) -> Response<RespBody> {
+async fn handle_kill_request(method: &hyper::Method, pid_str: &str) -> Response<RespBody> {
     if method != hyper::Method::POST {
         return api_not_found();
     }

@@ -1390,10 +1390,7 @@ impl App {
                     ));
                 }
                 if is_running {
-                    spans.push(Span::styled(
-                        " *",
-                        Style::default().fg(Color::Blue).bold(),
-                    ));
+                    spans.push(Span::styled(" *", Style::default().fg(Color::Blue).bold()));
                 }
                 spans.push(Span::styled(
                     format!("  {}", wt.path.display()),
