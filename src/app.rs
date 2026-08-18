@@ -1379,15 +1379,20 @@ impl App {
                 // The current-worktree `*` and the live-branch green `*` are
                 // distinct spans, so a selected/current running branch keeps
                 // both readable.
-                let mut label = format!("{prefix} {}", wt.label());
+                let mut spans = vec![Span::styled(
+                    format!("{prefix} {}", wt.label()),
+                    label_style,
+                )];
                 if is_current {
-                    label.push_str(" *");
+                    spans.push(Span::styled(
+                        " *",
+                        Style::default().fg(Color::Rgb(255, 176, 0)).bold(),
+                    ));
                 }
-                let mut spans = vec![Span::styled(label, label_style)];
                 if is_running {
                     spans.push(Span::styled(
                         " *",
-                        Style::default().fg(self.theme.terminal).bold(),
+                        Style::default().fg(Color::Blue).bold(),
                     ));
                 }
                 spans.push(Span::styled(
