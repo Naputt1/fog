@@ -14,6 +14,7 @@ import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { BrandCloud } from "@/components/brand-cloud";
 
 interface NavItem {
   to: string;
@@ -33,8 +34,8 @@ const NAV_ITEMS: NavItem[] = [
 function Brand() {
   return (
     <div className="flex items-center gap-2 px-2">
-      <div className="border-primary/40 bg-primary/10 text-primary flex size-7 items-center justify-center rounded border font-mono text-sm font-bold">
-        ▓
+      <div className="border-primary/40 bg-primary/10 text-primary flex size-7 items-center justify-center rounded border">
+        <BrandCloud className="size-5" />
       </div>
       <div className="leading-tight">
         <div className="font-mono text-sm font-semibold tracking-tight">
@@ -142,7 +143,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </header>
 
           <ScrollArea className="flex-1">
-            <main className="mx-auto w-full min-w-0 max-w-6xl p-4 md:p-6">
+            <main className="mx-auto w-full max-w-6xl min-w-0 p-4 md:p-6">
               {children}
             </main>
           </ScrollArea>

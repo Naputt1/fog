@@ -6,6 +6,7 @@ import { useServices } from "@/lib/hooks";
 import type { Service } from "@/lib/api";
 import { PageHeader, LoadingState, ErrorState } from "@/components/page-state";
 import { StatusBadge } from "@/components/status-badge";
+import { BrandCloud } from "@/components/brand-cloud";
 import {
   Table,
   TableBody,
@@ -191,7 +192,10 @@ function ServicesTable({ services }: { services: Service[] }) {
                   >
                     <div className="flex items-center justify-between gap-2">
                       <div className="flex min-w-0 items-center gap-2 font-mono text-sm font-semibold">
-                        <span className="text-primary/70 shrink-0">▓</span>
+                        <BrandCloud
+                          variant="mono"
+                          className="text-primary/70 size-3.5 shrink-0"
+                        />
                         <span className="truncate">{project.project}</span>
                       </div>
                       <span className="border-primary/30 bg-primary/10 text-primary shrink-0 rounded-full border px-2 font-mono text-[10px]">
@@ -281,7 +285,10 @@ function ServiceCardList({ services }: { services: Service[] }) {
           <div className="border-primary/50 bg-secondary/40 border-b border-l-2 px-3 py-1.5">
             <div className="flex items-center justify-between gap-2">
               <div className="flex min-w-0 items-center gap-2 font-mono text-sm font-semibold">
-                <span className="text-primary/70 shrink-0">▓</span>
+                <BrandCloud
+                  variant="mono"
+                  className="text-primary/70 size-3.5 shrink-0"
+                />
                 <span className="truncate">{project.project}</span>
               </div>
               <span className="border-primary/30 bg-primary/10 text-primary shrink-0 rounded-full border px-2 font-mono text-[10px]">
