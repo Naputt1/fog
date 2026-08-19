@@ -55,7 +55,7 @@ function AlertDescription({
     <div
       data-slot="alert-description"
       className={cn(
-        "text-muted-foreground col-start-2 grid min-w-0 justify-items-start gap-1 break-words text-sm [&_p]:leading-relaxed",
+        "text-muted-foreground col-start-2 grid min-w-0 justify-items-start gap-1 text-sm break-words [&_p]:leading-relaxed",
         className
       )}
       {...props}

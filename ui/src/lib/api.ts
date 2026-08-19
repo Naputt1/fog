@@ -153,9 +153,7 @@ export interface ServiceActionResult {
 }
 
 /** Kill an entire fog instance (sends graceful shutdown over IPC). */
-export async function postKillInstance(
-  pid: number
-): Promise<{ ok: boolean }> {
+export async function postKillInstance(pid: number): Promise<{ ok: boolean }> {
   return postJson<{ ok: boolean }>(`/api/instances/${pid}/kill`, {});
 }
 
@@ -169,7 +167,10 @@ export class ApiError extends Error {
 }
 
 /** Parse a non-2xx response into a descriptive ApiError (reads {"error"} body). */
-async function parseErrorResponse(res: Response, path: string): Promise<ApiError> {
+async function parseErrorResponse(
+  res: Response,
+  path: string
+): Promise<ApiError> {
   let detail = res.statusText;
   try {
     const body = await res.json();

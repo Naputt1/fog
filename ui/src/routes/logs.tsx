@@ -422,7 +422,8 @@ function LogsPage() {
     const byContainer = new Map(list.map((s) => [s.container, s]));
     const byService = new Map(list.map((s) => [s.service, s]));
     if (search.service) {
-      const svc = byContainer.get(search.service) ?? byService.get(search.service);
+      const svc =
+        byContainer.get(search.service) ?? byService.get(search.service);
       if (svc) return { container: svc.container, label: svc.service };
     }
     const first = list[0];
@@ -594,7 +595,10 @@ function LogsPage() {
                 <DropdownMenuRadioGroup
                   value={active?.container ?? undefined}
                   onValueChange={(container) =>
-                    void navigate({ to: "/logs", search: { service: container } })
+                    void navigate({
+                      to: "/logs",
+                      search: { service: container },
+                    })
                   }
                 >
                   {groups.map((project) => (

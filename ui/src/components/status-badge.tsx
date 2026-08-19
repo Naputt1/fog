@@ -24,7 +24,7 @@ export function StatusBadge({ status }: { status: ServiceStatus }) {
     <Badge
       variant="outline"
       className={cn(
-        "gap-1.5 min-w-0 max-w-full font-mono capitalize",
+        "max-w-full min-w-0 gap-1.5 font-mono capitalize",
         STATUS_STYLE[status] ?? "border-border text-muted-foreground"
       )}
     >

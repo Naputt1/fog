@@ -1,6 +1,12 @@
 import { useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
-import { useKillInstance, useLaunch, useLaunchTargets, useServiceAction, useStatus } from "@/lib/hooks";
+import {
+  useKillInstance,
+  useLaunch,
+  useLaunchTargets,
+  useServiceAction,
+  useStatus,
+} from "@/lib/hooks";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page-state";
 import { StatusBadge } from "@/components/status-badge";
 import { Badge } from "@/components/ui/badge";
@@ -182,7 +188,9 @@ function ServiceTable({
           <TableBody>
             {services.map((svc) => (
               <TableRow key={svc.name}>
-                <TableCell className="font-mono font-medium">{svc.name}</TableCell>
+                <TableCell className="font-mono font-medium">
+                  {svc.name}
+                </TableCell>
                 <TableCell>
                   <StatusBadge status={svc.running ? "running" : "stopped"} />
                 </TableCell>
@@ -203,14 +211,9 @@ function ServiceTable({
       {/* Mobile (<sm): card-based fallback so actions stay tap-friendly */}
       <div className="space-y-3 sm:hidden">
         {services.map((svc) => (
-          <div
-            key={svc.name}
-            className="border-border rounded-lg border p-3"
-          >
+          <div key={svc.name} className="border-border rounded-lg border p-3">
             <div className="flex items-center justify-between gap-2">
-              <span className="font-mono text-sm font-medium">
-                {svc.name}
-              </span>
+              <span className="font-mono text-sm font-medium">{svc.name}</span>
               <StatusBadge status={svc.running ? "running" : "stopped"} />
             </div>
             <div className="mt-2">
@@ -233,7 +236,7 @@ const selectClass =
 /** Tiny stacked field label above a select/input. */
 function FieldLabel({ children }: { children: React.ReactNode }) {
   return (
-    <span className="text-muted-foreground mb-1 block font-mono text-[11px] uppercase tracking-wide">
+    <span className="text-muted-foreground mb-1 block font-mono text-[11px] tracking-wide uppercase">
       {children}
     </span>
   );
@@ -259,7 +262,8 @@ function LaunchCard() {
 
   const projects = data?.projects ?? [];
   const selectedProject = projects.find((p) => p.path === projectPath);
-  const launchable = selectedProject?.worktrees.filter((w) => w.scripts.length > 0) ?? [];
+  const launchable =
+    selectedProject?.worktrees.filter((w) => w.scripts.length > 0) ?? [];
   const selectedWorktree = launchable.find((w) => w.path === worktreePath);
   const scripts = selectedWorktree?.scripts ?? [];
 
@@ -440,7 +444,7 @@ function LaunchCard() {
             Starting instance…
           </p>
         ) : result?.ok && result.pid != null ? (
-          <p className="text-emerald-500 font-mono text-xs">
+          <p className="font-mono text-xs text-emerald-500">
             Started pid {result.pid}
           </p>
         ) : launchError ? (
@@ -463,7 +467,11 @@ function InstanceCard({
   running: number;
 }) {
   const [confirmKill, setConfirmKill] = useState(false);
-  const { mutate: killInstance, isPending: killPending, error: killError } = useKillInstance();
+  const {
+    mutate: killInstance,
+    isPending: killPending,
+    error: killError,
+  } = useKillInstance();
 
   return (
     <Card className="gap-3 py-4">
@@ -509,14 +517,21 @@ function InstanceCard({
         ) : null}
       </CardContent>
 
-      <AlertDialog open={confirmKill} onOpenChange={(open) => { if (!open) setConfirmKill(false); }}>
+      <AlertDialog
+        open={confirmKill}
+        onOpenChange={(open) => {
+          if (!open) setConfirmKill(false);
+        }}
+      >
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Kill instance</AlertDialogTitle>
             <AlertDialogDescription>
               Kill "{inst.script}" (pid {inst.pid})?
-              {inst.project ? ` Project: ${inst.project}${inst.branch ? `@${inst.branch}` : ""}.` : ""}
-              {" "}All services will be shut down gracefully.
+              {inst.project
+                ? ` Project: ${inst.project}${inst.branch ? `@${inst.branch}` : ""}.`
+                : ""}{" "}
+              All services will be shut down gracefully.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
