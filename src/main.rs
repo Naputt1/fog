@@ -463,9 +463,36 @@ fn cmd_kill(pid: Option<u32>) -> io::Result<()> {
         std::process::exit(1);
     }
 
-    let (_target_pid, path) = resolve_instance(&instances, pid, "kill");
+    let (target_pid, path) = resolve_instance(&instances, pid, "kill");
     ipc::send_kill(path)?;
     println!("sent kill request to fog instance");
+
+    // Give the instance a moment to exit and clean up its socket, then
+    // tear down the index server if it was the last instance.
+    // This is best-effort: `fog kill` is fire-and-forget, so we don't
+    // block long enough to guarantee the instance is gone.
+    let is_last = instances.len() == 1 && instances[0].0 == target_pid;
+    if is_last {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        // Spin a short wait for the target's socket to become unreachable
+        // (up to 2s) before deciding to kill the server.
+        for _ in 0..20 {
+            if ipc::query_status(path).is_err() && !path.exists() {
+                break;
+            }
+            if !fog::process::is_pid_alive(target_pid) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        fog::index::maybe_terminate_if_no_instances(None);
+    } else if instances.len() > 1 {
+        // Multiple instances were running; the killed one may have been the
+        // last one that made the server idle (e.g. stale sockets). Do a
+        // quick idle check after a short delay without blocking the CLI long.
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        fog::index::maybe_terminate_if_no_instances(None);
+    }
     Ok(())
 }
 
@@ -807,6 +834,11 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
     }
 
     ipc::cleanup_socket();
+
+    // If no fog instances remain, tear down the index server as well.
+    // Give the socket file a moment to disappear from the filesystem.
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    fog::index::maybe_terminate_if_no_instances(config.router.as_ref());
 
     Ok(())
 }

@@ -360,6 +360,90 @@ fn server_started(port: u16) -> bool {
     std::net::TcpStream::connect(("127.0.0.1", port)).is_ok()
 }
 
+/// Path to the pidfile for the index server on `port`.
+fn index_pid_path(port: u16) -> PathBuf {
+    std::env::temp_dir().join(format!("fog-index-{port}.pid"))
+}
+
+/// Best-effort: terminate the index server on `port` if it is running.
+///
+/// Returns `true` if the server was stopped (or was not running).
+fn terminate_server_on_port(port: u16) -> bool {
+    // Prefer the pidfile, but fall back to a port probe.
+    let pid: Option<u32> = std::fs::read_to_string(index_pid_path(port))
+        .ok()
+        .and_then(|s| s.trim().parse().ok());
+
+    if let Some(pid) = pid {
+        if crate::process::is_pid_alive(pid) {
+            crate::process::try_kill_process_group(pid, libc::SIGTERM);
+            // Give it a moment to exit gracefully.
+            for _ in 0..20 {
+                if !crate::process::is_pid_alive(pid) || !server_started(port) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            if crate::process::is_pid_alive(pid) && server_started(port) {
+                crate::process::try_kill_process_group(pid, libc::SIGKILL);
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+        }
+        let _ = std::fs::remove_file(index_pid_path(port));
+        // Even if the pid was stale, consider it handled if the port is now closed.
+        return !server_started(port);
+    }
+
+    // No pidfile: if nothing is listening we are already done.
+    if !server_started(port) {
+        return true;
+    }
+
+    // Last resort: try to find `fog index serve` via `ps` is fragile; just
+    // report failure and let the caller retry via polling self-exit.
+    false
+}
+
+/// Kill the index server if no fog instances remain.
+///
+/// Looks at `crate::ipc::find_instances()`. If no instances are alive,
+/// attempts to stop the server on the configured port (or the default
+/// `18080`). Best-effort and never panics.
+pub fn maybe_terminate_if_no_instances(cfg: Option<&RouterConfig>) {
+    let instances = crate::ipc::find_instances().unwrap_or_default();
+    let any_alive = instances.iter().any(|(_, p)| crate::ipc::query_status(p).is_ok());
+    if any_alive {
+        return;
+    }
+    // No live instance responded — idle, tear down the server.
+    if let Some(c) = cfg {
+        let port = c.index_port.unwrap_or(DEFAULT_INDEX_PORT);
+        let _ = terminate_server_on_port(port);
+        if port != DEFAULT_INDEX_PORT {
+            let _ = terminate_server_on_port(DEFAULT_INDEX_PORT);
+        }
+        return;
+    }
+    // No config given (e.g. `fog kill` without a config): try the default
+    // port and any pidfile-discovered custom ports.
+    let _ = terminate_server_on_port(DEFAULT_INDEX_PORT);
+    if let Ok(dir) = std::fs::read_dir(std::env::temp_dir()) {
+        for entry in dir.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if let Some(port_str) = name
+                .strip_prefix("fog-index-")
+                .and_then(|s| s.strip_suffix(".pid"))
+            {
+                if let Ok(port) = port_str.parse::<u16>() {
+                    if port != DEFAULT_INDEX_PORT {
+                        let _ = terminate_server_on_port(port);
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Launches the index server as a detached background process (`fog index
 /// serve`), so it survives any individual fog instance exiting. If it is
 /// already running this is a no-op.
@@ -385,15 +469,22 @@ fn spawn_server(cfg: &RouterConfig) -> Result<(), String> {
         .spawn()
         .map_err(|e| format!("could not spawn index server: {e}"))?;
     let pid = child.id();
+    // Record the pid so `maybe_terminate_if_no_instances` can find it later.
+    let _ = std::fs::write(index_pid_path(port), pid.to_string());
     // Wait briefly for it to bind before reporting success.
     for _ in 0..25 {
         if server_started(port) {
             return Ok(());
         }
         if child.try_wait().ok().flatten().is_some() {
+            let _ = std::fs::remove_file(index_pid_path(port));
             return Err(format!("index server (pid {pid}) exited during startup"));
         }
         std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    // Timed out — clean up the stale pidfile if the server never came up.
+    if !server_started(port) {
+        let _ = std::fs::remove_file(index_pid_path(port));
     }
     Err(format!("index server (pid {pid}) did not bind within 5s"))
 }
@@ -411,11 +502,34 @@ pub fn serve() -> io::Result<()> {
 
 /// Blocks forever serving the embedded SPA on loopback `port`.
 fn serve_blocking(port: u16, network: String) -> io::Result<()> {
+    // Record this server's pid for `maybe_terminate_if_no_instances`.
+    let _ = std::fs::write(index_pid_path(port), std::process::id().to_string());
+    // Self-terminate when no fog instance has been alive for a while, so a
+    // crashed last instance (no cleanup hook) still brings the server down.
+    std::thread::spawn(move || {
+        let mut idle_ticks: u32 = 0;
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            let instances = crate::ipc::find_instances().unwrap_or_default();
+            let any_alive = instances.iter().any(|(_, p)| crate::ipc::query_status(p).is_ok());
+            if any_alive {
+                idle_ticks = 0;
+            } else {
+                idle_ticks += 1;
+                // 4 ticks = ~20s of continuous idleness before exiting.
+                if idle_ticks >= 4 {
+                    let _ = std::fs::remove_file(index_pid_path(port));
+                    std::process::exit(0);
+                }
+            }
+        }
+    });
+
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|e| io::Error::other(e.to_string()))?;
-    rt.block_on(async move {
+    let result = rt.block_on(async move {
         let addr = format!("127.0.0.1:{port}");
         let listener = tokio::net::TcpListener::bind(&addr)
             .await
@@ -437,7 +551,9 @@ fn serve_blocking(port: u16, network: String) -> io::Result<()> {
                     .await;
             });
         }
-    })
+    });
+    let _ = std::fs::remove_file(index_pid_path(port));
+    result
 }
 
 /// Routes embedded-server requests:
@@ -572,7 +688,16 @@ async fn handle_kill_request(method: &hyper::Method, pid_str: &str) -> Response<
         .unwrap_or_else(|e| Err(io::Error::other(e.to_string())));
 
     match outcome {
-        Ok(()) => json_response(&serde_json::json!({"ok":true})),
+        Ok(()) => {
+            // The killed instance will run `maybe_terminate_if_no_instances`
+            // on its own exit, but also schedule a server-side idle check
+            // so the server exits even if that instance crashes before it.
+            tokio::task::spawn_blocking(|| {
+                std::thread::sleep(std::time::Duration::from_millis(800));
+                maybe_terminate_if_no_instances(None);
+            });
+            json_response(&serde_json::json!({"ok":true}))
+        }
         Err(e) => api_error(StatusCode::BAD_GATEWAY, &e.to_string()),
     }
 }
@@ -1931,13 +2056,15 @@ mod tests {
             ),
             ("com.docker.compose.project", "redfox-ui"),
         ]);
+        let git_project = git_project_for(worktree.to_str().unwrap());
         assert_eq!(
-            derive_group(&app, "redfox-ui-frontend-1"),
+            derive_group(&app, "redfox-ui-frontend-1", git_project.as_deref()),
             ("red-fox".into(), "ui".into(), false)
         );
 
         let infra_dir = worktree.join("infra");
         std::fs::create_dir_all(&infra_dir).unwrap();
+        let infra_git = git_project_for(infra_dir.to_str().unwrap());
         let infra = labels(&[
             (
                 "com.docker.compose.project.working_dir",
@@ -1946,7 +2073,7 @@ mod tests {
             ("com.docker.compose.project", "red-fox-infra"),
         ]);
         assert_eq!(
-            derive_group(&infra, "red-fox-infra-postgres-1"),
+            derive_group(&infra, "red-fox-infra-postgres-1", infra_git.as_deref()),
             ("red-fox".into(), "shared".into(), true)
         );
 
