@@ -131,6 +131,11 @@ fn load_config(path: &Path) -> Config {
     }
 }
 
+/// Loads config for `fog index restart` — best-effort, no exit on failure.
+fn load_runtime_config_for_index() -> fog::config::Config {
+    fog::index::load_runtime_config()
+}
+
 /// Lists available script names and exits with an error.
 fn list_scripts_and_exit(config: &Config, message: &str) -> ! {
     eprintln!("{message}");
@@ -496,6 +501,115 @@ fn cmd_kill(pid: Option<u32>) -> io::Result<()> {
     Ok(())
 }
 
+fn cmd_restart(pid: Option<u32>, cli: &Cli) -> io::Result<()> {
+    let instances = ipc::find_instances()?;
+
+    if instances.is_empty() {
+        eprintln!("error: no running fog instances");
+        std::process::exit(1);
+    }
+
+    let (target_pid, path) = resolve_instance(&instances, pid, "restart");
+    // Capture the target's status before killing so we can relaunch it.
+    let status = ipc::query_status(path).unwrap_or_else(|e| {
+        eprintln!("error: could not query instance {target_pid}: {e}");
+        std::process::exit(1);
+    });
+    let script = status.script.clone();
+    let config_dir = status.config_dir.clone();
+    let branch = status.branch.clone();
+
+    ipc::send_kill(path)?;
+    println!("sent kill request to fog instance {target_pid} (script '{script}')");
+
+    // Wait for the old instance to fully exit before relaunching to avoid
+    // port conflicts and owner-lock races.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        if !fog::process::is_pid_alive(target_pid) && ipc::query_status(path).is_err() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    // Extra grace for socket file removal.
+    wait_for_socket_gone(path);
+
+    // Resolve config path for the relaunch. Prefer the killed instance's
+    // config_dir (worktree-accurate), fall back to cli --config.
+    let config_path = if let Some(dir) = config_dir {
+        let p = PathBuf::from(&dir).join("fog.json");
+        if p.exists() { p } else { resolve_config_path(&resolve_run_config(cli)) }
+    } else {
+        resolve_config_path(&resolve_run_config(cli))
+    };
+
+    // Spawn a detached instance with the same script. The config_path already
+    // points at the correct worktree's fog.json, so no --branch is needed
+    // (branch is inferred from the worktree containing config_dir).
+    let new_pid = spawn_instance_detached(&config_path, &script, None)?;
+    println!("restarted fog '{script}' (old pid {target_pid} → new pid {new_pid})");
+    if let Some(b) = branch {
+        println!("  branch: {b}");
+    }
+    println!("  status: fog ls {new_pid}");
+    println!("  logs:   fog logs {new_pid}");
+    Ok(())
+}
+
+/// Spawns a `fog <script>` detached instance for restart, mirroring
+/// `daemonize` / `index::spawn_detached` but for generic scripts.
+fn spawn_instance_detached(
+    config_path: &Path,
+    script: &str,
+    branch: Option<&str>,
+) -> io::Result<u32> {
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("fog"));
+    let mut cmd = Command::new(&exe);
+    cmd.arg("--config")
+        .arg(config_path)
+        .arg(script)
+        .env("FOG_DAEMON_CHILD", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if let Some(b) = branch {
+        cmd.arg("--branch").arg(b);
+    }
+    #[cfg(unix)]
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| io::Error::other(format!("could not restart fog '{script}': {e}")))?;
+    let pid = child.id();
+    let socket = ipc::socket_path(pid);
+    let deadline = std::time::Instant::now() + DAEMON_READY_TIMEOUT;
+    loop {
+        if ipc::query_status(&socket).is_ok() {
+            return Ok(pid);
+        }
+        if child.try_wait().ok().flatten().is_some() {
+            return Err(io::Error::other(format!(
+                "restarted fog '{script}' (pid {pid}) exited during startup; logs: {}",
+                ipc::instance_log_dir(pid).display()
+            )));
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(io::Error::other(format!(
+                "restarted fog '{script}' (pid {pid}) did not become ready within {}s; logs: {}",
+                DAEMON_READY_TIMEOUT.as_secs(),
+                ipc::instance_log_dir(pid).display()
+            )));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 /// Resolves the instance `pid` refers to, returning its PID and socket path.
 ///
 /// With no `pid`, the single running instance is chosen; multiple instances
@@ -692,7 +806,12 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
         for msg in fog::router::ensure(router, &domains) {
             eprintln!("{msg}");
         }
-        for msg in fog::index::ensure(router) {
+    }
+    // Standalone index server (service directory + web UI). Controlled by
+    // fog config (`~/.config/fog/fog.json` alongside `theme`, plus per-project
+    // `fog.json` top-level `index`). Both default true; either can opt-out.
+    if config.effective_should_serve_index() {
+        for msg in fog::index::ensure_for_config(&config) {
             eprintln!("{msg}");
         }
     }
@@ -827,8 +946,8 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
         ratatui::run(|terminal| app.run(terminal))?;
     }
 
-    if let Some(router) = config.router.as_ref() {
-        for msg in fog::index::ensure(router) {
+    if config.effective_should_serve_index() {
+        for msg in fog::index::ensure_for_config(&config) {
             eprintln!("{msg}");
         }
     }
@@ -838,7 +957,10 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
     // If no fog instances remain, tear down the index server as well.
     // Give the socket file a moment to disappear from the filesystem.
     std::thread::sleep(std::time::Duration::from_millis(200));
-    fog::index::maybe_terminate_if_no_instances(config.router.as_ref());
+    // Use the effective index port (project → global fallback) so a custom
+    // port is torn down correctly.
+    let port = config.effective_index_port();
+    fog::index::maybe_terminate_on_port(port);
 
     Ok(())
 }
@@ -932,14 +1054,45 @@ fn daemonize(script: &str) -> io::Result<()> {
 }
 
 fn main() -> io::Result<()> {
-    // `fog index serve` runs the standalone SPA server. It is dispatched before
-    // clap so `serve` is not misparsed as the `[PID]` positional (which expects
-    // a number).
+    // `fog index serve/kill/restart` are dispatched before clap so they are not
+    // misparsed as the `[PID]` positional (which expects a number).
     let argv: Vec<String> = std::env::args().skip(1).collect();
-    if argv.first().map(String::as_str) == Some("index")
-        && argv.get(1).map(String::as_str) == Some("serve")
-    {
-        return fog::index::serve();
+    if argv.first().map(String::as_str) == Some("index") {
+        match argv.get(1).map(String::as_str) {
+            Some("serve") => return fog::index::serve(),
+            Some("kill") => {
+                // `fog index kill` terminates the index server unconditionally.
+                let killed = fog::index::kill_server(None);
+                if killed {
+                    println!("index server stopped");
+                } else {
+                    eprintln!("index server not running");
+                }
+                return Ok(());
+            }
+            Some("restart") => {
+                // `fog index restart` kills then re-ensures the server. This is
+                // a manual override that ignores `index.enabled:false` so the
+                // user can force-start the index even for projects that opt out
+                // of auto-serving it on `fog <script>`.
+                let cfg = load_runtime_config_for_index();
+                fog::index::kill_for_config(&cfg);
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                let port = cfg.index_port();
+                let network = cfg.index_network();
+                for msg in fog::index::ensure_with_port(port, &network) {
+                    eprintln!("{msg}");
+                }
+                if fog::index::is_server_started(port) {
+                    println!("index server restarted on :{port}");
+                } else {
+                    eprintln!("error: index server did not start on :{port}");
+                    std::process::exit(1);
+                }
+                return Ok(());
+            }
+            _ => {}
+        }
     }
 
     let cli = Cli::parse();
@@ -969,6 +1122,7 @@ fn main() -> io::Result<()> {
     match cli.script.as_deref() {
         Some("ls") => cmd_ls(),
         Some("kill") => cmd_kill(cli.pid),
+        Some("restart") => cmd_restart(cli.pid, &cli),
         Some("logs") => cmd_logs(cli.pid),
         Some(name) => run_script(name, &cli),
         None => {

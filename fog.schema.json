@@ -189,6 +189,24 @@
         }
       }
     },
+    "index": {
+      "type": "object",
+      "description": "Standalone service-directory index server (web UI + JSON API). Controls whether starting this project serves the index. Default enabled: true, so every `fog <script>` brings the index up unless explicitly disabled per-project.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether to serve the index server when this project starts. Default true. Set to false to opt this project out of serving the index (other projects can still serve it)."
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 65535,
+          "description": "Port the index server listens on (default 18080). Overrides router.index_port when set."
+        }
+      },
+      "additionalProperties": false
+    },
     "sidebar": {
       "type": "object",
       "properties": {

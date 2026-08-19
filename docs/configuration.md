@@ -31,6 +31,9 @@ See [`fog.schema.json`](https://github.com/Naputt1/fog/blob/main/fog.schema.json
 | `max_scrollback` | `integer` | `2000` | Maximum scrollback lines per terminal (min: 100) |
 | `sidebar` | `object` | `null` | Sidebar width constraints |
 | `theme` | `object` | `null` | Color theme overrides |
+| `index` | `object` | `{ enabled: true }` | Standalone index server (service directory + web UI); set `enabled:false` to opt this project out of serving the index |
+| `router` | `object` | `null` | Central Traefik router (host-global) |
+| `dnsmasq` | `object` | `null` | Wildcard DNS setup |
 
 ## Scripts
 
@@ -281,6 +284,26 @@ For details on route matching, see the [Proxy docs](/proxy).
 | `max_width` | `integer` | `30` | Maximum sidebar width in columns (8–50) |
 
 The sidebar width is computed dynamically: `max(name_length + 5, min_width)` clamped to `max_width`.
+
+## index
+
+Standalone service-directory index server (web UI + JSON API). By default every `fog <script>` serves the index unless opted out. This lives in the **fog config** (top-level `fog.json` alongside `theme`/`sidebar`, default `enabled:true`) — not per-script. It can be set **per-project** (`./fog.json`) or **globally** (`~/.config/fog/fog.json`, same schema); either can opt-out (both must be `true` to serve). The server is host-global (like `router`/`dnsmasq`) and is torn down automatically when the last fog instance exits — see `fog index kill/restart`.
+
+```json
+{
+  "index": {
+    "enabled": true,
+    "port": 18080
+  }
+}
+```
+
+| Field | Required | Type | Default | Description |
+|-------|----------|------|---------|-------------|
+| `enabled` | No | `boolean` | `true` | Whether starting this project serves the index. Set `false` to opt this project out (useful for CI or projects that never need the web UI). |
+| `port` | No | `integer` | `18080` | Port the index listens on. Overrides `router.index_port` when set. |
+
+When `enabled:false`, `fog <script>` for this project will not start the index (and will not print the `+ service index server` line). The index can still be started manually via `fog index restart` or by starting another project that has `enabled:true` (the default). Other lifecycle still applies: `fog kill`/`fog restart` per-instance, `POST /api/server/kill` + `/restart`, and auto-teardown when the last instance exits.
 
 ## dnsmasq
 

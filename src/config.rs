@@ -156,6 +156,36 @@ fn default_concurrent() -> bool {
     true
 }
 
+fn default_true() -> bool {
+    true
+}
+
+/// Standalone service-directory index server config.
+///
+/// Controls whether starting this project also serves the index (service
+/// directory + web UI + JSON API) on `port`. Default `enabled: true` so every
+/// `fog <script>` brings the index up unless explicitly disabled per-project.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct IndexConfig {
+    /// Whether to serve the index server when this project starts.
+    /// Default `true`.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Port the index server listens on (default 18080). Falls back to
+    /// `router.index_port` for backward-compat when not set here.
+    pub port: Option<u16>,
+}
+
+impl Default for IndexConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            port: None,
+        }
+    }
+}
+
 /// A named script: a full set of services and optional proxy configuration.
 #[derive(Debug, Deserialize, Clone)]
 pub struct ScriptConfig {
@@ -269,6 +299,87 @@ pub struct Config {
     pub dnsmasq: Option<DnsmasqConfig>,
     /// Optional central reverse-proxy (Traefik) setup applied on startup.
     pub router: Option<RouterConfig>,
+    /// Standalone index server (service directory + web UI). Controls whether
+    /// starting this project serves the index. Default `enabled: true`.
+    #[serde(default)]
+    pub index: Option<IndexConfig>,
+}
+
+impl Config {
+    /// Whether this project should serve the index server when a script starts.
+    /// Default `true` when `index` is absent or `enabled` is not set.
+    pub fn should_serve_index(&self) -> bool {
+        self.index.as_ref().map(|i| i.enabled).unwrap_or(true)
+    }
+
+    /// Effective index port for this project, preferring `index.port` then
+    /// `router.index_port` then `18080`.
+    pub fn index_port(&self) -> u16 {
+        self.index
+            .as_ref()
+            .and_then(|i| i.port)
+            .or_else(|| self.router.as_ref().and_then(|r| r.index_port))
+            .unwrap_or(18080)
+    }
+
+    /// Shared network name for the index server, from `router.shared_network`
+    /// or the default `fog-router`.
+    pub fn index_network(&self) -> String {
+        self.router
+            .as_ref()
+            .map(|r| r.shared_network.clone())
+            .unwrap_or_else(default_router_network)
+    }
+
+    /// Effective should-serve for global + project: both must be true.
+    /// Global config is `~/.config/fog/fog.json` (the fog config with themes).
+    pub fn effective_should_serve_index(&self) -> bool {
+        // Project-level check
+        if !self.should_serve_index() {
+            return false;
+        }
+        // Global fog config check (same schema, top-level `index` alongside `theme`)
+        if let Some(global) = load_global_config() {
+            if !global.should_serve_index() {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Effective index port, preferring project `index.port`, then project
+    /// `router.index_port`, then global `index.port`/`router.index_port`, then 18080.
+    pub fn effective_index_port(&self) -> u16 {
+        if let Some(p) = self.index.as_ref().and_then(|i| i.port) {
+            return p;
+        }
+        if let Some(p) = self.router.as_ref().and_then(|r| r.index_port) {
+            return p;
+        }
+        if let Some(global) = load_global_config() {
+            if let Some(p) = global.index.as_ref().and_then(|i| i.port) {
+                return p;
+            }
+            if let Some(p) = global.router.as_ref().and_then(|r| r.index_port) {
+                return p;
+            }
+        }
+        18080
+    }
+}
+
+/// Loads the global fog config (`~/.config/fog/fog.json`, the one with `theme`
+/// etc) if it exists. Used for `index.enabled` global override.
+pub fn load_global_config() -> Option<Config> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    if home.is_empty() {
+        return None;
+    }
+    let path = std::path::PathBuf::from(format!("{home}/.config/fog/fog.json"));
+    if !path.is_file() {
+        return None;
+    }
+    load(&path).ok()
 }
 
 /// Loads and parses a config file, returning a human-readable error on failure.

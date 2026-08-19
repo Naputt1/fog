@@ -23,6 +23,8 @@ include!(concat!(env!("OUT_DIR"), "/fog_embedded.rs"));
 /// Default port for the embedded service-directory index server.
 const DEFAULT_INDEX_PORT: u16 = 18080;
 
+static CURRENT_INDEX_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+
 /// Default number of trailing lines served by the live-log stream.
 const DEFAULT_LOG_TAIL: usize = 200;
 /// Upper bound for the `tail` query parameter, so a single request cannot
@@ -338,6 +340,23 @@ fn container_labels(name: &str) -> Option<std::collections::HashMap<String, Stri
 
 /// Ensures the standalone index server is running. Idempotent and best-effort.
 pub fn ensure(cfg: &RouterConfig) -> Vec<String> {
+    ensure_with_router(cfg)
+}
+
+/// Ensures the index server for a full `Config`, respecting `index.enabled`
+/// (default `true`) in both fog config (`~/.config/fog/fog.json` with `theme`)
+/// and per-project `fog.json`. Either can opt-out. When disabled, no server
+/// is started.
+pub fn ensure_for_config(cfg: &crate::config::Config) -> Vec<String> {
+    if !cfg.effective_should_serve_index() {
+        return Vec::new();
+    }
+    let port = cfg.effective_index_port();
+    let network = cfg.index_network();
+    ensure_with_port(port, &network)
+}
+
+fn ensure_with_router(cfg: &RouterConfig) -> Vec<String> {
     let mut messages = Vec::new();
     if !command_exists("docker") {
         return messages;
@@ -355,9 +374,37 @@ pub fn ensure(cfg: &RouterConfig) -> Vec<String> {
     messages
 }
 
+pub fn ensure_with_port(port: u16, network: &str) -> Vec<String> {
+    let mut messages = Vec::new();
+    if !command_exists("docker") {
+        return messages;
+    }
+    if server_started(port) {
+        return messages;
+    }
+    // Build a minimal RouterConfig for spawn_server.
+    let cfg = RouterConfig {
+        index_port: Some(port),
+        shared_network: network.to_string(),
+        ..Default::default()
+    };
+    match spawn_server(&cfg) {
+        Ok(()) => messages.push(format!(
+            "  + service index server on http://127.0.0.1:{port}"
+        )),
+        Err(e) => messages.push(format!("⚠ could not start index server on :{port} ({e})")),
+    }
+    messages
+}
+
 /// Whether the standalone index server is already listening.
 fn server_started(port: u16) -> bool {
     std::net::TcpStream::connect(("127.0.0.1", port)).is_ok()
+}
+
+/// Public check whether the index server is listening on `port`.
+pub fn is_server_started(port: u16) -> bool {
+    server_started(port)
 }
 
 /// Path to the pidfile for the index server on `port`.
@@ -375,7 +422,11 @@ fn terminate_server_on_port(port: u16) -> bool {
         .and_then(|s| s.trim().parse().ok());
 
     if let Some(pid) = pid {
-        if crate::process::is_pid_alive(pid) {
+        // If the pid is our own, don't signal ourselves — just clean up.
+        if pid != std::process::id() && crate::process::is_pid_alive(pid) {
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGTERM);
+            }
             crate::process::try_kill_process_group(pid, libc::SIGTERM);
             // Give it a moment to exit gracefully.
             for _ in 0..20 {
@@ -385,12 +436,20 @@ fn terminate_server_on_port(port: u16) -> bool {
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
             if crate::process::is_pid_alive(pid) && server_started(port) {
+                unsafe {
+                    libc::kill(pid as libc::pid_t, libc::SIGKILL);
+                }
                 crate::process::try_kill_process_group(pid, libc::SIGKILL);
                 std::thread::sleep(std::time::Duration::from_millis(200));
             }
         }
         let _ = std::fs::remove_file(index_pid_path(port));
         // Even if the pid was stale, consider it handled if the port is now closed.
+        // For self-pid, the port is still open until we exit, so return true
+        // to indicate the pidfile was handled; the caller will exit separately.
+        if pid == std::process::id() {
+            return true;
+        }
         return !server_started(port);
     }
 
@@ -399,9 +458,57 @@ fn terminate_server_on_port(port: u16) -> bool {
         return true;
     }
 
+    // Fallback: try to discover the pid via lsof/fuser when no pidfile exists
+    // (e.g. legacy server started before pidfile logic).
+    if let Ok(out) = std::process::Command::new("lsof")
+        .args(["-ti", &format!(":{}", port)])
+        .output()
+    {
+        let pids = String::from_utf8_lossy(&out.stdout);
+        for pid_str in pids.split_whitespace() {
+            if let Ok(pid) = pid_str.parse::<u32>() {
+                if pid != std::process::id() && crate::process::is_pid_alive(pid) {
+                    // Try both process-group and direct kill for compatibility
+                    // with servers started with and without setsid.
+                    unsafe {
+                        libc::kill(pid as libc::pid_t, libc::SIGTERM);
+                    }
+                    crate::process::try_kill_process_group(pid, libc::SIGTERM);
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    if crate::process::is_pid_alive(pid) {
+                        unsafe {
+                            libc::kill(pid as libc::pid_t, libc::SIGKILL);
+                        }
+                        crate::process::try_kill_process_group(pid, libc::SIGKILL);
+                    }
+                }
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        return !server_started(port);
+    }
+
     // Last resort: try to find `fog index serve` via `ps` is fragile; just
     // report failure and let the caller retry via polling self-exit.
     false
+}
+
+/// Kill the index server on `port` if no fog instances remain.
+pub fn maybe_terminate_on_port(port: u16) {
+    let instances = crate::ipc::find_instances().unwrap_or_default();
+    let any_alive = instances.iter().any(|(_, p)| crate::ipc::query_status(p).is_ok());
+    if any_alive {
+        return;
+    }
+    let _ = terminate_server_on_port(port);
+    if port != DEFAULT_INDEX_PORT {
+        let _ = terminate_server_on_port(DEFAULT_INDEX_PORT);
+    }
+}
+
+/// Kill the index server for a full `Config` if no instances remain.
+pub fn maybe_terminate_for_config(cfg: &crate::config::Config) {
+    maybe_terminate_on_port(cfg.index_port());
 }
 
 /// Kill the index server if no fog instances remain.
@@ -441,6 +548,97 @@ pub fn maybe_terminate_if_no_instances(cfg: Option<&RouterConfig>) {
                 }
             }
         }
+    }
+}
+
+/// Kill the index server for a full `Config` (respects `index.port` then
+/// `router.index_port`, plus global fog config fallback).
+pub fn kill_for_config(cfg: &crate::config::Config) -> bool {
+    let port = cfg.effective_index_port();
+    let was_running = server_started(port);
+    let _ = terminate_server_on_port(port);
+    if port != DEFAULT_INDEX_PORT {
+        let _ = terminate_server_on_port(DEFAULT_INDEX_PORT);
+    }
+    was_running && !server_started(port)
+}
+
+/// Restart the index server for a full `Config`.
+pub fn restart_for_config(cfg: &crate::config::Config) -> Result<u16, String> {
+    let _ = kill_for_config(cfg);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    ensure_for_config(cfg);
+    let port = cfg.effective_index_port();
+    if server_started(port) {
+        return Ok(port);
+    }
+    Err(format!("server did not start on :{port}"))
+}
+
+/// Unconditionally kill the index server on `port` (or default when `cfg` is
+/// `None`). Returns `true` if a server was running and is now stopped.
+pub fn kill_server(cfg: Option<&RouterConfig>) -> bool {
+    if let Some(c) = cfg {
+        let port = c.index_port.unwrap_or(DEFAULT_INDEX_PORT);
+        let was_running = server_started(port);
+        let _ = terminate_server_on_port(port);
+        if port != DEFAULT_INDEX_PORT {
+            let _ = terminate_server_on_port(DEFAULT_INDEX_PORT);
+        }
+        return was_running && !server_started(port);
+    }
+    let was_running = server_started(DEFAULT_INDEX_PORT);
+    let _ = terminate_server_on_port(DEFAULT_INDEX_PORT);
+    // Also kill any custom-port servers discovered via pidfiles.
+    if let Ok(dir) = std::fs::read_dir(std::env::temp_dir()) {
+        for entry in dir.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if let Some(port_str) = name
+                .strip_prefix("fog-index-")
+                .and_then(|s| s.strip_suffix(".pid"))
+            {
+                if let Ok(port) = port_str.parse::<u16>() {
+                    if port != DEFAULT_INDEX_PORT {
+                        let _ = terminate_server_on_port(port);
+                    }
+                }
+            }
+        }
+    }
+    was_running && !server_started(DEFAULT_INDEX_PORT)
+}
+
+/// Kill then re-ensure the index server, returning the port it now serves on.
+pub fn restart_server(cfg: Option<&RouterConfig>) -> Result<u16, String> {
+    let _ = kill_server(cfg);
+    // Give the OS a moment to release the port.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    if let Some(c) = cfg {
+        ensure(c);
+        let port = c.index_port.unwrap_or(DEFAULT_INDEX_PORT);
+        if server_started(port) {
+            return Ok(port);
+        }
+        // Fallback: ensure with a minimal config on the default port.
+        let fallback = RouterConfig {
+            shared_network: c.shared_network.clone(),
+            ..Default::default()
+        };
+        ensure(&fallback);
+        let port = fallback.index_port.unwrap_or(DEFAULT_INDEX_PORT);
+        if server_started(port) {
+            return Ok(port);
+        }
+        return Err(format!("server did not start on :{port}"));
+    }
+    // No config: start with defaults on 18080.
+    let fallback = RouterConfig::default();
+    ensure(&fallback);
+    let port = fallback.index_port.unwrap_or(DEFAULT_INDEX_PORT);
+    if server_started(port) {
+        Ok(port)
+    } else {
+        Err(format!("server did not start on :{port}"))
     }
 }
 
@@ -502,6 +700,7 @@ pub fn serve() -> io::Result<()> {
 
 /// Blocks forever serving the embedded SPA on loopback `port`.
 fn serve_blocking(port: u16, network: String) -> io::Result<()> {
+    CURRENT_INDEX_PORT.store(port, std::sync::atomic::Ordering::SeqCst);
     // Record this server's pid for `maybe_terminate_if_no_instances`.
     let _ = std::fs::write(index_pid_path(port), std::process::id().to_string());
     // Self-terminate when no fog instance has been alive for a while, so a
@@ -602,6 +801,16 @@ async fn serve_index(
         return Ok(handle_launch_request(&method, &bytes).await);
     }
 
+    if path == "/api/server/kill" {
+        return Ok(handle_server_kill_request(&method).await);
+    }
+    if path == "/api/server/restart" {
+        return Ok(handle_server_restart_request(&method).await);
+    }
+    if let Some(pid) = parse_restart_route(&path) {
+        return Ok(handle_instance_restart_request(&method, pid).await);
+    }
+
     match path.as_str() {
         "/logs/stream" => Ok(serve_logs_stream(&req).await),
         "/api/services" => Ok(api_services(network)),
@@ -661,6 +870,16 @@ fn parse_kill_route(path: &str) -> Option<&str> {
     Some(pid)
 }
 
+/// Parses `/api/instances/{pid}/restart` from a path, returning the pid string.
+fn parse_restart_route(path: &str) -> Option<&str> {
+    let rest = path.strip_prefix("/api/instances/")?;
+    let (pid, tail) = rest.split_once('/')?;
+    if tail != "restart" {
+        return None;
+    }
+    Some(pid)
+}
+
 /// Handles `POST /api/instances/{pid}/kill` — sends a graceful shutdown
 /// over the instance's IPC socket.
 ///
@@ -699,6 +918,155 @@ async fn handle_kill_request(method: &hyper::Method, pid_str: &str) -> Response<
             json_response(&serde_json::json!({"ok":true}))
         }
         Err(e) => api_error(StatusCode::BAD_GATEWAY, &e.to_string()),
+    }
+}
+
+/// Handles `POST /api/server/kill` — terminates the index server itself.
+///
+/// The response is sent before the server exits, so the client sees success.
+async fn handle_server_kill_request(method: &hyper::Method) -> Response<RespBody> {
+    if method != hyper::Method::POST {
+        return api_not_found();
+    }
+    let port = {
+        let p = CURRENT_INDEX_PORT.load(std::sync::atomic::Ordering::SeqCst);
+        if p != 0 { p } else { DEFAULT_INDEX_PORT }
+    };
+    tokio::task::spawn_blocking(move || {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let _ = terminate_server_on_port(port);
+        std::process::exit(0);
+    });
+    json_response(&serde_json::json!({"ok":true}))
+}
+
+/// Handles `POST /api/server/restart` — kills then re-ensures the index server.
+///
+/// The restart is done by spawning a detached helper that revives the server
+/// after this process exits, so the port is free when the new server binds.
+async fn handle_server_restart_request(method: &hyper::Method) -> Response<RespBody> {
+    if method != hyper::Method::POST {
+        return api_not_found();
+    }
+    let current_port = CURRENT_INDEX_PORT.load(std::sync::atomic::Ordering::SeqCst);
+    let port = if current_port != 0 {
+        current_port
+    } else {
+        let cfg = load_runtime_config().router.unwrap_or_default();
+        cfg.index_port.unwrap_or(DEFAULT_INDEX_PORT)
+    };
+    let network = std::env::var("FOG_INDEX_NETWORK")
+        .ok()
+        .unwrap_or_else(|| {
+            load_runtime_config()
+                .router
+                .unwrap_or_default()
+                .shared_network
+                .clone()
+        });
+    tokio::task::spawn_blocking(move || {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        // Spawn a detached helper that waits for the port to free then
+        // launches a new `fog index serve`.
+        let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("fog"));
+        let mut cmd = std::process::Command::new("sh");
+        cmd.arg("-c").arg(format!(
+            "sleep 0.5; exec {} index serve",
+            exe.display()
+        ));
+        cmd.env("FOG_INDEX_PORT", port.to_string())
+            .env("FOG_INDEX_NETWORK", &network)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        #[cfg(unix)]
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+        let _ = cmd.spawn();
+        let _ = std::fs::remove_file(index_pid_path(port));
+        std::process::exit(0);
+    });
+    json_response(&serde_json::json!({"ok":true, "port": port}))
+}
+
+/// Handles `POST /api/instances/{pid}/restart` — kills the instance and
+/// relaunches it detached with the same script/config/branch.
+async fn handle_instance_restart_request(method: &hyper::Method, pid_str: &str) -> Response<RespBody> {
+    if method != hyper::Method::POST {
+        return api_not_found();
+    }
+    let Ok(pid) = pid_str.parse::<u32>() else {
+        return api_error(StatusCode::BAD_REQUEST, "invalid pid");
+    };
+    let socket = resolve_instance_socket(pid);
+    if !socket.exists() {
+        return api_error(StatusCode::NOT_FOUND, "instance not found");
+    }
+    let outcome = tokio::task::spawn_blocking(move || {
+        // Query before killing to capture relaunch params.
+        let status = crate::ipc::query_status(&socket)
+            .map_err(|e| format!("could not query instance {pid}: {e}"))?;
+        let script = status.script.clone();
+        let config_dir = status.config_dir.clone().unwrap_or_else(|| ".".to_string());
+        let config_path = std::path::PathBuf::from(&config_dir).join("fog.json");
+        let config_path = if config_path.exists() {
+            config_path
+        } else {
+            std::path::PathBuf::from(&config_dir)
+        };
+        let socket = resolve_instance_socket(pid);
+        crate::ipc::send_kill(&socket).map_err(|e| e.to_string())?;
+        // Wait for old instance to exit.
+        for _ in 0..50 {
+            if !crate::process::is_pid_alive(pid) && crate::ipc::query_status(&socket).is_err() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        // Relaunch detached. config_path already points at the correct
+        // worktree's fog.json, so no --branch is needed.
+        let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("fog"));
+        let mut cmd = std::process::Command::new(&exe);
+        cmd.arg("--config").arg(&config_path).arg(&script);
+        cmd.env("FOG_DAEMON_CHILD", "1")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        #[cfg(unix)]
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+        let mut child = cmd.spawn().map_err(|e| format!("could not restart: {e}"))?;
+        let new_pid = child.id();
+        let new_socket = crate::ipc::socket_path(new_pid);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            if crate::ipc::query_status(&new_socket).is_ok() {
+                return Ok::<u32, String>(new_pid);
+            }
+            if child.try_wait().ok().flatten().is_some() {
+                return Err(format!("restarted instance {new_pid} exited during startup"));
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(format!("restarted instance {new_pid} did not become ready"));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    })
+    .await
+    .unwrap_or(Err("spawn_blocking failed".to_string()));
+    match outcome {
+        Ok(new_pid) => json_response(&serde_json::json!({"ok":true, "pid": new_pid})),
+        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
     }
 }
 
@@ -1049,7 +1417,7 @@ fn api_config() -> Response<RespBody> {
 /// Loads the fog config for the `/api/config` and `/api/scripts` endpoints,
 /// best-effort: tries `FOG_CONFIG_PATH`, then `./fog.json`, then
 /// `~/.config/fog/fog.json`. Returns an empty config when none is readable.
-fn load_runtime_config() -> crate::config::Config {
+pub fn load_runtime_config() -> crate::config::Config {
     let home = std::env::var("HOME").unwrap_or_default();
     let candidates = [
         std::env::var("FOG_CONFIG_PATH")
@@ -1073,6 +1441,7 @@ fn load_runtime_config() -> crate::config::Config {
         theme: None,
         dnsmasq: None,
         router: None,
+        index: None,
     }
 }
 
