@@ -1,5 +1,5 @@
 [package]
-name = "fog"
+name = "fog-tui"
 version = "0.1.0"
 description = "Terminal-based service orchestrator & reverse-proxy dashboard"
 repository = "https://github.com/Naputt1/fog"
@@ -7,6 +7,16 @@ license = "MIT"
 keywords = ["tui", "proxy", "orchestrator", "terminal", "ratatui"]
 categories = ["command-line-utilities", "development-tools"]
 edition = "2024"
+include = ["src/**/*", "/build.rs", "/ui/dist/**/*", "/README.md", "/LICENSE", "/fog.schema.json", "/fog.json"]
+readme = "README.md"
+
+[lib]
+name = "fog"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fog"
+path = "src/main.rs"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

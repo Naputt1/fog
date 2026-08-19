@@ -339,10 +339,10 @@ impl Config {
             return false;
         }
         // Global fog config check (same schema, top-level `index` alongside `theme`)
-        if let Some(global) = load_global_config() {
-            if !global.should_serve_index() {
-                return false;
-            }
+        if let Some(global) = load_global_config()
+            && !global.should_serve_index()
+        {
+            return false;
         }
         true
     }

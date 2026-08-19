@@ -538,7 +538,11 @@ fn cmd_restart(pid: Option<u32>, cli: &Cli) -> io::Result<()> {
     // config_dir (worktree-accurate), fall back to cli --config.
     let config_path = if let Some(dir) = config_dir {
         let p = PathBuf::from(&dir).join("fog.json");
-        if p.exists() { p } else { resolve_config_path(&resolve_run_config(cli)) }
+        if p.exists() {
+            p
+        } else {
+            resolve_config_path(&resolve_run_config(cli))
+        }
     } else {
         resolve_config_path(&resolve_run_config(cli))
     };

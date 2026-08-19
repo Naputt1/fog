@@ -1,7 +1,7 @@
 # fog
 
 [![CI](https://github.com/Naputt1/fog/actions/workflows/ci.yml/badge.svg)](https://github.com/Naputt1/fog/actions/workflows/ci.yml)
-[![Crates.io](https://img.shields.io/badge/crates.io-0.1.0-orange)](https://crates.io/crates/fog)
+[![Crates.io](https://img.shields.io/crates/v/fog-tui.svg)](https://crates.io/crates/fog-tui)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 **Terminal-based service orchestrator & reverse-proxy dashboard.**
@@ -40,19 +40,27 @@ cargo build --release
 
 The binary will be at `target/release/fog`.
 
+### With Cargo (from crates.io)
+
+```bash
+cargo install fog-tui
+```
+
+The `fog` binary is placed in `~/.cargo/bin/` (crate `fog-tui` installs binary `fog`).
+
 ### With Cargo (directly from GitHub)
 
 ```bash
 cargo install --git https://github.com/Naputt1/fog.git
 ```
 
-Pin a specific version with `--tag`:
+Pin a specific version with `--tag` (prebuilt SPA is fetched from the GitHub Release if `ui/dist` is absent):
 
 ```bash
 cargo install --git https://github.com/Naputt1/fog.git --tag v0.1.0
+# to skip the network fetch (offline):
+FOG_SKIP_SPA_DOWNLOAD=1 cargo install --git https://github.com/Naputt1/fog.git
 ```
-
-The `fog` binary is placed in `~/.cargo/bin/`.
 
 ## Quick start
 
@@ -175,7 +183,7 @@ status, served by the embedded Rust (hyper) index server at
 `http://127.0.0.1:18080`.
 
 - **Stack** — [React 19](https://react.dev) + [shadcn/ui](https://ui.shadcn.com) + [Tailwind CSS 4](https://tailwindcss.com), with [TanStack Router](https://tanstack.com/router) and [TanStack Query](https://tanstack.com/query). The SPA lives in `ui/`.
-- **Build** — `cd ui && pnpm install && pnpm build` produces `ui/dist/`, which `build.rs` embeds into the binary at compile time. When `ui/dist` is absent the server falls back to the legacy generated service-directory page.
+- **Build** — `cd ui && pnpm install && pnpm build` produces `ui/dist/`, which `build.rs` embeds into the binary at compile time. `crates.io` releases (`fog-tui`) always embed the prebuilt SPA. When `ui/dist` is absent (e.g. `cargo install --git` on `main` without a prior `pnpm build`), `build.rs` tries to fetch the SPA from the GitHub Release; if offline it embeds a fallback page so `http://127.0.0.1:18080/` returns `200` instead of `{"error":"page not found"}`.
 - **Serving** — the compiled binary serves the SPA + JSON API from the hyper server on `index_port` (default `127.0.0.1:18080`).
 - **API** — `GET /api/services`, `/api/status`, `/api/scripts`, `/api/config`, `/api/health`, `GET /api/launch/targets`, `POST /api/launch`, `POST /api/instances/{pid}/services/{name}/action`, plus `/logs/stream` (SSE) for live logs.
 - **Dev workflow** — run the Rust server, then `cd ui && pnpm install && pnpm dev`; Vite serves the SPA on `:5173` and proxies `/api` and `/logs/stream` to `127.0.0.1:18080`.
