@@ -45,6 +45,23 @@ pub enum HealthCheckSpec {
     Multiple(Vec<HealthCheckConfig>),
 }
 
+/// A single native-to-Traefik route for a non-container service.
+///
+/// Explicit only: if you want `http://<branch>.acme` to reach a native
+/// service on a random port, declare it here. `port` must be a `${ports.*}`
+/// template (or literal port); `host` may contain `${branch}` / `${FOG_BRANCH}`.
+#[derive(Debug, Deserialize, Clone, serde::Serialize)]
+pub struct NativeRouteConfig {
+    /// Host rule, e.g. `"${branch}.acme"` or `"api.${branch}.acme"`.
+    pub host: String,
+    /// Service name this route points to (must exist in the script).
+    pub service: String,
+    /// Port template, e.g. `"${ports.api}"` or `"3000"`.
+    pub port: String,
+    /// Optional PathPrefix to combine with the host.
+    pub path_prefix: Option<String>,
+}
+
 /// A single service entry in the config file.
 #[derive(Debug, Deserialize, Clone)]
 pub struct ConfigEntry {
@@ -52,14 +69,18 @@ pub struct ConfigEntry {
     pub name: Option<String>,
     /// Path to the service's working directory.
     pub path: String,
-    /// Shell command to start the service.
+    /// Shell command to start the service. May contain `${ports.*}` templates.
     pub cmd: String,
     /// Optional health check configuration (single object or array).
     pub health_check: Option<HealthCheckSpec>,
     /// Names of services this service depends on.
     pub depends_on: Option<Vec<String>>,
     /// Shell command to run when fog shuts down (e.g. "docker compose down").
+    /// May contain `${ports.*}` templates.
     pub shutdown_cmd: Option<String>,
+    /// Environment variables injected into the service process. Values may
+    /// contain `${ports.*}` and `${branch}`/`${FOG_BRANCH}` templates.
+    pub env: Option<HashMap<String, String>>,
     /// When another instance of the same project+script starts, this service's
     /// `shutdown_cmd` is skipped (and its live process handed over) instead of
     /// being torn down, so the resource can be reused across worktrees.
@@ -289,6 +310,11 @@ pub struct Config {
     /// Named scripts, each defining its own services and proxy.
     #[serde(default)]
     pub scripts: HashMap<String, ScriptConfig>,
+    /// Allocatable ports for native services. Key is symbolic name,
+    /// value 0 = random free port at instance start, 1-65535 = fixed.
+    pub ports: Option<HashMap<String, u16>>,
+    /// Explicit native-to-Traefik routes for non-container services.
+    pub native_routes: Option<Vec<NativeRouteConfig>>,
     /// Maximum number of scrollback lines to retain per terminal (default: 2000).
     pub max_scrollback: Option<usize>,
     /// Optional sidebar width constraints.

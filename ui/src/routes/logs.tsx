@@ -412,22 +412,27 @@ function LogsPage() {
   const search = Route.useSearch();
   const { data: services, isLoading, isError } = useServices();
 
-  // Resolve the active selection to a docker container name. The picker shows
-  // friendly service names, but `/logs/stream` needs the container name.
-  // `?service=` deep-links accept either the container name or (legacy) the
-  // service name; missing matches fall back to the first running service.
+  // Resolve the active selection. The picker shows friendly service names, but
+  // `/logs/stream` needs either a docker container name (`?service=<container>`)
+  // or a fog pid+service (`?pid=<pid>&service=<name>`) for native services.
+  // `?service=` deep-links accept container, pid-qualified or service name.
   const active = useMemo(() => {
     const list = services ?? [];
     if (list.length === 0) return null;
     const byContainer = new Map(list.map((s) => [s.container, s]));
     const byService = new Map(list.map((s) => [s.service, s]));
+    const toActive = (svc: (typeof list)[number]) => ({
+      container: svc.container,
+      service: svc.service,
+      pid: svc.pid ?? null,
+      label: svc.service,
+    });
     if (search.service) {
       const svc =
         byContainer.get(search.service) ?? byService.get(search.service);
-      if (svc) return { container: svc.container, label: svc.service };
+      if (svc) return toActive(svc);
     }
-    const first = list[0];
-    return { container: first.container, label: first.service };
+    return toActive(list[0]);
   }, [services, search.service]);
 
   const [conn, setConn] = useState<ConnState>("idle");
@@ -472,7 +477,9 @@ function LogsPage() {
       });
     };
 
-    cleanup = subscribeLogs(active.container, {
+    const logService = active.pid != null ? active.service : active.container;
+    cleanup = subscribeLogs(logService, {
+      pid: active.pid ?? undefined,
       onOpen: () => {
         setConn("streaming");
         setConnNote(null);

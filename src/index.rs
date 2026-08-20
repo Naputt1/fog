@@ -1227,6 +1227,10 @@ struct ApiService {
     url: String,
     ports: Vec<String>,
     health: String,
+    /// Fog PID for native (non-docker) services. When present, logs are
+    /// streamed via `?pid=<pid>&service=<name>` (fog IPC) instead of docker.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pid: Option<u32>,
 }
 
 /// Converts a discovered [`IndexEntry`] into its JSON shape. Discovery only sees
@@ -1244,6 +1248,7 @@ fn api_service_from(e: IndexEntry) -> ApiService {
         url,
         ports,
         health: "unknown".to_string(),
+        pid: None,
     }
 }
 
@@ -1334,12 +1339,110 @@ fn discover_compose_containers() -> Vec<IndexEntry> {
 }
 
 /// `GET /api/services`: every running compose service as JSON, so the SPA logs
-/// picker can stream logs from any container.
+/// picker can stream logs from any container. Native (non-docker) services
+/// started via `ports` + `native_routes` are synthesized from fog instances so
+/// they appear alongside docker services in the Services UI.
 fn api_services(_network: &str) -> Response<RespBody> {
-    let list: Vec<ApiService> = discover_compose_containers()
+    let mut list: Vec<ApiService> = discover_compose_containers()
         .into_iter()
         .map(api_service_from)
         .collect();
+    // Add native services from fog instances.
+    for inst in discover_fog_instances() {
+        let project = inst
+            .project
+            .as_deref()
+            .map(project_name_from_common_dir)
+            .unwrap_or_else(|| inst.script.clone());
+        let worktree = inst.branch.clone().unwrap_or_else(|| "default".to_string());
+        // Build a map of service name -> health for quick lookup.
+        let health_map: std::collections::HashMap<&str, &str> = inst
+            .services
+            .iter()
+            .map(|s| (s.name.as_str(), s.health.as_str()))
+            .collect();
+        for route in &inst.native_routes {
+            let Some(svc_status) = inst.services.iter().find(|s| s.name == route.service) else {
+                continue;
+            };
+            if !svc_status.running {
+                continue;
+            }
+            // Resolve host and port templates with this instance's PortMap+branch.
+            let host = match crate::ports::resolve_template(&route.host, &inst.ports, inst.branch.as_deref()) {
+                Ok(h) => h,
+                Err(_) => continue,
+            };
+            let port_str = match crate::ports::resolve_template(&route.port, &inst.ports, inst.branch.as_deref()) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            let port: u16 = match port_str.parse() {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            // URL is https when the index is on the router network with TLS, else http.
+            // Native routes are always TLS-enabled (see router.rs), so use https.
+            let url = if route.path_prefix.is_some() {
+                format!("https://{}/", host)
+            } else {
+                format!("https://{}/", host)
+            };
+            let health = health_map.get(route.service.as_str()).copied().unwrap_or("unknown");
+            // Avoid duplicating a docker entry that already covers this host (e.g. if a
+            // service is both docker and native in different worktrees, keep both).
+            if list.iter().any(|e| e.service == route.service && e.worktree == worktree && e.project == project) {
+                continue;
+            }
+            list.push(ApiService {
+                project: project.clone(),
+                worktree: worktree.clone(),
+                service: route.service.clone(),
+                container: format!("fog-{}-{}", inst.pid, route.service),
+                status: "running".to_string(),
+                url,
+                ports: vec![format!("0.0.0.0:{}->{}/tcp", port, port)],
+                health: health.to_string(),
+                pid: Some(inst.pid),
+            });
+        }
+        // Also include native services that have no native_route but have a port allocation
+        // (e.g. a service with health_check but no Traefik route) — show them with no URL
+        // so they still appear in the directory.
+        for svc in &inst.services {
+            if !svc.running {
+                continue;
+            }
+            if inst.native_routes.iter().any(|r| r.service == svc.name) {
+                continue;
+            }
+            // Only show if this service used a port (heuristic: health target contains port or env PORT)
+            // For now, show all running native services that are not docker and not already listed.
+            let already = list.iter().any(|e| e.service == svc.name && e.worktree == worktree && e.project == project);
+            if already {
+                continue;
+            }
+            // Check if this service is known to be docker by checking if any docker entry already has it
+            let is_docker = discover_compose_containers()
+                .iter()
+                .any(|e| e.service == svc.name && e.worktree == worktree);
+            if is_docker {
+                continue;
+            }
+            let health = svc.health.as_str();
+            list.push(ApiService {
+                project: project.clone(),
+                worktree: worktree.clone(),
+                service: svc.name.clone(),
+                container: format!("fog-{}-{}", inst.pid, svc.name),
+                status: "running".to_string(),
+                url: String::new(),
+                ports: Vec::new(),
+                health: health.to_string(),
+                pid: Some(inst.pid),
+            });
+        }
+    }
     json_response(&list)
 }
 
@@ -1440,6 +1543,8 @@ pub fn load_runtime_config() -> crate::config::Config {
     }
     crate::config::Config {
         scripts: std::collections::HashMap::new(),
+        ports: None,
+        native_routes: None,
         max_scrollback: None,
         sidebar: None,
         theme: None,
@@ -1496,6 +1601,10 @@ struct FogInstance {
     project: Option<String>,
     /// Branch the instance serves (from `IpcState.branch`).
     branch: Option<String>,
+    /// Allocated ports for this instance.
+    ports: crate::ipc::PortMap,
+    /// Native routes (templates) for this instance.
+    native_routes: Vec<crate::ipc::NativeRouteInfo>,
 }
 
 /// Discovers running fog instances by scanning their IPC sockets.
@@ -1511,6 +1620,8 @@ fn discover_fog_instances() -> Vec<FogInstance> {
                     config_dir: status.config_dir,
                     project: status.project,
                     branch: status.branch,
+                    ports: status.ports,
+                    native_routes: status.native_routes,
                 });
             }
         }

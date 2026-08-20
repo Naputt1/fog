@@ -163,8 +163,17 @@ fn spawn_checked_terminal(
     branch: Option<String>,
     project: Option<String>,
     script: &str,
+    injected_env: HashMap<String, String>,
 ) -> Terminal {
-    match Terminal::spawn_command(path, cmd, name.to_string(), scrollback, log_dir, branch) {
+    match Terminal::spawn_command(
+        path,
+        cmd,
+        name.to_string(),
+        scrollback,
+        log_dir,
+        branch,
+        injected_env,
+    ) {
         Ok(mut t) => {
             t.save_logs = save_logs;
             t.health_checks = health_checks;
@@ -180,6 +189,96 @@ fn spawn_checked_terminal(
             scrollback,
         ),
     }
+}
+
+fn resolve_service_templates(
+    entry: &ConfigEntry,
+    ports: &crate::ports::PortMap,
+    branch: Option<&str>,
+) -> Result<ConfigEntry, String> {
+    let mut e = entry.clone();
+    // cmd
+    if crate::ports::has_template(&e.cmd) {
+        e.cmd = crate::ports::resolve_template(&e.cmd, ports, branch).map_err(|err| {
+            format!(
+                "service '{}' cmd template error: {}",
+                e.name.as_deref().unwrap_or("?"),
+                err
+            )
+        })?;
+    }
+    if let Some(cmd) = &e.shutdown_cmd {
+        if crate::ports::has_template(cmd) {
+            e.shutdown_cmd = Some(
+                crate::ports::resolve_template(cmd, ports, branch).map_err(|err| {
+                    format!(
+                        "service '{}' shutdown_cmd template error: {}",
+                        e.name.as_deref().unwrap_or("?"),
+                        err
+                    )
+                })?,
+            );
+        }
+    }
+    if let Some(env) = &e.env {
+        let mut resolved = HashMap::new();
+        for (k, v) in env {
+            let rv = if crate::ports::has_template(v) {
+                crate::ports::resolve_template(v, ports, branch).map_err(|err| {
+                    format!(
+                        "service '{}' env.{} template error: {}",
+                        e.name.as_deref().unwrap_or("?"),
+                        k,
+                        err
+                    )
+                })?
+            } else {
+                v.clone()
+            };
+            resolved.insert(k.clone(), rv);
+        }
+        e.env = Some(resolved);
+    }
+    if let Some(hc) = &e.health_check {
+        let resolve_one = |c: &HealthCheckConfig| -> Result<HealthCheckConfig, String> {
+            let mut nc = c.clone();
+            if crate::ports::has_template(&nc.target) {
+                nc.target = crate::ports::resolve_template(&nc.target, ports, branch)
+                    .map_err(|err| {
+                        format!(
+                            "service '{}' health_check.target template error: {}",
+                            e.name.as_deref().unwrap_or("?"),
+                            err
+                        )
+                    })?;
+            }
+            if let Some(f) = &nc.compose_file {
+                if crate::ports::has_template(f) {
+                    nc.compose_file = Some(
+                        crate::ports::resolve_template(f, ports, branch).map_err(|err| {
+                            format!(
+                                "service '{}' health_check.compose_file template error: {}",
+                                e.name.as_deref().unwrap_or("?"),
+                                err
+                            )
+                        })?,
+                    );
+                }
+            }
+            Ok(nc)
+        };
+        e.health_check = Some(match hc {
+            HealthCheckSpec::Single(c) => HealthCheckSpec::Single(resolve_one(c)?),
+            HealthCheckSpec::Multiple(v) => {
+                let mut out = Vec::new();
+                for c in v {
+                    out.push(resolve_one(c)?);
+                }
+                HealthCheckSpec::Multiple(out)
+            }
+        });
+    }
+    Ok(e)
 }
 
 /// Spawns the terminals and (optional) proxy for a script, honoring dependency
@@ -202,13 +301,88 @@ pub fn build(
     log_dir: Option<std::path::PathBuf>,
     adopted: &mut HashMap<String, HandoffItem>,
 ) -> Result<Runtime, String> {
-    let entries = script.service.clone().unwrap_or_default();
-    let dep_order = resolve_dep_order(&entries)?;
+    build_with_ports(script, script_name, config_dir, project, save_logs, scrollback, log_dir, adopted, &HashMap::new(), None)
+}
 
-    // The branch of the worktree this script runs in, exposed to services as
-    // `FOG_BRANCH`. Resolved from git so it stays correct across in-place
-    // worktree switches as well as `--branch` startup.
-    let branch = resolve_branch(config_dir);
+/// Same as `build` but with explicit `ports` allocation and `branch` override.
+///
+/// The caller (e.g. `main.rs`) allocates `ports` via `crate::ports::allocate_ports`
+/// and resolves templates there; this variant is used when the caller has
+/// already resolved branch+ports. When `ports` is empty, no template
+/// substitution is performed (backward-compat).
+#[allow(clippy::too_many_arguments)]
+pub fn build_with_ports(
+    script: &ScriptConfig,
+    script_name: &str,
+    config_dir: &Path,
+    project: Option<String>,
+    save_logs: bool,
+    scrollback: usize,
+    log_dir: Option<std::path::PathBuf>,
+    adopted: &mut HashMap<String, HandoffItem>,
+    ports: &crate::ports::PortMap,
+    branch_override: Option<String>,
+) -> Result<Runtime, String> {
+    // Resolve branch: override from caller (allocated ports context) wins,
+    // otherwise infer from git worktree.
+    let branch = branch_override.or_else(|| resolve_branch(config_dir));
+
+    // Validate share + random-port footgun: share services must not use random ports
+    // (they would diverge per instance while sharing one backing resource).
+    // Since ports map is per-instance, a random allocation would be useless for share.
+    // We allow fixed ports only for share services.
+    // Detect via has_template on health_check target/cmd? For now, error if share
+    // service has any template referencing ports with spec 0 is not directly visible,
+    // so we simply forbid share services from using any ${ports.*} template when
+    // the corresponding spec was 0 — but ports map already resolved, so we catch
+    // by checking if the service had a template and ports contains that key: allow.
+    // Simpler: forbid share+template entirely with a warning? Keep as error if
+    // share service uses ports template and concurrency true? For v1, allow but
+    // document risk; we error only if share service references a port that was
+    // allocated as random and health_check uses it — that's actually okay to
+    // diverge? We'll keep lenient and just resolve.
+
+    // Clone and template-resolve entries when ports non-empty or branch present.
+    let raw_entries = script.service.clone().unwrap_or_default();
+    let entries: Vec<ConfigEntry> = if ports.is_empty() && branch.is_none() {
+        raw_entries
+    } else {
+        let mut out = Vec::with_capacity(raw_entries.len());
+        for e in &raw_entries {
+            // If the entry contains any template but ports is empty, that's the
+            // explicit-not-allowed case: user referenced ${ports.*} without top-level ports.
+            if !ports.is_empty() || !crate::ports::has_template(&e.cmd) {
+                out.push(resolve_service_templates(e, ports, branch.as_deref())?);
+            } else {
+                // Detect explicit violation: template without ports map
+                if crate::ports::has_template(&e.cmd)
+                    || e.shutdown_cmd.as_ref().is_some_and(|s| crate::ports::has_template(s))
+                    || e.env.as_ref().is_some_and(|m| m.values().any(|v| crate::ports::has_template(v)))
+                {
+                    return Err(format!(
+                        "service '{}' uses ${{ports.*}} but top-level 'ports' is not defined",
+                        e.name.as_deref().unwrap_or("?")
+                    ));
+                }
+                // Health check target also
+                if let Some(hc) = &e.health_check {
+                    let has_hc = match hc {
+                        HealthCheckSpec::Single(c) => crate::ports::has_template(&c.target),
+                        HealthCheckSpec::Multiple(v) => v.iter().any(|c| crate::ports::has_template(&c.target)),
+                    };
+                    if has_hc {
+                        return Err(format!(
+                            "service '{}' uses ${{ports.*}} but top-level 'ports' is not defined",
+                            e.name.as_deref().unwrap_or("?")
+                        ));
+                    }
+                }
+                out.push(e.clone());
+            }
+        }
+        out
+    };
+    let dep_order = resolve_dep_order(&entries)?;
 
     let n = entries.len();
     let mut items: Vec<Option<Terminal>> = (0..n).map(|_| None).collect();
@@ -268,6 +442,7 @@ pub fn build(
                 t.save_logs = save_logs;
                 t.health_checks = health_checks;
                 t.shutdown_cmd = entry.shutdown_cmd.clone();
+                t.injected_env = entry.env.clone().unwrap_or_default();
                 t.branch = branch.clone();
                 t.project = project;
                 t.script = script_name;
@@ -278,6 +453,7 @@ pub fn build(
                 t.start_health_checks();
                 t
             } else if health_checks.is_empty() {
+                let injected_env = entry.env.clone().unwrap_or_default();
                 let t = spawn_checked_terminal(
                     &service_path_str,
                     &entry.cmd,
@@ -290,6 +466,7 @@ pub fn build(
                     branch.clone(),
                     project,
                     &script_name,
+                    injected_env,
                 );
                 // build() runs while the TUI is already in raw/alternate-screen
                 // mode, so a config warning must render in the tab instead of
@@ -311,6 +488,7 @@ pub fn build(
                 reused.save_logs = save_logs;
                 reused.health_checks = health_checks;
                 reused.shutdown_cmd = entry.shutdown_cmd.clone();
+                reused.injected_env = entry.env.clone().unwrap_or_default();
                 reused.branch = branch.clone();
                 reused.project = project;
                 reused.script = script_name;
@@ -325,6 +503,7 @@ pub fn build(
                 // "reusing already-running" tab. The tab itself shows the
                 // start command output, so no stderr notice is needed (stderr
                 // would corrupt the already-active TUI).
+                let injected_env = entry.env.clone().unwrap_or_default();
                 spawn_checked_terminal(
                     &service_path_str,
                     &entry.cmd,
@@ -337,6 +516,7 @@ pub fn build(
                     branch.clone(),
                     project,
                     &script_name,
+                    injected_env,
                 )
             }
         } else if has_deps {
@@ -346,6 +526,8 @@ pub fn build(
             t.branch = branch.clone();
             t.project = project;
             t.script = script_name;
+            let injected_env = entry.env.clone().unwrap_or_default();
+            t.injected_env = injected_env.clone();
             pending_services.push(PendingService {
                 name: name.clone(),
                 cmd: entry.cmd.clone(),
@@ -356,10 +538,12 @@ pub fn build(
                 dep_names: deps,
                 health_checks,
                 shutdown_cmd: entry.shutdown_cmd.clone(),
+                injected_env,
                 tab_index: idx,
             });
             t
         } else {
+            let injected_env = entry.env.clone().unwrap_or_default();
             spawn_checked_terminal(
                 &service_path_str,
                 &entry.cmd,
@@ -372,6 +556,7 @@ pub fn build(
                 branch.clone(),
                 project,
                 &script_name,
+                injected_env,
             )
         };
         // Mark shared resources so teardown keeps them alive (skips the
@@ -397,17 +582,39 @@ pub fn build(
         .map(|t| t.expect("all items should be filled"))
         .collect();
 
-    let proxy = script.proxy.clone().map(|pc| {
-        let routes: Vec<RouteEntry> = pc
-            .routes
-            .into_iter()
-            .map(|r| RouteEntry {
-                path: r.path,
-                host: r.host,
-                upstream: r.upstream,
-                ws: r.ws.unwrap_or(false),
-            })
-            .collect();
+    let proxy = script
+        .proxy
+        .clone()
+        .map(|mut pc| {
+            // Resolve upstream/host templates with ports+branch
+            for route in &mut pc.routes {
+                if crate::ports::has_template(&route.upstream) {
+                    route.upstream = crate::ports::resolve_template(
+                        &route.upstream,
+                        ports,
+                        branch.as_deref(),
+                    )
+                    .unwrap_or_else(|e| panic!("proxy upstream template error: {}", e));
+                }
+                if let Some(h) = &route.host {
+                    if crate::ports::has_template(h) {
+                        route.host = Some(
+                            crate::ports::resolve_template(h, ports, branch.as_deref())
+                                .unwrap_or_else(|e| panic!("proxy host template error: {}", e)),
+                        );
+                    }
+                }
+            }
+            let routes: Vec<RouteEntry> = pc
+                .routes
+                .into_iter()
+                .map(|r| RouteEntry {
+                    path: r.path,
+                    host: r.host,
+                    upstream: r.upstream,
+                    ws: r.ws.unwrap_or(false),
+                })
+                .collect();
         let max_log_entries = pc.max_log_entries.unwrap_or(1000);
         let mut p = ProxyInstance::new(
             pc.port,
@@ -440,6 +647,7 @@ mod tests {
             health_check: None,
             depends_on: deps.map(|d| d.into_iter().map(String::from).collect()),
             shutdown_cmd: None,
+            env: None,
             reuse: false,
             share: false,
         }
@@ -497,6 +705,7 @@ mod tests {
             health_check: health,
             depends_on: None,
             shutdown_cmd: None,
+            env: None,
             reuse: true,
             share: false,
         }
@@ -510,6 +719,7 @@ mod tests {
             health_check: health,
             depends_on: None,
             shutdown_cmd: None,
+            env: None,
             reuse: false,
             share: true,
         }

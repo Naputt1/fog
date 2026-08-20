@@ -165,6 +165,123 @@ fn default_dynamic_dir(cfg: &RouterConfig) -> PathBuf {
     PathBuf::from(&cfg.tls.cert_dir).join("dynamic")
 }
 
+/// Dynamic dir derived from a `Config`'s router cert dir (or default).
+fn default_dynamic_dir_for_config(cfg: &crate::config::Config) -> PathBuf {
+    let cert_dir = cfg
+        .router
+        .as_ref()
+        .map(|r| r.tls.cert_dir.clone())
+        .unwrap_or_else(|| {
+            let home = std::env::var("HOME").unwrap_or_default();
+            format!("{home}/.config/fog/certs")
+        });
+    PathBuf::from(cert_dir).join("dynamic")
+}
+
+/// Sanitizes a string for use as a Traefik router/service name and filename.
+fn sanitize_name(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '_' })
+        .collect()
+}
+
+/// Ensures native (host) routes are written as Traefik file-provider config.
+///
+/// Each `native_routes` entry becomes a router+service that forwards
+/// `Host(<host>)` to `http://host.docker.internal:<port>`. Explicit only:
+/// the caller must have already validated that `port` resolves and `host`
+/// is known. `branch` is used to resolve `${branch}` templates.
+pub fn ensure_native_routes(
+    routes: &[crate::config::NativeRouteConfig],
+    ports: &crate::ports::PortMap,
+    branch: Option<&str>,
+    cfg: &crate::config::Config,
+) -> Vec<String> {
+    let mut messages = Vec::new();
+    let dynamic_dir = default_dynamic_dir_for_config(cfg);
+    let _ = fs::create_dir_all(&dynamic_dir);
+
+    for r in routes {
+        // Resolve host and port templates
+        let host = match crate::ports::resolve_template(&r.host, ports, branch) {
+            Ok(h) => h,
+            Err(e) => {
+                messages.push(format!("⚠ native route for service '{}' host error: {}", r.service, e));
+                continue;
+            }
+        };
+        let port_str = match crate::ports::resolve_template(&r.port, ports, branch) {
+            Ok(p) => p,
+            Err(e) => {
+                messages.push(format!("⚠ native route for service '{}' port error: {}", r.service, e));
+                continue;
+            }
+        };
+        let port: u16 = match port_str.parse() {
+            Ok(p) => p,
+            Err(_) => {
+                messages.push(format!("⚠ native route for service '{}' has non-numeric port '{}'", r.service, port_str));
+                continue;
+            }
+        };
+        let branch_slug = sanitize_name(branch.unwrap_or("default"));
+        let svc_slug = sanitize_name(&r.service);
+        let host_slug = sanitize_name(&host);
+        let name = format!("native-{}-{}-{}", branch_slug, svc_slug, host_slug);
+        let rule = if let Some(p) = &r.path_prefix {
+            format!("Host(`{}`) && PathPrefix(`{}`)", host, p)
+        } else {
+            format!("Host(`{}`)", host)
+        };
+        let content = format!(
+            r#"[http.routers]
+  [http.routers.{name}]
+    rule = "{rule}"
+    entryPoints = ["web"]
+    service = "{name}"
+    priority = 100
+  [http.routers.{name}-secure]
+    rule = "{rule}"
+    entryPoints = ["websecure"]
+    service = "{name}"
+    priority = 100
+    [http.routers.{name}-secure.tls]
+
+[http.services]
+  [http.services.{name}.loadBalancer]
+    [[http.services.{name}.loadBalancer.servers]]
+      url = "http://host.docker.internal:{port}"
+"#
+        );
+        let file = dynamic_dir.join(format!("{}.toml", name));
+        let changed = fs::read_to_string(&file).map(|c| c != content).unwrap_or(true);
+        if changed {
+            if let Err(e) = fs::write(&file, &content) {
+                messages.push(format!("⚠ could not write native route {}: {e}", file.display()));
+                continue;
+            }
+            messages.push(format!("  + native route {} -> host.docker.internal:{} for Host({})", r.service, port, host));
+        }
+    }
+
+    messages
+}
+
+/// Removes native route files for a given branch (or all when `branch` is None).
+pub fn cleanup_native_routes(branch: Option<&str>, cfg: &crate::config::Config) {
+    let dynamic_dir = default_dynamic_dir_for_config(cfg);
+    let prefix = branch
+        .map(|b| format!("native-{}-", sanitize_name(b)))
+        .unwrap_or_else(|| "native-".to_string());
+    let Ok(entries) = fs::read_dir(&dynamic_dir) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with(&prefix) && name.ends_with(".toml") {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
 /// Generates (idempotently) the mkcert wildcard certificates and the Traefik
 /// file-provider dynamic config for every domain, returning the host paths of
 /// the cert dir and the dynamic dir mounted into the container.

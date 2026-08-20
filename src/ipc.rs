@@ -47,6 +47,19 @@ pub struct ServiceStatus {
     pub health: String,
 }
 
+/// Allocated port map for an instance (symbolic name -> host port).
+pub type PortMap = std::collections::HashMap<String, u16>;
+
+/// Native route as exposed via IPC (template form, resolved with PortMap+branch on the index side).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NativeRouteInfo {
+    pub host: String,
+    pub service: String,
+    pub port: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_prefix: Option<String>,
+}
+
 /// Status snapshot of the reverse proxy.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProxyStatus {
@@ -91,6 +104,10 @@ pub struct IpcState {
     /// (its config dir). Set once before the IPC server spawns; stable for
     /// the lifetime of the process.
     pub config_dir: Option<String>,
+    /// Allocated ports for this instance (symbolic -> host port).
+    pub ports: Arc<Mutex<PortMap>>,
+    /// Native routes (templates) for this instance.
+    pub native_routes: Arc<Mutex<Vec<NativeRouteInfo>>>,
     /// Epoch milliseconds when this instance started.
     pub started_at: u64,
     /// Set to `true` when a kill request is received.
@@ -130,6 +147,8 @@ impl IpcState {
             project,
             branch,
             config_dir: None,
+            ports: Arc::new(Mutex::new(PortMap::new())),
+            native_routes: Arc::new(Mutex::new(Vec::new())),
             started_at: crate::lock::now_ms(),
             kill_flag: Arc::new(AtomicBool::new(false)),
             reuse_skip: Arc::new(Mutex::new(Vec::new())),
@@ -169,6 +188,12 @@ pub struct StatusResponse {
     /// Epoch milliseconds when the instance started (0 for older versions).
     #[serde(default)]
     pub started_at: u64,
+    /// Allocated ports for this instance.
+    #[serde(default)]
+    pub ports: PortMap,
+    /// Native routes (templates) for this instance.
+    #[serde(default)]
+    pub native_routes: Vec<NativeRouteInfo>,
 }
 
 /// A request received over the IPC socket.
@@ -337,6 +362,16 @@ fn handle_connection(mut stream: UnixStream, state: Arc<IpcState>) {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clone();
+            let ports = state
+                .ports
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            let native_routes = state
+                .native_routes
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
             let resp = serde_json::to_string(&StatusResponse {
                 pid: std::process::id(),
                 script: state.script.clone(),
@@ -346,6 +381,8 @@ fn handle_connection(mut stream: UnixStream, state: Arc<IpcState>) {
                 branch: state.branch.clone(),
                 config_dir: state.config_dir.clone(),
                 started_at: state.started_at,
+                ports,
+                native_routes,
             })
             .unwrap_or_default();
             let mut writer = stream;

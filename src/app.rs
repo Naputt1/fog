@@ -106,6 +106,8 @@ pub struct PendingService {
     pub health_checks: Vec<HealthCheckConfig>,
     /// Shell command to run on shutdown.
     pub shutdown_cmd: Option<String>,
+    /// Resolved env vars for this service (from `${ports.*}` templates).
+    pub injected_env: std::collections::HashMap<String, String>,
     /// Index in the `items` vec where this service's terminal lives.
     pub tab_index: usize,
 }
@@ -955,7 +957,67 @@ impl App {
         self.tabs = ClickTab::new(Vec::new(), self.sidebar_min, self.sidebar_max);
         self.proxy_tab_index = None;
 
-        let built = match runtime::build(
+        // Allocate ports and handle native routes for the target worktree.
+        let branch_for_ports = runtime::resolve_branch(&config_dir);
+        let port_map = if let Some(specs) = &config.ports {
+            match crate::ports::allocate_ports(specs) {
+                Ok(m) => m,
+                Err(e) => {
+                    self.errors.push(format!("switch worktree: port allocation: {e}"));
+                    return;
+                }
+            }
+        } else {
+            std::collections::HashMap::new()
+        };
+        if config.ports.is_none() {
+            let has_ports_template = script.service.as_ref().is_some_and(|entries| {
+                entries.iter().any(|e| {
+                    crate::ports::has_template(&e.cmd)
+                        || e.shutdown_cmd.as_ref().is_some_and(|s| crate::ports::has_template(s))
+                        || e.env.as_ref().is_some_and(|m| m.values().any(|v| crate::ports::has_template(v)))
+                })
+            });
+            if has_ports_template {
+                self.errors
+                    .push("switch worktree: config uses ${ports.*} but top-level 'ports' is not defined".to_string());
+                return;
+            }
+        }
+        // Publish new ports/routes to IPC before ensuring Traefik, so the index UI
+        // can synthesize native entries for the Services page.
+        {
+            *self.ipc_state.ports.lock().unwrap_or_else(|e| e.into_inner()) = port_map.clone();
+            let routes: Vec<crate::ipc::NativeRouteInfo> = config
+                .native_routes
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|r| crate::ipc::NativeRouteInfo {
+                    host: r.host,
+                    service: r.service,
+                    port: r.port,
+                    path_prefix: r.path_prefix,
+                })
+                .collect();
+            *self.ipc_state.native_routes.lock().unwrap_or_else(|e| e.into_inner()) = routes;
+        }
+        // Clean up stale native routes from the previous branch before ensuring the new ones
+        let prev_branch = runtime::resolve_branch(
+            self.config_path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new(".")),
+        );
+        if prev_branch != branch_for_ports {
+            crate::router::cleanup_native_routes(prev_branch.as_deref(), &config);
+        }
+        if let Some(routes) = &config.native_routes {
+            for msg in crate::router::ensure_native_routes(routes, &port_map, branch_for_ports.as_deref(), &config) {
+                self.errors.push(msg);
+            }
+        }
+
+        let built = match runtime::build_with_ports(
             script,
             &script_name,
             &config_dir,
@@ -964,6 +1026,8 @@ impl App {
             self.scrollback,
             None,
             &mut adopted,
+            &port_map,
+            branch_for_ports,
         ) {
             Ok(b) => b,
             Err(e) => {
@@ -1610,6 +1674,7 @@ impl App {
 
             if let Some(item) = self.items.get_mut(tab_index) {
                 item.log_dir = ps.log_dir.clone();
+                item.injected_env = ps.injected_env.clone();
                 if item.start(&ps.path, &ps.cmd).is_ok() {
                     item.health_checks = ps.health_checks;
                     item.shutdown_cmd = ps.shutdown_cmd;

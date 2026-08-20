@@ -889,7 +889,107 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
     let (sidebar_min, sidebar_max) = (sidebar_min.min(sidebar_max), sidebar_min.max(sidebar_max));
     let theme = Theme::from_config(config.theme.as_ref());
 
-    let runtime = fog::runtime::build(
+    // Allocate ports (top-level `ports: { name: 0 }` => random) and validate.
+    // Explicit only: any ${ports.*} template referencing a missing name fails
+    // later during template resolution.
+    let branch_for_ports = cli
+        .branch
+        .clone()
+        .or_else(|| fog::runtime::resolve_branch(&config_dir));
+    let port_map = if let Some(specs) = &config.ports {
+        match fog::ports::allocate_ports(specs) {
+            Ok(m) => m,
+            Err(e) => {
+                if !detached {
+                    let _ = execute!(stdout(), LeaveAlternateScreen, DisableMouseCapture);
+                    let _ = disable_raw_mode();
+                }
+                return Err(io::Error::new(io::ErrorKind::InvalidData, format!("error: {}", e)));
+            }
+        }
+    } else {
+        std::collections::HashMap::new()
+    };
+    // Validate native_routes refer to known services/ports (explicit only)
+    if let Some(routes) = &config.native_routes {
+        for r in routes {
+            // port must be ${ports.*} or literal number; validate unknown port reference
+            if r.port.contains("${ports.") && r.port.contains('}') {
+                // Extract port names and check existence
+                // Use has_template + resolve attempt to surface error early
+                if let Err(e) = fog::ports::resolve_template(&r.port, &port_map, branch_for_ports.as_deref()) {
+                    if !detached {
+                        let _ = execute!(stdout(), LeaveAlternateScreen, DisableMouseCapture);
+                        let _ = disable_raw_mode();
+                    }
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, format!("error: native_routes port template error for service '{}': {}", r.service, e)));
+                }
+            } else if let Ok(n) = r.port.parse::<u16>() {
+                let _ = n;
+            } else if r.port.trim().is_empty() {
+                if !detached {
+                    let _ = execute!(stdout(), LeaveAlternateScreen, DisableMouseCapture);
+                    let _ = disable_raw_mode();
+                }
+                return Err(io::Error::new(io::ErrorKind::InvalidData, format!("error: native_routes for service '{}' has invalid port '{}'", r.service, r.port)));
+            } else if r.port.contains("${") {
+                if !detached {
+                    let _ = execute!(stdout(), LeaveAlternateScreen, DisableMouseCapture);
+                    let _ = disable_raw_mode();
+                }
+                return Err(io::Error::new(io::ErrorKind::InvalidData, format!("error: native_routes for service '{}' port '{}' must be '${{ports.<name>}}' or literal port", r.service, r.port)));
+            }
+        }
+    }
+    // If config contains any ${ports.*} template but no top-level ports, error early
+    if config.ports.is_none() {
+        let has_ports_template = script.service.as_ref().is_some_and(|entries| {
+            entries.iter().any(|e| {
+                fog::ports::has_template(&e.cmd)
+                    || e.shutdown_cmd.as_ref().is_some_and(|s| fog::ports::has_template(s))
+                    || e.env.as_ref().is_some_and(|m| m.values().any(|v| fog::ports::has_template(v)))
+                    || e.health_check.as_ref().is_some_and(|hc| match hc {
+                        fog::config::HealthCheckSpec::Single(c) => fog::ports::has_template(&c.target),
+                        fog::config::HealthCheckSpec::Multiple(v) => v.iter().any(|c| fog::ports::has_template(&c.target)),
+                    })
+            })
+        }) || script.proxy.as_ref().is_some_and(|p| {
+            p.routes.iter().any(|r| fog::ports::has_template(&r.upstream) || r.host.as_ref().is_some_and(|h| fog::ports::has_template(h)))
+        }) || config.native_routes.as_ref().is_some_and(|routes| routes.iter().any(|r| fog::ports::has_template(&r.port)));
+        if has_ports_template {
+            if !detached {
+                let _ = execute!(stdout(), LeaveAlternateScreen, DisableMouseCapture);
+                let _ = disable_raw_mode();
+            }
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "error: config uses ${ports.*} but top-level 'ports' is not defined"));
+        }
+    }
+    // Publish allocated ports + native routes to IPC so the index server can synthesize
+    // native ApiService entries for the Services UI (which otherwise only sees docker).
+    {
+        *ipc_state.ports.lock().unwrap_or_else(|e| e.into_inner()) = port_map.clone();
+        let routes: Vec<fog::ipc::NativeRouteInfo> = config
+            .native_routes
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|r| fog::ipc::NativeRouteInfo {
+                host: r.host,
+                service: r.service,
+                port: r.port,
+                path_prefix: r.path_prefix,
+            })
+            .collect();
+        *ipc_state.native_routes.lock().unwrap_or_else(|e| e.into_inner()) = routes;
+    }
+    // Bring up native Traefik routes for allocated ports (explicit only)
+    if let Some(routes) = &config.native_routes {
+        for msg in fog::router::ensure_native_routes(routes, &port_map, branch_for_ports.as_deref(), &config) {
+            eprintln!("{msg}");
+        }
+    }
+
+    let runtime = fog::runtime::build_with_ports(
         script,
         name,
         &config_dir,
@@ -898,6 +998,8 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
         scrollback,
         log_dir.clone(),
         &mut adopted,
+        &port_map,
+        branch_for_ports.clone(),
     )
     .map_err(|e| {
         // Restore the terminal before reporting so it is usable again.
@@ -907,6 +1009,14 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
         }
         io::Error::new(io::ErrorKind::InvalidData, format!("error: {}", e))
     })?;
+    // Log allocated ports for visibility (also useful for `fog logs`)
+    if !port_map.is_empty() {
+        let mut names: Vec<&String> = port_map.keys().collect();
+        names.sort();
+        for n in names {
+            eprintln!("  + port {} -> {}", n, port_map[n]);
+        }
+    }
 
     // Expose the proxy's live request log to the IPC server so the web log
     // viewer (and anything else) can stream it. The handle is stable across
@@ -957,6 +1067,9 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
     }
 
     ipc::cleanup_socket();
+
+    // Clean up native Traefik routes for this branch (explicit only).
+    fog::router::cleanup_native_routes(branch_for_ports.as_deref(), &config);
 
     // If no fog instances remain, tear down the index server as well.
     // Give the socket file a moment to disappear from the filesystem.

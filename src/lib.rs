@@ -9,6 +9,7 @@ pub mod index;
 pub mod ipc;
 pub mod keybinding;
 pub mod lock;
+pub mod ports;
 pub mod process;
 pub mod project;
 pub mod proxy;

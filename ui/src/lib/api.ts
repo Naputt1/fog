@@ -31,7 +31,8 @@ export interface Service {
   /**
    * Docker container name (e.g. `redfox-main-api-1`). `/logs/stream` streams a
    * container's logs by this name, so the picker must pass `container` (not the
-   * compose service name) when subscribing.
+   * compose service name) when subscribing. For native fog services `container`
+   * is `fog-<pid>-<service>` and `pid` is set.
    */
   container: string;
   /** Docker-reported status — always "running" for listed services. */
@@ -42,6 +43,8 @@ export interface Service {
   ports: string[];
   /** Free-form health detail from docker ("unknown" until real health check). */
   health: string;
+  /** Fog PID for native services; when present logs stream via `?pid=&service=` instead of docker. */
+  pid?: number | null;
 }
 
 /** Per-service health inside a GET /api/status instance. */
@@ -327,16 +330,17 @@ export interface LogStreamOptions {
 
 /**
  * Subscribe to the live log stream for a service via EventSource (SSE) at
- * `/logs/stream?service=NAME`. Returns an unsubscribe function. EventSource
- * reconnects automatically and the browser fires `error` while reconnecting —
- * callers should treat errors as transient and rely on `onOpen` / line events
- * for true data.
+ * `/logs/stream?service=NAME` (docker) or `?pid=PID&service=NAME` (native fog).
+ * Returns an unsubscribe function. EventSource reconnects automatically and the
+ * browser fires `error` while reconnecting — callers should treat errors as
+ * transient and rely on `onOpen` / line events for true data.
  */
 export function subscribeLogs(
   service: string,
-  { onLine, onOpen, onError }: LogStreamOptions
+  { onLine, onOpen, onError, pid }: LogStreamOptions & { pid?: number | null }
 ): () => void {
   const params = new URLSearchParams({ service });
+  if (pid != null) params.set("pid", String(pid));
   const es = new EventSource(`/logs/stream?${params.toString()}`);
 
   es.addEventListener("message", (ev: MessageEvent) => {

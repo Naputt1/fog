@@ -72,6 +72,8 @@ pub struct Terminal {
     pub shutdown_cmd: Option<String>,
     /// Names of services this service depends on.
     pub dep_names: Vec<String>,
+    /// Extra env vars resolved from `service.env` templates (`${ports.*}` etc).
+    pub injected_env: std::collections::HashMap<String, String>,
     /// Git branch of the worktree this service runs in, if any. Exposed to the
     /// spawned process as `FOG_BRANCH` so compose files can derive per-branch
     /// project names, hostnames, and ports.
@@ -522,6 +524,7 @@ impl Terminal {
             health_checks: vec![],
             shutdown_cmd: None,
             dep_names: vec![],
+            injected_env: Default::default(),
             branch: None,
             project: None,
             script: String::new(),
@@ -568,6 +571,7 @@ impl Terminal {
         scrollback: usize,
         log_dir: Option<std::path::PathBuf>,
         branch: Option<String>,
+        injected_env: std::collections::HashMap<String, String>,
     ) -> io::Result<Self> {
         let mut t = Self {
             init: Init::Command {
@@ -583,6 +587,7 @@ impl Terminal {
             health_checks: vec![],
             shutdown_cmd: None,
             dep_names: vec![],
+            injected_env,
             branch,
             project: None,
             script: String::new(),
@@ -636,6 +641,7 @@ impl Terminal {
             health_checks: vec![],
             shutdown_cmd: None,
             dep_names: vec![],
+            injected_env: Default::default(),
             branch: None,
             project: None,
             script: String::new(),
@@ -690,6 +696,7 @@ impl Terminal {
             health_checks: vec![],
             shutdown_cmd: None,
             dep_names: deps.to_vec(),
+            injected_env: Default::default(),
             branch: None,
             project: None,
             script: String::new(),
@@ -745,6 +752,7 @@ impl Terminal {
             health_checks: vec![],
             shutdown_cmd: None,
             dep_names: vec![],
+            injected_env: Default::default(),
             branch: None,
             project: None,
             script: String::new(),
@@ -846,6 +854,7 @@ impl Terminal {
             health_checks: vec![],
             shutdown_cmd: None,
             dep_names: vec![],
+            injected_env: Default::default(),
             branch: None,
             project: None,
             script: String::new(),
@@ -970,6 +979,9 @@ impl Terminal {
         if let Some(branch) = &self.branch {
             cmd_builder.env("FOG_BRANCH", branch);
         }
+        for (k, v) in &self.injected_env {
+            cmd_builder.env(k.clone(), v.clone());
+        }
 
         let child = pair
             .slave
@@ -992,7 +1004,7 @@ impl Terminal {
             return Err(io::Error::last_os_error());
         }
 
-        let _ = writeln!(writer, "cd {} && {}", path, cmd);
+        let _ = writeln!(writer, "{}", cmd);
 
         let tee = self
             .log_dir
@@ -1995,7 +2007,7 @@ mod tests {
     #[test]
     fn test_extract_handoff_live_process() {
         let mut t =
-            Terminal::spawn_command(".", "echo hello-fog", "svc".into(), 100, None, None).unwrap();
+            Terminal::spawn_command(".", "echo hello-fog", "svc".into(), 100, None, None, Default::default()).unwrap();
         let handoff = t.extract_handoff().expect("live process should hand off");
         assert_eq!(handoff.name, "svc");
         assert!(handoff.pid > 0);
@@ -2348,6 +2360,7 @@ mod tests {
             100,
             Some(dir.clone()),
             None,
+            Default::default(),
         )
         .unwrap();
 

@@ -24,7 +24,12 @@
                 },
                 "shutdown_cmd": {
                   "type": "string",
-                  "description": "Shell command to run when fog shuts down (e.g. docker compose down)"
+                  "description": "Shell command to run when fog shuts down (e.g. docker compose down). May contain ${ports.<name>} templates."
+                },
+                "env": {
+                  "type": "object",
+                  "description": "Environment variables injected into the service process. Values may contain ${ports.<name>} and ${branch}/${FOG_BRANCH} templates, e.g. {\"PORT\": \"${ports.api}\"}",
+                  "additionalProperties": { "type": "string" }
                 },
                 "reuse": {
                   "type": "boolean",
@@ -108,6 +113,29 @@
             "default": true,
             "description": "Allow multiple concurrent instances of this script in the same project+branch. When true (default), running the script again starts alongside existing instances instead of killing them; services flagged share: true are shared between those instances. When false, only one instance runs and a new run kills the previous one first (with reuse: true services handed over)."
           }
+        }
+      }
+    },
+    "ports": {
+      "type": "object",
+      "description": "Allocatable ports for native services. Key is a symbolic name, value 0 = random free port, 1-65535 = fixed. Referenced as ${ports.<name>} in service env/cmd/health_check/proxy/native_routes. Every referenced name must exist here.",
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 65535
+      }
+    },
+    "native_routes": {
+      "type": "array",
+      "description": "Explicit Traefik file-provider routes for native (non-container) services. Each entry maps a Host rule to a service's allocated port via host.docker.internal. No auto-generation: if you want DNS routing, declare it here.",
+      "items": {
+        "type": "object",
+        "required": ["host", "service", "port"],
+        "properties": {
+          "host": { "type": "string", "description": "Host rule, may contain ${branch} / ${FOG_BRANCH} (e.g. \"${branch}.acme\")" },
+          "service": { "type": "string", "description": "Service name this route points to" },
+          "port": { "type": "string", "description": "Port template, must be ${ports.<name>} or literal port (e.g. \"${ports.api}\" or \"3000\")" },
+          "path_prefix": { "type": "string", "description": "Optional PathPrefix to combine with host (e.g. \"/api\")" }
         }
       }
     },
