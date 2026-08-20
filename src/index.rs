@@ -1389,13 +1389,8 @@ fn api_services(_network: &str) -> Response<RespBody> {
                 Ok(p) => p,
                 Err(_) => continue,
             };
-            // URL is https when the index is on the router network with TLS, else http.
             // Native routes are always TLS-enabled (see router.rs), so use https.
-            let url = if route.path_prefix.is_some() {
-                format!("https://{}/", host)
-            } else {
-                format!("https://{}/", host)
-            };
+            let url = format!("https://{}/", host);
             let health = health_map
                 .get(route.service.as_str())
                 .copied()
