@@ -18,6 +18,7 @@ fog supports color customization through the `theme` field in `fog.json`.
 | `status_300` | `yellow` | HTTP 3xx status codes in proxy log |
 | `status_400` | `red` | HTTP 4xx status codes in proxy log |
 | `status_500` | `red` | HTTP 5xx status codes in proxy log |
+| `scrollbar` | `cyan` | Scrollbar thumb (when terminal supports it) |
 
 ## Color values
 

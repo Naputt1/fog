@@ -28,12 +28,14 @@ See [`fog.schema.json`](https://github.com/Naputt1/fog/blob/main/fog.schema.json
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `scripts` | `object` | — | Named profiles; each defines its own services and proxy |
+| `ports` | `object` | — | Allocatable ports for templating (`${ports.<name>}`); `0` = random free port |
+| `native_routes` | `array` | — | Explicit Traefik file-provider routes for native services |
 | `max_scrollback` | `integer` | `2000` | Maximum scrollback lines per terminal (min: 100) |
 | `sidebar` | `object` | `null` | Sidebar width constraints |
-| `theme` | `object` | `null` | Color theme overrides |
-| `index` | `object` | `{ enabled: true }` | Standalone index server (service directory + web UI); set `enabled:false` to opt this project out of serving the index |
-| `router` | `object` | `null` | Central Traefik router (host-global) |
-| `dnsmasq` | `object` | `null` | Wildcard DNS setup |
+| `theme` | `object` | `null` | Color theme overrides (see [Themes](/themes)) |
+| `index` | `object` | `{ enabled: true }` | Standalone index server (service directory + web UI); set `enabled:false` to opt this project out. See [Index Server](/index-server) |
+| `router` | `object` | `null` | Central Traefik router (host-global). See [Router & DNS](/router) |
+| `dnsmasq` | `object` | `null` | Wildcard DNS setup. See [Router & DNS](/router) |
 
 ## Scripts
 
@@ -201,7 +203,7 @@ Once configured, a background thread periodically checks the service health and 
 | `interval_ms` | No | `integer` | `5000` | Check interval in milliseconds (min: 100) |
 | `timeout_ms` | No | `integer` | `2000` | Connection/subprocess timeout in milliseconds (min: 100) |
 
-Both `"tcp"` and `"http"` health checks work the same way: they attempt a TCP connection to the target address. The `target` field can be prefixed with `tcp://`, `http://`, or `https://` — the prefix is stripped before connecting.
+Both `"tcp"` and `"http"` health checks currently probe via a TCP connection to the target address (the `target` may be prefixed with `tcp://`, `http://`, or `https://` — the prefix is stripped before connecting). `http` is reserved for a future HTTP-status check; today it behaves like `tcp`.
 
 The `"docker"` kind checks the actual container from the service's compose file instead of a port: it runs `docker compose -f <compose_file> ps --format json <service>` and passes when the service is **running** and, when the compose file defines a healthcheck for it, reports **healthy**. This is more robust than a TCP probe (e.g. it fails when the container is up on a recycled port but actually unhealthy), and pairs well with `"reuse": true` services.
 
@@ -285,255 +287,14 @@ For details on route matching, see the [Proxy docs](/proxy).
 
 The sidebar width is computed dynamically: `max(name_length + 5, min_width)` clamped to `max_width`.
 
-## index
+## Host-global services
 
-Standalone service-directory index server (web UI + JSON API). By default every `fog <script>` serves the index unless opted out. This lives in the **fog config** (top-level `fog.json` alongside `theme`/`sidebar`, default `enabled:true`) — not per-script. It can be set **per-project** (`./fog.json`) or **globally** (`~/.config/fog/fog.json`, same schema); either can opt-out (both must be `true` to serve). The server is host-global (like `router`/`dnsmasq`) and is torn down automatically when the last fog instance exits — see `fog index kill/restart`.
+The standalone [Index Server](/index-server) (web UI + API, `index` field) and the central [Router & DNS](/router) (`router` + `dnsmasq`) are **host-global** — started once and reused across projects and branches. They outlive any single `fog <script>` instance.
 
-```json
-{
-  "index": {
-    "enabled": true,
-    "port": 18080
-  }
-}
-```
+- **Index server** — directory of running services at `http://<tailnet IP>` + React SPA on `127.0.0.1:18080`. Opt out per-project with `index: { enabled: false }`. Details: [Index Server](/index-server).
+- **Router & DNS** — wildcard `*.acme` → `127.0.0.1` via `dnsmasq` and Traefik on `:80`/`:443` with auto-discovery. TLS via `mkcert`. Details: [Router & DNS](/router).
 
-| Field | Required | Type | Default | Description |
-|-------|----------|------|---------|-------------|
-| `enabled` | No | `boolean` | `true` | Whether starting this project serves the index. Set `false` to opt this project out (useful for CI or projects that never need the web UI). |
-| `port` | No | `integer` | `18080` | Port the index listens on. Overrides `router.index_port` when set. |
-
-When `enabled:false`, `fog <script>` for this project will not start the index (and will not print the `+ service index server` line). The index can still be started manually via `fog index restart` or by starting another project that has `enabled:true` (the default). Other lifecycle still applies: `fog kill`/`fog restart` per-instance, `POST /api/server/kill` + `/restart`, and auto-teardown when the last instance exits.
-
-## dnsmasq
-
-Optional wildcard-DNS setup applied automatically on startup. Each domain is
-mapped so any `*.<domain>` hostname resolves to `address` — handy for per-branch
-dev URLs like `main.acme` or `feature-x.acme`.
-
-```json
-{
-  "dnsmasq": {
-    "domains": ["acme"],
-    "address": "127.0.0.1",
-    "port": 53
-  }
-}
-```
-
-| Field | Required | Type | Default | Description |
-|-------|----------|------|---------|-------------|
-| `domains` | **Yes** | `array` | — | Domains to wildcard-map (e.g. `["acme"]` → `*.acme`) |
-| `address` | No | `string` | `"127.0.0.1"` | Address that `*.<domain>` resolves to |
-| `port` | No | `integer` | `53` | Port dnsmasq listens on. On macOS the daemon runs as a root LaunchDaemon so it can bind this (privileged) port |
-
-When `fog <script>` starts and a `dnsmasq` section is configured, fog:
-
-1. Verifies `dnsmasq` is installed; if not, it **warns and continues** (install it with `brew install dnsmasq`).
-2. On **macOS** (Homebrew): writes `address=/.<domain>/<address>` into
-   `$prefix/etc/dnsmasq.d/fog-<domain>.conf`, pins the listener to
-   `address:port` via `fog-port.conf` (`port`, `listen-address`,
-   `bind-interfaces`), ensures `conf-dir` is enabled in `dnsmasq.conf`, creates
-   `/etc/resolver/<domain>` (via `sudo`) with a plain `nameserver <address>`
-   line, then **starts** dnsmasq as a **root LaunchDaemon** via
-   `sudo brew services start dnsmasq` (which registers
-   `/Library/LaunchDaemons/homebrew.mxcl.dnsmasq.plist` and survives reboots).
-   Any stale user-level `homebrew.mxcl.dnsmasq` LaunchAgent is booted out first.
-3. On **Linux**: writes `/etc/dnsmasq.d/fog-<domain>.conf` and `fog-port.conf`
-   (via `sudo`) and starts dnsmasq via `sudo systemctl start dnsmasq`.
-4. On other platforms it warns that the setup is unsupported.
-
-The setup is **idempotent**: existing files are left untouched and dnsmasq is
-only restarted when something changed — and if the daemon is already running it
-is left alone. If dnsmasq is **not** running, fog starts it automatically (the
-"fog starts the DNS too" behavior), and verifies it actually came up on
-`address:port`. Detached (`-d`) runs use `sudo -n` so a password prompt cannot
-hang them; if a privileged step is needed but cannot run headless, fog prints a
-warning telling you to run `fog <script>` interactively once. Any failure is a
-warning, never a hard error.
-
-> **Why root?** macOS `26`+ restricts binding to privileged ports (<1024) to
-> root, and macOS renders (*but ignores*) the `port` directive in
-> `/etc/resolver/<domain>` files. dnsmasq therefore must listen on the standard
-> :53 as a **root LaunchDaemon** — running `brew services` under `sudo`
-> installs exactly that. fog only ever binds it to `127.0.0.1`
-> (`bind-interfaces`), so the daemon is not exposed to the LAN.
-
-## router
-
-Optional **central reverse proxy** (Traefik) setup applied automatically on
-startup, sharing dnsmasq's philosophy: the router is a host-global resource that
-fog starts **once** and every project/branch reuses, so no app runs its own
-speculative instance (which would collide on the published `:80` port).
-
-Apps opt into routing by attaching a service to the shared network and
-declaring standard Traefik container labels:
-
-```json
-{
-  "router": {
-    "image": "traefik:v3",
-    "hostname": "router.acme",
-    "dashboard_port": 8080,
-    "shared_network": "fog-router"
-  }
-}
-```
-
-| Field | Required | Type | Default | Description |
-|-------|----------|------|---------|-------------|
-| `image` | No | `string` | `"traefik:v3"` | Traefik image to run |
-| `hostname` | No | `string` | — | Traefik dashboard hostname (e.g. `router.acme`); must be covered by `dnsmasq.domains` |
-| `index_port` | No | `integer` | `18080` | Port of the standalone service-directory index server (see below) |
-| `dashboard_port` | No | `integer` | `8080` | Host port for the Traefik dashboard |
-| `shared_network` | No | `string` | `"fog-router"` | External Docker network shared with app services |
-| `tls` | No | `object` | `{ enabled: false }` | Optional HTTPS termination (see below) |
-
-When `fog <script>` starts and a `router` section is configured, fog:
-
-1. Creates the shared Docker network (`shared_network`) if it does not exist.
-2. Starts a single `fog-router-<image>` Traefik container on it, publishing `:80`
-   (web) and `dashboard_port:8080` (dashboard), with the Docker provider enabled
-   (`exposedByDefault=false`) so only label-opted-in services are routed.
-3. Assumes the network is already attached by app services — an app that does
-   not declare the network is simply not routed.
-
-The setup is **idempotent**: an existing/healthy router is left running and the
-network is created only once. Traefik auto-discovers per-branch services from
-their labels, so branches appearing and disappearing are routed and untouted
-automatically. The router is **never** torn down when a project or branch exits
-(it is a host-global resource, like dnsmasq); stopping it is a manual
-`docker rm -f fog-router-traefik`. Any failure is a warning, never a hard error.
-
-### router.tls — HTTPS termination
-
-To serve `https://<branch>.<domain>` (no browser warnings), enable TLS:
-
-```json
-{
-  "router": {
-    "hostname": "router.acme",
-    "shared_network": "fog-router",
-    "tls": { "enabled": true }
-  }
-}
-```
-
-| Field | Required | Type | Default | Description |
-|-------|----------|------|---------|-------------|
-| `enabled` | No | `boolean` | `false` | Enable HTTPS on the central router |
-| `cert_dir` | No | `string` | `~/.config/fog/certs` | Where wildcard certificates are stored |
-
-When TLS is enabled, fog generates a **local-CA wildcard certificate** (via
-[mkcert](https://github.com/FiloSottile/mkcert)) for each `dnsmasq` domain plus
-the router hostname and `localhost`, stores it under `cert_dir`, and writes a
-Traefik file-provider config that Traefik hot-reloads. Traefik then terminates
-HTTPS on a `:443` `websecure` entrypoint while HTTP on `:80` keeps working.
-
-Prerequisites (one-time):
-
-```bash
-brew install mkcert
-mkcert -install          # installs the local CA into the OS trust store (sudo)
-```
-
-TLS is **sticky host-wide**: because the router is shared by every project, a
-project whose `router` config does not enable `tls` will never tear down an
-already-running HTTPS router (it would break other projects' HTTPS). Disabling
-TLS requires removing the router manually (`docker rm -f fog-router-traefik`)
-and re-running `fog <script>`.
-
-Apps must opt the router into TLS per route by adding the label
-`traefik.http.routers.<name>.tls=true` to their service — otherwise Traefik
-serves plain HTTP on `:80` but not HTTPS on `:443`.
-
-### Service-directory index (unmatched hosts)
-
-A request whose host matches **no** app router (e.g. opening the raw tailnet IP
-`http://100.86.26.45` or the Traefik dashboard host directly) is served a
-generated `index.html` instead of a 404. The page lists every running service,
-its hostname, and the internal port DNS forwards to it, with click-to-copy
-links — handy for opening dev apps from a phone on the tailnet.
-
-- fog runs a standalone index server (`fog index serve`) on loopback
-  `index_port` (default `18080`), detached so it survives individual fog
-  instances exiting.
-- The file is regenerated when instances start and stop (bounded startup
-  refreshes + a teardown refresh); refresh the browser to pick up changes.
-- Traefik routes unmatched hosts to it via a low-priority catch-all router
-  (`Host(\`*\`)`, `priority = 1`), so specific app routers always win.
-
-#### Web UI & JSON API
-
-The index server also serves the **fog web UI** — a React SPA (see `ui/`) that
-renders the service directory, live logs, scripts, health and status. It exposes
-a small JSON API consumed by the SPA:
-
-- `GET /api/services` — live service directory
-- `GET /api/status` — running fog instances
-- `GET /api/scripts` — configured scripts
-- `GET /api/config` — loaded configuration
-- `GET /api/health` — per-service health
-- `GET /api/launch/targets` — launchable projects/worktrees/scripts (see below)
-- `POST /api/launch` — start a new detached fog instance (see below)
-- `POST /api/instances/{pid}/services/{name}/action` — start/stop/restart a service of a running instance (see below)
-- `/logs/stream` — SSE stream of a service's logs
-
-##### Service controls
-
-The `/status` page shows **Start**, **Stop** and **Restart** buttons on each
-service row — the services of a running fog instance, as listed by
-`GET /api/status` → `instances[].services[]`. The buttons call
-`POST /api/instances/{pid}/services/{name}/action` with a JSON body:
-
-```json
-{ "action": "start" | "stop" | "restart" }
-```
-
-The index server forwards the request to the running fog instance over its IPC
-Unix socket (localhost only) and responds `{"ok": true}` on success, or
-`{"ok": false, "reason": "..."}` on failure; a pid that is not a running fog
-instance yields `404`.
-
-> **Localhost only** — the index server listens on `127.0.0.1` only, so the
-> write path is available to local processes only. Any local process could
-> issue these actions, so do not expose the index port (`18080`) externally.
-
-##### Start instances
-
-The `/status` page includes a **Start instance** card with two modes:
-
-1. **Known project** — pick a project, then a branch/worktree, then one of
-   the scripts that worktree's `fog.json` defines, and press **Start**.
-2. **New project** — enter an absolute config directory path and a script
-   name (optionally a branch), and press **Start**.
-
-Either mode spawns a new **detached** fog instance. Launching on a *different*
-branch uses the existing [concurrent/share/reuse machinery](#concurrent-mode--sharing-services) —
-different branches always run concurrently, so the freshly launched branch
-instance runs side by side with any already-running ones.
-
-The UI is backed by two endpoints:
-
-- `GET /api/launch/targets` — returns
-  `{"projects":[{"path","name","worktrees":[{"path","branch","scripts":[...]}]}]}`,
-  enumerating launchable projects grouped by git repository: all worktrees/
-  branches of the same repo (discovered from running fog instances' config dirs
-  plus docker compose `working_dir` labels) appear under a single project named
-  after the repo, each with its git worktrees and the scripts each worktree's
-  `fog.json` defines.
-- `POST /api/launch` — body
-  `{"config_dir":"/abs/path","script":"dev","branch":"feature-x"|null}`; spawns
-  a detached fog daemon and waits until its IPC socket serves status, replying
-  `{"ok":true,"pid":1234}` on success or `400`/`500 {"error":"..."}` on failure.
-
-Like the service-action endpoint, this is a **localhost-only write path** — the
-index server binds to `127.0.0.1` only, so any local process could start fog
-instances. Do not expose the index port (`18080`) externally.
-
-Build the SPA with `cd ui && pnpm install && pnpm build`; `build.rs` embeds
-`ui/dist/` into the binary at compile time. Without a build the server falls
-back to the generated directory page above.
+Both are idempotent and tear down automatically (index) or manually (`docker rm -f fog-router-traefik`).
 
 ## Theme
 
@@ -547,7 +308,8 @@ back to the generated directory page above.
     "status_200": "green",
     "status_300": "yellow",
     "status_400": "red",
-    "status_500": "red"
+    "status_500": "red",
+    "scrollbar": "cyan"
   }
 }
 ```

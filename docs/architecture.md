@@ -8,66 +8,34 @@ fog is a terminal-based service orchestrator built in Rust using [ratatui](https
 
 ## Threading model
 
-fog runs three concurrent threads:
+fog runs a synchronous TUI thread plus background threads:
+
+```mermaid
+flowchart TB
+  Main["Main Thread (TUI)\nratatui event loop\nkeyboard/mouse, PTY read/write, UI\ndraw() every 50ms / handle_events()"]
+  Proxy["Proxy Thread\nTokio current_thread runtime\nHTTP/1.1 + WebSocket\nArc<Mutex> request log + rustls"]
+  Watcher["Config Watcher Thread\nnotify watcher\nsignals main loop"]
+  Reader["PTY Reader Thread (per Terminal)\nread 4KB chunks → vt100::Parser\nArc<Mutex<Parser>> + generation"]
+  Health["Health Check Thread (per Terminal)\nperiodic TcpStream::connect\nArc<Mutex<HealthStatus>>"]
+
+  Main --- Proxy
+  Main --- Watcher
+  Main --- Reader
+  Main --- Health
+```
+
+<details>
+<summary>ASCII fallback (for offline view)</summary>
 
 ```
-┌────────────────────────────────────────┐
-│         Main Thread (TUI)              │
-│  - ratatui event loop                  │
-│  - Keyboard/mouse handling             │
-│  - Terminal PTY read/write             │
-│  - UI rendering                        │
-│                                        │
-│  App::run()                             │
-│    ├── draw() ← every 50ms             │
-│    └── handle_events() ← on input       │
-└────────────────────────────────────────┘
-
-┌────────────────────────────────────────┐
-│      Background: Proxy Thread          │
-│  - Own Tokio current-thread runtime    │
-│  - HTTP/1.1 + WebSocket proxying       │
-│  - Request log buffer (Arc<Mutex>)     │
-│  - TLS termination (rustls)            │
-│                                        │
-│  ProxyInstance::start()                 │
-│    └── thread::spawn()                  │
-│        └── tokio::runtime::block_on()   │
-└────────────────────────────────────────┘
-
-┌────────────────────────────────────────┐
-│   Background: Config Watcher Thread    │
-│  - notify file watcher                 │
-│  - Signals main loop on config change  │
-│                                        │
-│  spawn_config_watcher()                 │
-│    └── thread::spawn()                  │
-│        └── notify::Watcher             │
-└────────────────────────────────────────┘
-
-    Per Terminal:
-┌────────────────────────────────────────┐
-│   Background: PTY Reader Thread        │
-│  - Reads child process stdout          │
-│  - Feeds vt100 parser                  │
-│  - Increments screen generation        │
-│                                        │
-│  spawn_reader()                         │
-│    └── thread::spawn()                  │
-│        └── loop { reader.read() }      │
-└────────────────────────────────────────┘
-
-    Per Terminal (if health_check configured):
-┌────────────────────────────────────────┐
-│   Background: Health Check Thread      │
-│  - Periodic TCP connect checks         │
-│  - Updates HealthStatus (Arc<Mutex>)   │
-│                                        │
-│  Terminal::start_health_checks()        │
-│    └── thread::spawn()                  │
-│        └── loop { TcpStream::connect } │
-└────────────────────────────────────────┘
+Main Thread (TUI): App::run() → draw() every 50ms / handle_events()
+Proxy Thread:      ProxyInstance::start() → tokio::runtime::block_on()
+Config Watcher:    spawn_config_watcher() → notify::Watcher
+Per Terminal:      spawn_reader() → loop { reader.read() → vt100::Parser }
+Per HealthCheck:   Terminal::start_health_checks() → loop { TcpStream::connect }
 ```
+
+</details>
 
 ### Inter-thread communication
 
@@ -114,38 +82,18 @@ main.rs
 
 ## VT100 parsing pipeline
 
-```
-Child process stdout
-       │
-       ▼
-PTY reader thread
-  reads raw bytes in 4KB chunks
-       │
-       ▼
-vt100::Parser::process(bytes)
-  parses ANSI escape sequences
-  maintains scrollback buffer
-       │
-       ▼
-Arc<Mutex<vt100::Parser>> shared state
-       │
-       ▼
-Terminal::get_screen(visible_rows, offset)
-  │
-  ├── Check line_cache (offset, count, generation)
-  │     └── Cache hit? Return cached styled lines
-  │
-  └── Cache miss?
-        ├── Lock parser, set scrollback position
-        ├── Iterate cells → build Vec<Line<Span>> with ANSI styles
-        ├── Update cache
-        └── Return styled lines
-               │
-               ▼
-        selection::apply_sel()  ← highlight selection ranges
-               │
-               ▼
-        ratatui Paragraph widget  ← render to screen
+```mermaid
+flowchart TB
+  A["Child stdout"] --> B["PTY reader thread\n4KB chunks"]
+  B --> C["vt100::Parser::process(bytes)\nANSI parse + scrollback"]
+  C --> D["Arc<Mutex<Parser>>"]
+  D --> E["Terminal::get_screen(offset, count)"]
+  E --> F{"line_cache hit?"}
+  F -- yes --> G["return cached styled lines"]
+  F -- no --> H["lock parser → iterate cells\nVec<Line<Span>> → cache"]
+  G --> I["selection::apply_sel()"]
+  H --> I
+  I --> J["ratatui Paragraph widget"]
 ```
 
 ## Process lifecycle

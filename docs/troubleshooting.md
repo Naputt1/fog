@@ -86,7 +86,7 @@ fog currently has platform-specific code only for macOS and Linux (process tree 
 
 ### Can I run fog as a daemon?
 
-No — fog is designed as a development tool that runs in the foreground. For production deployment, use a dedicated process manager.
+Yes — use detached mode: `fog <script> -d` starts in the background without the TUI and tees logs to `$TMPDIR/fog-<pid>.logs/`. Manage it with `fog ls`, `fog logs <pid>`, and `fog kill <pid>`. See [Installation & Usage](/getting-started#detached-runs). It is still a dev orchestrator — for production use a dedicated process manager.
 
 ### Can I use fog with Docker?
 
@@ -98,7 +98,7 @@ No. The proxy uses HTTP/1.1 only.
 
 ### Can I have multiple proxy instances?
 
-No — fog supports a single proxy instance per session.
+Each `fog <script>` instance has its own proxy. Different branches always run side-by-side (different ports). Same-branch concurrency (`concurrent: true`, default) also runs side-by-side with per-instance ports via `ports: { ... }` templating; single-instance mode (`concurrent: false`) has one proxy at a time and hands over `reuse` services.
 
 ### Can I use fog without a config file?
 
@@ -106,7 +106,17 @@ No — at minimum, fog needs a config file to know what services to run.
 
 ### Does fog persist logs?
 
-With the `--save-logs` flag, fog writes service output to `temp/<name>.txt` on exit. Otherwise, output is not persisted.
+* `--save-logs` writes `temp/<name>.txt` on exit (TUI or detached).
+* Detached (`-d`) runs always tee raw PTY output to `$TMPDIR/fog-<pid>.logs/<name>.log` (and `daemon.log`); `fog logs <pid>` prints them. Those files persist after exit.
+* Without either, TUI scrollback (`max_scrollback`) is in-memory only.
+
+### Why does `share: true` still start a duplicate DB?
+
+`share` requires a `health_check` to probe. Without one fog warns and starts the `cmd` anyway — concurrent instances can race. Add a `tcp` or `docker` probe. Also, a shared service templated with `${ports.*}` where the port is `0` (random) will diverge per instance — use a fixed port for shared resources.
+
+### My shared DB port conflicts with `ports: { api: 0 }`
+
+Don't template a shared service's port with a random `ports` entry. Shared resources must use a stable address checked by `health_check`; per-instance services should use `ports:0`.
 
 ## Getting help
 

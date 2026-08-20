@@ -4,254 +4,99 @@
 [![Crates.io](https://img.shields.io/crates/v/fog-tui.svg)](https://crates.io/crates/fog-tui)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-**Terminal-based service orchestrator & reverse-proxy dashboard.**
+**Terminal service orchestrator and reverse proxy dashboard.**
 
-fog lets you define named *scripts* — each a set of local services and an optional reverse proxy — launch them simultaneously inside pseudo-terminals, view their real-time colored output with scrollback, and expose a proxy that routes traffic to them, all in a single [ratatui](https://github.com/ratatui-org/ratatui) terminal interface.
-
-<!-- Add a screenshot here: docs/screenshot.png (~1200×800) -->
+fog runs named scripts from `fog.json`. Each script starts local services in PTYs with full ANSI color and scrollback, plus an optional reverse proxy. All in one `ratatui` terminal UI — and a responsive web UI you can open from your phone on the tailnet.
 
 ## Features
 
-- **Script-based profiles** — Define named profiles (e.g. `dev`, `infra`) that each select which services and proxy to run. `fog dev` launches only what that profile needs.
-- **Multi-service orchestration** — Spawn each service in its own PTY, with full VT100/ANSI color rendering and scrollback (up to 2000 lines, configurable).
-- **Built-in reverse proxy** — HTTP/1.1 and WebSocket proxy with a live request log showing method, path, status code, latency, and upstream target.
-- **Live sidebar** — Vertical sidebar with status indicators (● running, ● healthy, ○ stopped, ● unhealthy). Click to switch tabs.
-- **Mouse interaction** — Click tabs, scroll with the wheel, drag-select text (copied to system clipboard via OSC 52).
-- **Keyboard navigation** — Vim-style `j`/`k` tab switching, terminal input mode (`i`), restart services (`R`), open shell tabs (`t`).
-- **Configuration hot-reload** — Edit `fog.json` at runtime to update themes and proxy settings without restarting.
-- **Instance management** — `fog ls` lists running instances and their service status; `fog kill` gracefully shuts one down.
-- **Detached runs** — `fog <script> -d` starts a script in the background without the TUI (ideal for CI and AI agents), tees each service's output to `$TMPDIR/fog-<pid>.logs/`, and returns immediately with the PID; `fog logs <pid>` prints the captured output.
-- **Worktree-aware runs** — Scripts run concurrently by default: running the same script again in the same repo+branch starts alongside existing instances (with `share: true` services like a shared `docker compose` database borrowed instead of duplicated). Set `"concurrent": false` for single-instance mode, where a re-run shuts the old instance down first (and only once it has fully exited, so ports don't collide) and services flagged `reuse: true` are handed over instead of torn down. A per-(project, script, branch) owner lock makes concurrent single-instance starts deterministic, and **different branches always run concurrently** — `fog dev --branch feature-x` and `fog dev --branch main` can run side by side. Start directly on a branch with `fog <script> --branch <name>`, or switch worktrees from inside the TUI with `s`.
-- **TLS support** — Terminate TLS connections directly in the proxy using PEM certificates.
-- **Health checks** — Periodic health checks per service with sidebar status indicators. `tcp`/`http` probe an address; `docker` verifies the actual container from the service's compose file is running (and, when a compose healthcheck is defined, `healthy`).
-- **Per-branch env** — Services started in a git worktree get `FOG_BRANCH`, so compose files can derive per-branch project names, hostnames, and ports.
-- **Automatic wildcard DNS** — Configure `"dnsmasq": { "domains": ["acme"] }` and fog sets up (and **starts**) `*.acme → 127.0.0.1` on startup, so per-branch dev hostnames like `main.acme` resolve with no manual DNS setup. On macOS it installs a **root LaunchDaemon** (`sudo brew services start dnsmasq`, bound to `:53`) and creates `/etc/resolver/<domain>`; on Linux it uses `systemctl`. See [DNS & routing setup](#dns--routing-setup).
-- **Central router (Traefik)** — Optionally run a single host-global Traefik per machine that auto-discovers label-opted-in app containers and routes per-branch hostnames on `:80` (dashboard on `:8080`). See [DNS & routing setup](#dns--routing-setup).
+- **Branches side-by-side.** Run `fog dev` on `main` and `feature-x` at once; `s` to switch in the TUI. Same branch can run twice — you and an agent share the DB without killing each other.
+- **Phone overview.** Check status and live logs at `http://<tailnet IP>` from your phone — no DNS setup.
+- **One command per service.** Each service in its own PTY with color and scrollback.
+- **Built-in proxy.** Reverse proxy with request log and WebSocket support.
+- **Simple config.** One `fog.json` with named scripts (`fog dev`).
+
+See [agentic guide](https://naputt1.github.io/fog/agentic) for worktree switching and human+agent sharing, and [configuration](https://naputt1.github.io/fog/configuration) for full details.
 
 ## Installation
 
-### From source
-
 ```bash
-git clone https://github.com/Naputt1/fog.git
-cd fog
-cargo build --release
-```
+# from source
+git clone https://github.com/Naputt1/fog.git && cd fog
+cargo build --release  # -> target/release/fog
 
-The binary will be at `target/release/fog`.
+# from crates.io
+cargo install fog-tui  # installs binary `fog`
 
-### With Cargo (from crates.io)
-
-```bash
-cargo install fog-tui
-```
-
-The `fog` binary is placed in `~/.cargo/bin/` (crate `fog-tui` installs binary `fog`).
-
-### With Cargo (directly from GitHub)
-
-```bash
+# from git
 cargo install --git https://github.com/Naputt1/fog.git
-```
-
-Pin a specific version with `--tag` (prebuilt SPA is fetched from the GitHub Release if `ui/dist` is absent):
-
-```bash
 cargo install --git https://github.com/Naputt1/fog.git --tag v0.1.0
-# to skip the network fetch (offline):
-FOG_SKIP_SPA_DOWNLOAD=1 cargo install --git https://github.com/Naputt1/fog.git
 ```
+
+If `ui/dist` is absent on a git install, `build.rs` fetches the prebuilt SPA from the GitHub Release. For offline builds use `FOG_SKIP_SPA_DOWNLOAD=1`.
 
 ## Quick start
 
-Create a `fog.json` with at least one script:
+Create `fog.json`:
 
 ```json
 {
   "scripts": {
     "dev": {
       "service": [
-        {
-          "name": "web",
-          "path": "/path/to/project",
-          "cmd": "npm run dev"
-        }
+        { "name": "web", "path": "/path/to/project", "cmd": "npm run dev" }
       ]
     }
   }
 }
 ```
 
-Then run:
-
 ```bash
 fog dev
 ```
 
-## DNS & routing setup
+For wildcard hostnames like `main.acme` and Traefik routing on `:80`, see [DNS and routing setup](https://naputt1.github.io/fog/configuration#dnsmasq) and the [configuration reference](https://naputt1.github.io/fog/configuration).
 
-Optional, but recommended if you want per-branch hostnames like
-`http://main.acme` (no ports) to resolve locally. Two moving parts:
-
-- **dnsmasq** turns `*.acme` into `127.0.0.1` (DNS resolution).
-- **Traefik** (central router) inspects the `Host` header and forwards to the
-  right container (HTTP routing). It requires dnsmasq — one maps names to an
-  IP, the other maps a hostname to a route.
-
-### 1. Install dnsmasq (macOS)
-
-```bash
-brew install dnsmasq        # skip this if you don't need wildcard hostnames
-```
-
-### 2. Configure fog
-
-Add to your `fog.json`:
-
-```json
-{
-  "dnsmasq": {
-    "domains": ["acme"],
-    "address": "127.0.0.1",
-    "port": 53
-  }
-}
-```
-
-`port` defaults to 53. On macOS the daemon runs as a root LaunchDaemon so it can
-bind the privileged port, and `/etc/resolver/<domain>` only needs a plain
-`nameserver` line (macOS renders but ignores a `port` directive in resolver files).
-
-### 3. Run `fog dev` interactively once
-
-The **first** run approves a couple of `sudo` prompts; fog then:
-- writes `*.acme → 127.0.0.1` into dnsmasq's config and pins it to `127.0.0.1:53`
-- creates `/etc/resolver/acme` (via sudo)
-- installs and starts the **root LaunchDaemon** via `sudo brew services start dnsmasq`
-
-Detached `-d` runs use `sudo -n` and won't prompt — always do the first setup run
-interactively.
-
-### 4. Verify
-
-```bash
-python3 -c "import socket; print(socket.gethostbyname('main.acme'))"
-# → 127.0.0.1
-```
-
-### Central router (Traefik) — optional
-
-To route the resolved hostnames to containers on `:80`, add a `router` section:
-
-```json
-{
-  "router": {
-    "hostname": "router.acme",
-    "dashboard_port": 8080,
-    "shared_network": "fog-router"
-  }
-}
-```
-
-On startup fog creates one host-global Traefik container (`fog-router-traefik`)
-and the shared `fog-router` Docker network, publishing `:80` (web) and
-`dashboard_port:8080` (dashboard). App services opt in by attaching to that
-network and declaring Traefik container labels (e.g. a frontend's
-`traefik.http.routers.<name>.rule=Host(\`<branch>.acme\`)`). The router
-auto-discovers them and routes each branch, and is **never** torn down when a
-project or branch exits. Open the dashboard at
-`http://router.acme:8080` (or `127.0.0.1:8080`).
-
-Unmatched hosts (or any path on the router) are served the **fog web UI**
-from a small embedded server: a **service directory** listing every running
-service grouped by project and branch (with copy-to-clipboard links), plus a
-**live-log viewer** at `http://<router>/logs` that streams any service's
-output in real time — colored ANSI, auto-scrolling, pause-on-scroll and copy —
-the way the TUI shows service tabs. Containerized services stream via
-`docker logs -f`; running fog instances (interactive or detached) expose their
-captured logs, their `daemon.log`, and the proxy's live request log. Pick a
-service on the left, or jump straight to one with
-`http://<router>/logs?service=<container>`.
-
-Full field reference and both sections are documented in
-[Configuration](https://github.com/Naputt1/fog/blob/main/docs/configuration.md).
-
-## Web UI
-
-fog ships a web UI for the service directory, live logs, scripts, health and
-status, served by the embedded Rust (hyper) index server at
-`http://127.0.0.1:18080`.
-
-- **Stack** — [React 19](https://react.dev) + [shadcn/ui](https://ui.shadcn.com) + [Tailwind CSS 4](https://tailwindcss.com), with [TanStack Router](https://tanstack.com/router) and [TanStack Query](https://tanstack.com/query). The SPA lives in `ui/`.
-- **Build** — `cd ui && pnpm install && pnpm build` produces `ui/dist/`, which `build.rs` embeds into the binary at compile time. `crates.io` releases (`fog-tui`) always embed the prebuilt SPA. When `ui/dist` is absent (e.g. `cargo install --git` on `main` without a prior `pnpm build`), `build.rs` tries to fetch the SPA from the GitHub Release; if offline it embeds a fallback page so `http://127.0.0.1:18080/` returns `200` instead of `{"error":"page not found"}`.
-- **Serving** — the compiled binary serves the SPA + JSON API from the hyper server on `index_port` (default `127.0.0.1:18080`).
-- **API** — `GET /api/services`, `/api/status`, `/api/scripts`, `/api/config`, `/api/health`, `GET /api/launch/targets`, `POST /api/launch`, `POST /api/instances/{pid}/services/{name}/action`, plus `/logs/stream` (SSE) for live logs.
-- **Dev workflow** — run the Rust server, then `cd ui && pnpm install && pnpm dev`; Vite serves the SPA on `:5173` and proxies `/api` and `/logs/stream` to `127.0.0.1:18080`.
-
-### Service controls
-
-The `/status` page lists every running fog instance and its services (from `GET /api/status` → `instances[].services[]`). Each service row has **Start**, **Stop** and **Restart** buttons that call `POST /api/instances/{pid}/services/{name}/action` with a JSON body of `{"action": "start" | "stop" | "restart"}`. The index server forwards the request to the running fog instance over its IPC Unix socket and replies `{"ok": true}` on success, `{"ok": false, "reason": "..."}` on failure, and `404` when the pid is not a running fog instance.
-
-> **Localhost only** — the index server binds to `127.0.0.1` only (`index_port`, default `18080`), so the write path is never exposed beyond it. Any local process could issue these actions, so do not expose the index port externally.
-
-### Start instances
-
-The `/status` page also has a **Start instance** card with two modes:
-
-1. **Pick a known project** — choose a project, then a branch/worktree, then one of the scripts that worktree's `fog.json` defines, and press **Start**.
-2. **New project** — enter an absolute config directory path and a script name (optionally a branch), and press **Start**.
-
-Either way, starting spawns a new **detached** fog instance. Launching on a *different* branch reuses the existing concurrent/share/reuse machinery described in the [Features](#features) section — different branches always run concurrently, so a freshly launched branch instance runs side by side with any already-running ones.
-
-The UI is backed by two endpoints:
-
-- `GET /api/launch/targets` — returns `{"projects":[{"path","name","worktrees":[{"path","branch","scripts":[...]}]}]}`, enumerating launchable projects grouped by git repository: all worktrees/branches of the same repo (discovered from running fog instances' config dirs plus docker compose `working_dir` labels) appear under a single project named after the repo, each with its git worktrees and the scripts each worktree's `fog.json` defines.
-- `POST /api/launch` — body `{"config_dir":"/abs/path","script":"dev","branch":"feature-x"|null}`; spawns a detached fog daemon and waits until its IPC socket serves status, replying `{"ok":true,"pid":1234}` on success or `400`/`500 {"error":"..."}` on failure.
-
-Like the service-action endpoint, this is a **localhost-only write path** (the index server binds to `127.0.0.1`), so do not expose the index port (`18080`) externally.
+Web UI and API run on `127.0.0.1:18080` by default when enabled. See [configuration](https://naputt1.github.io/fog/configuration#index) for the index server, SPA build, and API.
 
 ## Usage
 
 ```bash
-fog <script> [OPTIONS]    # Run a script in the TUI (e.g. `fog dev`)
-fog ls [pid]              # List running instances and service status
-fog kill [pid]            # Gracefully shut down a running instance
-fog logs [pid]            # Print captured output of a detached instance
+fog <script> [OPTIONS]    # run a script (e.g. fog dev)
+fog ls [pid]              # list running instances
+fog kill [pid]            # gracefully shut down
+fog logs [pid]            # print captured output of a detached instance
 ```
 
 | Option | Description |
 |--------|-------------|
-| `-c`, `--config <PATH>` | Path to config file, or a directory containing `fog.json` (default: `fog.json`) |
-| `--branch <BRANCH>` | Run the script in the git worktree checked out on this branch |
-| `-d`, `--detach` | Run the script in the background without the TUI, capturing service output to `$TMPDIR/fog-<pid>.logs/`; returns once the instance is serving |
+| `-c`, `--config <PATH>` | Path to config file or directory containing `fog.json` (default `fog.json`) |
+| `--branch <BRANCH>` | Run in the git worktree for this branch |
+| `-d`, `--detach` | Run in background without TUI, captures logs to `$TMPDIR/fog-<pid>.logs/` |
 | `--save-logs` | Save service output to `temp/<name>.txt` on exit |
-| `--completions <SHELL>` | Print a bash/zsh/fish completion script (`--branch` completes to all worktrees) |
+| `--completions <SHELL>` | Print bash/zsh/fish completions |
 
-Each running `fog` instance exposes a Unix socket in `$TMPDIR/fog-<pid>.sock`. `fog ls` discovers these sockets and queries their live service status; `fog kill` asks an instance to shut down gracefully. When multiple instances are running, pass a PID to target one (`fog ls 1234`, `fog kill 1234`).
+Each instance exposes a Unix socket at `$TMPDIR/fog-<pid>.sock`. `fog ls` and `fog kill` discover it there. Pass a PID when multiple instances run.
 
-See the [full documentation](https://naputt1.github.io/fog/) for configuration reference, theming, architecture details, and more.
+Docs: [https://naputt1.github.io/fog/](https://naputt1.github.io/fog/) for configuration, proxy, themes, keybindings, architecture and troubleshooting.
 
 ## Keybindings
 
-| Key | Context | Action |
-|-----|---------|--------|
-| `q` / `Ctrl+q` | Any | Quit fog |
-| `j` / `→` / `Ctrl+n` | Normal | Next tab |
-| `k` / `←` / `Ctrl+p` | Normal | Previous tab |
-| `i` | Normal (non-proxy) | Enter terminal input mode |
-| `Esc` | Terminal input | Exit to normal mode |
-| `R` | Normal | Restart current service or proxy |
-| `t` / `Ctrl+t` | Normal | Open a new shell tab |
-| `d` | Normal | Close current shell tab |
-| `s` | Normal | Open worktree switch popup |
-| `↑` / `↓` | Normal | Scroll output |
-| `PageUp` / `PageDown` | Normal | Scroll by page |
-| `g` / `Home` | Normal | Scroll to top |
-| `G` / `End` | Normal | Scroll to bottom |
-| `/` | Proxy tab | Filter proxy logs |
-| `?` | Any | Toggle help overlay |
+| Key | Action |
+|-----|--------|
+| `q` / `Ctrl+q` | Quit |
+| `j` / `k` / `Ctrl+n` / `Ctrl+p` / arrows | Next / previous tab |
+| `i` | Enter terminal input |
+| `Esc` | Exit input |
+| `R` | Restart current service or proxy |
+| `t` / `Ctrl+t` | Open shell tab |
+| `d` | Close shell tab |
+| `s` | Worktree switch |
+| `↑`/`↓`, `PageUp`/`PageDown`, `g`/`G` | Scroll |
+| `/` | Filter proxy logs |
+| `?` | Toggle help |
 
-Full reference in [Keybindings](./docs/keybindings.md).
+Full reference in [keybindings](https://naputt1.github.io/fog/keybindings).
 
 ## License
 

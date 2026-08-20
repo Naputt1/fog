@@ -1,31 +1,29 @@
 ---
+layout: home
 title: fog
+titleTemplate: Terminal service orchestrator & reverse-proxy dashboard
+hero:
+  name: fog
+  text: Service orchestrator & reverse proxy
+  tagline: Named scripts in fog.json — each service in its own PTY with color and scrollback, plus an optional reverse proxy. Switch branches with s, share a DB with an agent, check logs from your phone.
+  actions:
+    - theme: brand
+      text: Get Started
+      link: /getting-started
+    - theme: alt
+      text: View on GitHub
+      link: https://github.com/Naputt1/fog
+features:
+  - title: Branches side-by-side
+    details: Run fog dev on main and feature-x at once; s to switch in the TUI. Same branch can run twice — you and an agent share the DB without killing each other.
+  - title: Phone overview
+    details: Check status and live logs at http://<tailnet IP> from your phone — no DNS setup. Served by the host-global index server.
+  - title: One command per service
+    details: Each service in its own PTY with full ANSI color and scrollback. health_check, depends_on, and restart with R.
+  - title: Built-in proxy
+    details: Reverse proxy with request log and WebSocket support. Host-global Traefik router with wildcard *.acme DNS when you need it.
+  - title: Simple config
+    details: One fog.json with named scripts (fog dev). Ports templating, native_routes, worktree-aware sharing.
+  - title: Agentic-ready
+    details: Concurrent by default — human and agent run the same script on the same branch. See Agentic Worktrees.
 ---
-
-# fog
-
-**Terminal-based service orchestrator & reverse-proxy dashboard.**
-
-fog lets you define named *scripts* — each a set of local services and an optional
-reverse proxy — launch them simultaneously inside pseudo-terminals, view their
-real-time colored output with scrollback, and expose a proxy that routes traffic
-to them, all in a single terminal interface.
-
-<div style="margin: 2rem 0; text-align: center">
-  <a href="/fog/getting-started" style="display: inline-block; padding: 0.6rem 1.8rem; background: var(--vp-c-brand-1); color: #fff; border-radius: 8px; text-decoration: none; font-weight: 600;">Get Started</a>
-  <a href="https://github.com/Naputt1/fog" style="display: inline-block; padding: 0.6rem 1.8rem; margin-left: 0.8rem; border: 1px solid var(--vp-c-brand-1); color: var(--vp-c-brand-1); border-radius: 8px; text-decoration: none; font-weight: 600;">GitHub</a>
-</div>
-
-## Features
-
-- **Script-based profiles** — Define named profiles (e.g. `dev`, `infra`) that each select which services and proxy to run. `fog dev` launches only what that profile needs.
-- **Multi-service orchestration** — Spawn each service in its own PTY, with full VT100/ANSI color rendering and scrollback (up to 2000 lines, configurable).
-- **Built-in reverse proxy** — HTTP/1.1 and WebSocket proxy with a live request log showing method, path, status code, latency, and upstream target.
-- **Live sidebar** — Vertical sidebar with status indicators (● running, ● healthy, ○ stopped, ● unhealthy). Click to switch tabs.
-- **Mouse interaction** — Click tabs, scroll with the wheel, drag-select text (copied to system clipboard via OSC 52).
-- **Keyboard navigation** — Vim-style `j`/`k` tab switching, terminal input mode (`i`), restart services (`R`), open shell tabs (`t`).
-- **Configuration hot-reload** — Edit your config at runtime to update themes and proxy settings without restarting.
-- **Instance management** — `fog ls` lists running instances and their service status; `fog kill` gracefully shuts one down.
-- **Detached runs** — `fog <script> -d` starts a script in the background without the TUI (ideal for CI and AI agents), tees each service's output to `$TMPDIR/fog-<pid>.logs/`, and returns immediately; `fog logs <pid>` prints the captured output.
-- **TLS support** — Terminate TLS connections directly in the proxy using PEM certificates.
-- **Health checks** — Periodic TCP health checks per service with sidebar status indicators.

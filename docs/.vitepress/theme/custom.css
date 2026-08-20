@@ -1,0 +1,45 @@
+/* Fix "weide" — wide tables and ASCII diagrams overflow */
+
+/* Tables: enable horizontal scroll without breaking layout */
+.vp-doc table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  white-space: nowrap;
+  border-collapse: collapse;
+}
+.vp-doc th,
+.vp-doc td {
+  white-space: nowrap;
+}
+/* keep wrapped code inside tables readable */
+.vp-doc td code {
+  white-space: nowrap;
+}
+
+/* Code blocks: ensure scroll, not page bleed */
+.vp-doc div[class*="language-"] {
+  max-width: 100%;
+  overflow-x: auto;
+}
+.vp-doc pre {
+  overflow-x: auto;
+}
+
+/* ASCII diagrams in architecture — allow scroll */
+.vp-doc pre code {
+  word-break: normal;
+  overflow-wrap: normal;
+}
+
+/* Constrain content width on ultrawide — prevent "weide" hero stretch */
+.VPDoc.has-aside .content-container {
+  max-width: 860px;
+}
+
+/* VitePress home features: tighter gap on mobile */
+@media (max-width: 640px) {
+  .VPFeatures .items {
+    gap: 16px;
+  }
+}
