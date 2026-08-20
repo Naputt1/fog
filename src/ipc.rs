@@ -1131,7 +1131,9 @@ pub fn find_instances_with_status(
                 }
             }
             Err(_) => {
-                let _ = fs::remove_file(&path);
+                if !crate::process::is_pid_alive(pid) {
+                    let _ = fs::remove_file(&path);
+                }
             }
         }
     }
@@ -1163,7 +1165,9 @@ pub fn find_instances_any_branch(
                 }
             }
             Err(_) => {
-                let _ = fs::remove_file(&path);
+                if !crate::process::is_pid_alive(pid) {
+                    let _ = fs::remove_file(&path);
+                }
             }
         }
     }
