@@ -699,7 +699,10 @@ pub fn serve() -> io::Result<()> {
     serve_blocking(port, network)
 }
 
-/// Blocks forever serving the embedded SPA on loopback `port`.
+/// Blocks forever serving the embedded SPA on loopback `port` (127.0.0.1 only).
+/// Write paths (`POST /api/instances/*/services/*/action`, `/kill`, `/launch`,
+/// `/api/server/*`) are localhost-only by bind address — do not expose this
+/// port externally. Any local process can still call them.
 fn serve_blocking(port: u16, network: String) -> io::Result<()> {
     CURRENT_INDEX_PORT.store(port, std::sync::atomic::Ordering::SeqCst);
     // Record this server's pid for `maybe_terminate_if_no_instances`.
