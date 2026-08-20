@@ -944,7 +944,7 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
     // Publish allocated ports + native routes to IPC so the index server can synthesize
     // native ApiService entries for the Services UI (which otherwise only sees docker).
     {
-        *ipc_state.ports.lock().unwrap_or_else(|e| e.into_inner()) = port_map.clone();
+        *ipc_state.ports.lock().expect("mutex poisoned") = port_map.clone();
         let routes: Vec<fog::ipc::NativeRouteInfo> = config
             .native_routes
             .clone()
@@ -957,10 +957,7 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
                 path_prefix: r.path_prefix,
             })
             .collect();
-        *ipc_state
-            .native_routes
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = routes;
+        *ipc_state.native_routes.lock().expect("mutex poisoned") = routes;
     }
     // Bring up native Traefik routes for allocated ports (explicit only)
     if let Some(routes) = &config.native_routes {
@@ -1007,10 +1004,7 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
     // viewer (and anything else) can stream it. The handle is stable across
     // config hot-reloads, so wiring it once here is enough.
     if let Some(proxy) = runtime.proxy.as_ref() {
-        *ipc_state
-            .proxy_logs
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(proxy.logs_handle());
+        *ipc_state.proxy_logs.lock().expect("mutex poisoned") = Some(proxy.logs_handle());
     }
 
     // Services are up: release the owner lock so a later worktree switch can

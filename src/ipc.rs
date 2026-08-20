@@ -352,26 +352,10 @@ fn handle_connection(mut stream: UnixStream, state: Arc<IpcState>) {
 
     match req {
         Request::Status => {
-            let services = state
-                .services
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone();
-            let proxy = state
-                .proxy
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone();
-            let ports = state
-                .ports
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone();
-            let native_routes = state
-                .native_routes
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone();
+            let services = state.services.lock().expect("mutex poisoned").clone();
+            let proxy = state.proxy.lock().expect("mutex poisoned").clone();
+            let ports = state.ports.lock().expect("mutex poisoned").clone();
+            let native_routes = state.native_routes.lock().expect("mutex poisoned").clone();
             let resp = serde_json::to_string(&StatusResponse {
                 pid: std::process::id(),
                 script: state.script.clone(),
@@ -416,8 +400,8 @@ fn handle_connection(mut stream: UnixStream, state: Arc<IpcState>) {
             // Publish the handoff request BEFORE raising the kill flag: the app
             // loop acts as soon as it sees `kill_flag`, so the request must
             // already be visible for it to prepare and send the handoffs.
-            *state.reuse_skip.lock().unwrap_or_else(|e| e.into_inner()) = reuse.clone();
-            *state.handoff_req.lock().unwrap_or_else(|e| e.into_inner()) = Some(reuse);
+            *state.reuse_skip.lock().expect("mutex poisoned") = reuse.clone();
+            *state.handoff_req.lock().expect("mutex poisoned") = Some(reuse);
             state.kill_flag.store(true, Ordering::SeqCst);
             send_handoffs(stream, state);
         }
@@ -431,7 +415,7 @@ fn handle_connection(mut stream: UnixStream, state: Arc<IpcState>) {
             // can never complete this request before its completion signal is
             // cleared (the App is the only writer of the completion signal).
             state.control_done.store(false, Ordering::SeqCst);
-            *state.control_req.lock().unwrap_or_else(|e| e.into_inner()) =
+            *state.control_req.lock().expect("mutex poisoned") =
                 Some(ServiceActionRequest { name, action });
             // Wait for the App to execute the action, mirroring the wait loop
             // in `send_handoffs`. An empty result after the wait means the App
@@ -448,7 +432,7 @@ fn handle_connection(mut stream: UnixStream, state: Arc<IpcState>) {
             let resp = state
                 .control_result
                 .lock()
-                .unwrap_or_else(|e| e.into_inner())
+                .expect("mutex poisoned")
                 .take()
                 .unwrap_or(ControlResponse {
                     ok: false,
@@ -492,7 +476,7 @@ fn service_running(state: &IpcState, service: &str) -> bool {
     state
         .services
         .lock()
-        .unwrap_or_else(|e| e.into_inner())
+        .expect("mutex poisoned")
         .iter()
         .find(|s| s.name == service)
         .map(|s| s.running)
@@ -504,7 +488,7 @@ fn proxy_running(state: &IpcState) -> bool {
     state
         .proxy
         .lock()
-        .unwrap_or_else(|e| e.into_inner())
+        .expect("mutex poisoned")
         .as_ref()
         .map(|p| p.running)
         .unwrap_or(true)
@@ -588,18 +572,14 @@ fn stream_service_log(
 /// Streams the proxy's live request-log queue. See [`handle_logs`] for the
 /// wire format; each entry is rendered the way the TUI's proxy tab shows it.
 fn stream_proxy_log(stream: &mut UnixStream, state: &IpcState, tail: usize, follow: bool) {
-    let handle = state
-        .proxy_logs
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
+    let handle = state.proxy_logs.lock().expect("mutex poisoned").clone();
     let Some(queue) = handle else {
         let _ = writeln!(stream, "[fog] no proxy configured");
         return;
     };
 
     let (snapshot, total) = {
-        let q = queue.lock().unwrap_or_else(|e| e.into_inner());
+        let q = queue.lock().expect("mutex poisoned");
         let total = q.len();
         let skip = total.saturating_sub(tail);
         (q.iter().skip(skip).cloned().collect::<Vec<_>>(), total)
@@ -624,7 +604,7 @@ fn stream_proxy_log(stream: &mut UnixStream, state: &IpcState, tail: usize, foll
         if last_growth.elapsed() > LOG_FOLLOW_IDLE && !proxy_running(state) {
             break;
         }
-        let q = queue.lock().unwrap_or_else(|e| e.into_inner());
+        let q = queue.lock().expect("mutex poisoned");
         let total = q.len();
         if total > sent {
             last_growth = std::time::Instant::now();
@@ -762,12 +742,7 @@ fn send_handoffs(mut stream: UnixStream, state: Arc<IpcState>) {
         thread::sleep(Duration::from_millis(20));
     }
 
-    let mut results = mem::take(
-        &mut *state
-            .handoff_results
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()),
-    );
+    let mut results = mem::take(&mut *state.handoff_results.lock().expect("mutex poisoned"));
 
     let mut ok = true;
     while let Some(item) = results.pop() {
@@ -1531,12 +1506,7 @@ mod tests {
         // be published, then answer it.
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         let req = loop {
-            if let Some(req) = state
-                .control_req
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone()
-            {
+            if let Some(req) = state.control_req.lock().expect("mutex poisoned").clone() {
                 break req;
             }
             assert!(
@@ -1547,10 +1517,7 @@ mod tests {
         };
         assert_eq!(req.name, "web");
         assert_eq!(req.action, ServiceAction::Restart);
-        *state
-            .control_result
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(ControlResponse {
+        *state.control_result.lock().expect("mutex poisoned") = Some(ControlResponse {
             ok: true,
             reason: String::new(),
         });
@@ -1592,11 +1559,7 @@ mod tests {
         );
         // The request must still have been published for the App loop.
         assert!(
-            state
-                .control_req
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .is_some(),
+            state.control_req.lock().expect("mutex poisoned").is_some(),
             "control request must be published before the wait"
         );
 

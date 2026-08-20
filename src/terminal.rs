@@ -622,7 +622,7 @@ impl Terminal {
     pub fn spawn_error(name: String, error: String, scrollback: usize) -> Self {
         let parser = Arc::new(Mutex::new(vt100::Parser::new(24, 80, scrollback)));
         {
-            let mut p = parser.lock().unwrap_or_else(|e| e.into_inner());
+            let mut p = parser.lock().expect("mutex poisoned");
             p.screen_mut().set_size(24, 80);
             p.process(error.as_bytes());
         }
@@ -677,7 +677,7 @@ impl Terminal {
         let message = format!("⏳ waiting for: {}", deps.join(", "));
         let parser = Arc::new(Mutex::new(vt100::Parser::new(24, 80, scrollback)));
         {
-            let mut p = parser.lock().unwrap_or_else(|e| e.into_inner());
+            let mut p = parser.lock().expect("mutex poisoned");
             p.screen_mut().set_size(24, 80);
             p.process(message.as_bytes());
         }
@@ -736,7 +736,7 @@ impl Terminal {
             format!("♻ reusing already-running '{name}'; start skipped (press R to take over)");
         let parser = Arc::new(Mutex::new(vt100::Parser::new(24, 80, scrollback)));
         {
-            let mut p = parser.lock().unwrap_or_else(|e| e.into_inner());
+            let mut p = parser.lock().expect("mutex poisoned");
             p.screen_mut().set_size(24, 80);
             p.process(message.as_bytes());
         }
@@ -806,7 +806,7 @@ impl Terminal {
             .and_then(|dir| open_log_file(dir, &name).ok());
         let parser = Arc::new(Mutex::new(vt100::Parser::new(24, INITIAL_COLS, scrollback)));
         {
-            let mut p = parser.lock().unwrap_or_else(|e| e.into_inner());
+            let mut p = parser.lock().expect("mutex poisoned");
             p.process(
                 format!("\x1b[36m♻ adopted from instance {pid} — streaming live output\x1b[0m\r\n")
                     .as_bytes(),
@@ -944,7 +944,7 @@ impl Terminal {
     /// # Errors
     /// Returns an error if the PTY could not be opened or the shell could not be spawned.
     pub fn start(&mut self, path: &str, cmd: &str) -> io::Result<()> {
-        *self.health_status.lock().unwrap_or_else(|e| e.into_inner()) = HealthStatus::Unknown;
+        *self.health_status.lock().expect("mutex poisoned") = HealthStatus::Unknown;
         self.spawn_into(path, cmd)
     }
 
@@ -953,7 +953,7 @@ impl Terminal {
         if self.health_checks.is_empty() {
             return !self.stopped && self.process_running;
         }
-        *self.health_status.lock().unwrap_or_else(|e| e.into_inner()) == HealthStatus::Healthy
+        *self.health_status.lock().expect("mutex poisoned") == HealthStatus::Healthy
     }
 
     fn spawn_into(&mut self, path: &str, cmd: &str) -> io::Result<()> {
@@ -1050,7 +1050,7 @@ impl Terminal {
 
     /// Returns the total number of lines in both scrollback and visible area.
     pub fn total_lines(&self) -> usize {
-        let mut parser = self.parser.lock().unwrap_or_else(|e| e.into_inner());
+        let mut parser = self.parser.lock().expect("mutex poisoned");
         let screen = parser.screen_mut();
         let (vis_rows, _) = screen.size();
         let sb = scrollback_len(screen);
@@ -1077,7 +1077,7 @@ impl Terminal {
             return (cached_lines.clone(), self.total_lines());
         }
 
-        let mut parser = self.parser.lock().unwrap_or_else(|e| e.into_inner());
+        let mut parser = self.parser.lock().expect("mutex poisoned");
         let screen = parser.screen_mut();
         let (vis_rows, cols) = screen.size();
         let sb = scrollback_len(screen);
@@ -1159,7 +1159,7 @@ impl Terminal {
 
     /// Returns all lines (scrollback + visible) as plain text strings.
     pub fn get_all_lines(&self) -> Vec<String> {
-        let mut parser = self.parser.lock().unwrap_or_else(|e| e.into_inner());
+        let mut parser = self.parser.lock().expect("mutex poisoned");
         let screen = parser.screen_mut();
         let (vis_rows, cols) = screen.size();
         let sb = scrollback_len(screen);
@@ -1189,7 +1189,7 @@ impl Terminal {
 
     /// Returns the cursor position `(row, col)` if the cursor is visible.
     pub fn cursor_position(&self) -> Option<(u16, u16)> {
-        let parser = self.parser.lock().unwrap_or_else(|e| e.into_inner());
+        let parser = self.parser.lock().expect("mutex poisoned");
         let screen = parser.screen();
         if screen.hide_cursor() {
             return None;
@@ -1231,7 +1231,7 @@ impl Terminal {
                 pixel_height: 0,
             });
         }
-        let mut p = self.parser.lock().unwrap_or_else(|e| e.into_inner());
+        let mut p = self.parser.lock().expect("mutex poisoned");
         let (cur_rows, cur_cols) = p.screen().size();
         // Grow-only width: shrinking the vt100 screen truncates every visible
         // and scrollback row irreversibly, so text cut at a narrow width never
@@ -1386,14 +1386,14 @@ impl Terminal {
 
     /// Returns the current health status.
     pub fn get_health_status(&self) -> HealthStatus {
-        *self.health_status.lock().unwrap_or_else(|e| e.into_inner())
+        *self.health_status.lock().expect("mutex poisoned")
     }
 
     /// Sets the current health status. Used to seed a reused terminal with
     /// `Healthy` right after a successful startup probe so it does not flicker
     /// as stopped until the first background check runs.
     pub fn set_health_status(&self, s: HealthStatus) {
-        *self.health_status.lock().unwrap_or_else(|e| e.into_inner()) = s;
+        *self.health_status.lock().expect("mutex poisoned") = s;
     }
 
     /// Runs the configured health checks once, immediately, and updates the
@@ -1424,7 +1424,7 @@ impl Terminal {
     /// state changes are visible in the tab without writing to stderr (which
     /// would corrupt the raw-mode TUI) or to the process PTY.
     fn write_to_screen(&self, message: &str) {
-        let mut parser = self.parser.lock().unwrap_or_else(|e| e.into_inner());
+        let mut parser = self.parser.lock().expect("mutex poisoned");
         parser.process(message.as_bytes());
         *self.line_cache.borrow_mut() = None;
     }
@@ -1490,14 +1490,14 @@ impl Terminal {
         // Reused services have no owned process; their state is driven by
         // health checks (or assumed up when none are configured).
         if self.reused {
-            let healthy = *self.health_status.lock().unwrap_or_else(|e| e.into_inner())
-                == HealthStatus::Healthy;
+            let healthy =
+                *self.health_status.lock().expect("mutex poisoned") == HealthStatus::Healthy;
             let up = self.health_checks.is_empty() || healthy;
             self.process_running = up;
             self.stopped = !up;
             return;
         }
-        if *self.health_status.lock().unwrap_or_else(|e| e.into_inner()) == HealthStatus::Pending {
+        if *self.health_status.lock().expect("mutex poisoned") == HealthStatus::Pending {
             return;
         }
         if let Some(ref handler) = self.handler
@@ -1549,8 +1549,7 @@ impl Terminal {
         if since.elapsed() < self.reuse_grace {
             return Ok(());
         }
-        let healthy =
-            *self.health_status.lock().unwrap_or_else(|e| e.into_inner()) == HealthStatus::Healthy;
+        let healthy = *self.health_status.lock().expect("mutex poisoned") == HealthStatus::Healthy;
         if healthy {
             return Ok(());
         }
@@ -2238,7 +2237,7 @@ mod tests {
         // shrink target, so it would be truncated by a shrink-to-fit resize.
         let long_line = format!("ERROR {}", "x".repeat(70));
         {
-            let mut p = t.parser.lock().unwrap_or_else(|e| e.into_inner());
+            let mut p = t.parser.lock().expect("mutex poisoned");
             // Clear the header spawn_reused wrote so the line sits alone on row 0.
             p.process(b"\x1b[2J\x1b[H");
             p.process(long_line.as_bytes());
@@ -2263,22 +2262,12 @@ mod tests {
     fn test_resize_height_tracks_visible_area() {
         let mut t = Terminal::spawn_reused("svc".into(), ".".into(), "true".into(), 100);
         t.resize(80, 30);
-        let (rows, cols) = t
-            .parser
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .screen()
-            .size();
+        let (rows, cols) = t.parser.lock().expect("mutex poisoned").screen().size();
         assert_eq!(rows, 30);
         assert_eq!(cols, 80);
 
         t.resize(50, 20);
-        let (rows, cols) = t
-            .parser
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .screen()
-            .size();
+        let (rows, cols) = t.parser.lock().expect("mutex poisoned").screen().size();
         assert_eq!(rows, 20, "height must track the visible area");
         assert_eq!(cols, 80, "width must never shrink");
     }
@@ -2301,7 +2290,7 @@ mod tests {
 
         let mut t = Terminal::spawn_reused("svc".into(), ".".into(), "true".into(), 100);
         {
-            let mut p = t.parser.lock().unwrap_or_else(|e| e.into_inner());
+            let mut p = t.parser.lock().expect("mutex poisoned");
             // Screen is 21 cols; the render area is only 20 wide (scrollbar).
             p.screen_mut().set_size(3, 21);
             p.process(b"\x1b[2J\x1b[H");

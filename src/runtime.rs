@@ -13,6 +13,38 @@ pub struct Runtime {
     pub proxy: Option<ProxyInstance>,
 }
 
+/// Options for building a runtime with explicit ports and branch.
+/// Bundles the many parameters of `build_with_ports` to avoid
+/// `clippy::too_many_arguments`.
+pub struct BuildOpts<'a> {
+    pub script: &'a ScriptConfig,
+    pub script_name: &'a str,
+    pub config_dir: &'a Path,
+    pub project: Option<String>,
+    pub save_logs: bool,
+    pub scrollback: usize,
+    pub log_dir: Option<std::path::PathBuf>,
+    pub adopted: &'a mut HashMap<String, HandoffItem>,
+    pub ports: &'a crate::ports::PortMap,
+    pub branch_override: Option<String>,
+}
+
+/// Options for spawning a checked terminal.
+pub struct TerminalSpawnOpts {
+    pub path: String,
+    pub cmd: String,
+    pub name: String,
+    pub scrollback: usize,
+    pub save_logs: bool,
+    pub log_dir: Option<std::path::PathBuf>,
+    pub health_checks: Vec<HealthCheckConfig>,
+    pub shutdown_cmd: Option<String>,
+    pub branch: Option<String>,
+    pub project: Option<String>,
+    pub script: String,
+    pub injected_env: HashMap<String, String>,
+}
+
 /// Resolves service startup order using topological sort (Kahn's algorithm).
 /// Returns indices into `entries` in dependency order, or an error if there
 /// is a cycle or a dependency references an unknown service name.
@@ -161,29 +193,45 @@ fn spawn_checked_terminal(
     script: &str,
     injected_env: HashMap<String, String>,
 ) -> Terminal {
-    match Terminal::spawn_command(
-        path,
-        cmd,
-        name.to_string(),
+    spawn_checked_terminal_with_opts(TerminalSpawnOpts {
+        path: path.to_string(),
+        cmd: cmd.to_string(),
+        name: name.to_string(),
         scrollback,
+        save_logs,
         log_dir,
+        health_checks,
+        shutdown_cmd,
         branch,
+        project,
+        script: script.to_string(),
         injected_env,
+    })
+}
+
+/// Preferred version using `TerminalSpawnOpts` to avoid `clippy::too_many_arguments`.
+pub fn spawn_checked_terminal_with_opts(opts: TerminalSpawnOpts) -> Terminal {
+    match Terminal::spawn_command(
+        &opts.path,
+        &opts.cmd,
+        opts.name.clone(),
+        opts.scrollback,
+        opts.log_dir,
+        opts.branch,
+        opts.injected_env,
     ) {
         Ok(mut t) => {
-            t.save_logs = save_logs;
-            t.health_checks = health_checks;
-            t.shutdown_cmd = shutdown_cmd;
-            t.project = project;
-            t.script = script.to_string();
+            t.save_logs = opts.save_logs;
+            t.health_checks = opts.health_checks;
+            t.shutdown_cmd = opts.shutdown_cmd;
+            t.project = opts.project;
+            t.script = opts.script;
             t.start_health_checks();
             t
         }
-        Err(e) => Terminal::spawn_error(
-            name.to_string(),
-            format!("Failed to spawn: {e}"),
-            scrollback,
-        ),
+        Err(e) => {
+            Terminal::spawn_error(opts.name, format!("Failed to spawn: {e}"), opts.scrollback)
+        }
     }
 }
 
@@ -330,6 +378,34 @@ pub fn build_with_ports(
     ports: &crate::ports::PortMap,
     branch_override: Option<String>,
 ) -> Result<Runtime, String> {
+    build_with_opts(BuildOpts {
+        script,
+        script_name,
+        config_dir,
+        project,
+        save_logs,
+        scrollback,
+        log_dir,
+        adopted,
+        ports,
+        branch_override,
+    })
+}
+
+/// Preferred entry point using `BuildOpts` to avoid `clippy::too_many_arguments`.
+pub fn build_with_opts(opts: BuildOpts) -> Result<Runtime, String> {
+    let BuildOpts {
+        script,
+        script_name,
+        config_dir,
+        project,
+        save_logs,
+        scrollback,
+        log_dir,
+        adopted,
+        ports,
+        branch_override,
+    } = opts;
     // Resolve branch: override from caller (allocated ports context) wins,
     // otherwise infer from git worktree.
     let branch = branch_override.or_else(|| resolve_branch(config_dir));

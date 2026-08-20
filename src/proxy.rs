@@ -281,9 +281,8 @@ impl ProxyInstance {
                                             TokioIo::new(Box::new(tls_stream) as Box<dyn IoBox>)
                                         }
                                         Err(e) => {
-                                            let mut lk = logs_for_svc
-                                                .lock()
-                                                .unwrap_or_else(|e| e.into_inner());
+                                            let mut lk =
+                                                logs_for_svc.lock().expect("mutex poisoned");
                                             lk.push_back(LogEntry {
                                                 method: "ERR".into(),
                                                 path: format!("TLS accept failed: {}", e),
@@ -352,7 +351,7 @@ impl ProxyInstance {
     }
 
     pub fn get_logs(&self) -> Vec<LogEntry> {
-        let lk = self.logs.lock().unwrap_or_else(|e| e.into_inner());
+        let lk = self.logs.lock().expect("mutex poisoned");
         lk.iter().cloned().collect()
     }
 
@@ -366,7 +365,7 @@ impl ProxyInstance {
     /// Number of log entries matching the given filter (empty filter = all),
     /// used to keep the scrollbar in sync with what the renderer displays.
     pub fn filtered_log_len(&self, filter: &str) -> usize {
-        let lk = self.logs.lock().unwrap_or_else(|e| e.into_inner());
+        let lk = self.logs.lock().expect("mutex poisoned");
         if filter.is_empty() {
             return lk.len();
         }

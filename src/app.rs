@@ -150,6 +150,23 @@ pub struct App {
     ipc_state: Arc<IpcState>,
 }
 
+/// Options for creating an `App` without `clippy::too_many_arguments`.
+pub struct AppCreateOpts {
+    pub items: Vec<Terminal>,
+    pub pending_services: Vec<PendingService>,
+    pub proxy: Option<ProxyInstance>,
+    pub sigint: Arc<AtomicBool>,
+    pub scrollback: usize,
+    pub sidebar_min: u16,
+    pub sidebar_max: u16,
+    pub theme: Theme,
+    pub config_path: std::path::PathBuf,
+    pub config_rx: std::sync::mpsc::Receiver<()>,
+    pub ipc_state: Arc<IpcState>,
+    pub config_rel: PathBuf,
+    pub save_logs: bool,
+}
+
 impl App {
     /// Creates a new [`App`] with the given terminals, optional proxy, and SIGINT flag.
     ///
@@ -176,6 +193,40 @@ impl App {
         config_rel: PathBuf,
         save_logs: bool,
     ) -> Self {
+        Self::new_with_opts(AppCreateOpts {
+            items,
+            pending_services,
+            proxy,
+            sigint,
+            scrollback,
+            sidebar_min,
+            sidebar_max,
+            theme,
+            config_path,
+            config_rx,
+            ipc_state,
+            config_rel,
+            save_logs,
+        })
+    }
+
+    /// Preferred constructor using `AppCreateOpts`.
+    pub fn new_with_opts(opts: AppCreateOpts) -> Self {
+        let AppCreateOpts {
+            items,
+            pending_services,
+            proxy,
+            sigint,
+            scrollback,
+            sidebar_min,
+            sidebar_max,
+            theme,
+            config_path,
+            config_rx,
+            ipc_state,
+            config_rel,
+            save_logs,
+        } = opts;
         let (tabs, proxy_tab_index) = Self::build_tabs(
             &items,
             &pending_services,
@@ -301,7 +352,7 @@ impl App {
             .ipc_state
             .handoff_req
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .expect("mutex poisoned")
             .clone();
         let Some(names) = req else {
             return;
@@ -318,7 +369,7 @@ impl App {
             .ipc_state
             .handoff_results
             .lock()
-            .unwrap_or_else(|e| e.into_inner()) = results;
+            .expect("mutex poisoned") = results;
         // Signal the IPC thread that the handoffs are ready to send, so it
         // never sends an empty set before we have prepared ours.
         self.ipc_state
@@ -374,7 +425,7 @@ impl App {
             .ipc_state
             .handoff_req
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .expect("mutex poisoned")
             .is_some()
         {
             let deadline = std::time::Instant::now() + Duration::from_secs(30);
@@ -393,7 +444,7 @@ impl App {
                         .ipc_state
                         .handoff_results
                         .lock()
-                        .unwrap_or_else(|e| e.into_inner()),
+                        .expect("mutex poisoned"),
                 )
                 .into_iter()
                 .map(|h| h.fd)
@@ -452,7 +503,7 @@ impl App {
             .ipc_state
             .reuse_skip
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .expect("mutex poisoned")
             .clone();
         for item in &mut self.items {
             if reuse_skip.contains(&item.name) {
@@ -982,11 +1033,7 @@ impl App {
         // Publish new ports/routes to IPC before ensuring Traefik, so the index UI
         // can synthesize native entries for the Services page.
         {
-            *self
-                .ipc_state
-                .ports
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()) = port_map.clone();
+            *self.ipc_state.ports.lock().expect("mutex poisoned") = port_map.clone();
             let routes: Vec<crate::ipc::NativeRouteInfo> = config
                 .native_routes
                 .clone()
@@ -999,11 +1046,7 @@ impl App {
                     path_prefix: r.path_prefix,
                 })
                 .collect();
-            *self
-                .ipc_state
-                .native_routes
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()) = routes;
+            *self.ipc_state.native_routes.lock().expect("mutex poisoned") = routes;
         }
         // Clean up stale native routes from the previous branch before ensuring the new ones
         let prev_branch = runtime::resolve_branch(
@@ -1507,11 +1550,7 @@ impl App {
     }
 
     fn update_shared_state(&self) {
-        let mut services = self
-            .ipc_state
-            .services
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut services = self.ipc_state.services.lock().expect("mutex poisoned");
         services.clear();
         for item in &self.items {
             services.push(ipc::ServiceStatus {
@@ -1520,11 +1559,7 @@ impl App {
                 health: format!("{:?}", item.get_health_status()).to_lowercase(),
             });
         }
-        let mut proxy = self
-            .ipc_state
-            .proxy
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut proxy = self.ipc_state.proxy.lock().expect("mutex poisoned");
         *proxy = self.proxy.as_ref().map(|p| ipc::ProxyStatus {
             running: p.is_running(),
             port: p.port,
@@ -1541,7 +1576,7 @@ impl App {
             .ipc_state
             .control_req
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .expect("mutex poisoned")
             .take();
         let Some(req) = req else {
             return;
@@ -1551,7 +1586,7 @@ impl App {
             .ipc_state
             .control_result
             .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(resp);
+            .expect("mutex poisoned") = Some(resp);
         self.ipc_state.control_done.store(true, Ordering::SeqCst);
     }
 
