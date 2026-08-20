@@ -971,25 +971,13 @@ impl App {
         } else {
             std::collections::HashMap::new()
         };
-        if config.ports.is_none() {
-            let has_ports_template = script.service.as_ref().is_some_and(|entries| {
-                entries.iter().any(|e| {
-                    crate::ports::has_template(&e.cmd)
-                        || e.shutdown_cmd
-                            .as_ref()
-                            .is_some_and(|s| crate::ports::has_template(s))
-                        || e.env
-                            .as_ref()
-                            .is_some_and(|m| m.values().any(|v| crate::ports::has_template(v)))
-                })
-            });
-            if has_ports_template {
-                self.errors.push(
-                    "switch worktree: config uses ${ports.*} but top-level 'ports' is not defined"
-                        .to_string(),
-                );
-                return;
-            }
+        if let Err(e) = crate::ports::ensure_ports_defined(
+            config.ports.as_ref(),
+            script,
+            config.native_routes.as_ref(),
+        ) {
+            self.errors.push(format!("switch worktree: {e}"));
+            return;
         }
         // Publish new ports/routes to IPC before ensuring Traefik, so the index UI
         // can synthesize native entries for the Services page.

@@ -71,8 +71,10 @@ pub fn allocate_ports(specs: &HashMap<String, u16>) -> Result<PortMap, String> {
     }
 
     // Holders dropped here; ports may be reclaimed by OS until service binds.
-    // This is the classic TOCTOU: acceptable for dev tools; services that need
-    // strict guarantee should bind themselves to $PORT immediately on start.
+    // This is the classic TOCTOU for dev tools. Mitigation: services should
+    // bind to $PORT immediately on start and fail fast on EADDRINUSE so the
+    // user can retry `fog` (which re-allocates). For strict guarantees,
+    // services should accept the port via env and bind before any other work.
     drop(_holders);
     Ok(out)
 }
@@ -146,6 +148,76 @@ fn port_keys(ports: &PortMap) -> String {
 /// Returns `true` if `s` contains any `${...}` template.
 pub fn has_template(s: &str) -> bool {
     s.contains("${")
+}
+
+/// Validates native route ports against the allocated port map and branch.
+/// Mirrors the checks previously duplicated in `main.rs` and `runtime.rs`.
+pub fn validate_native_routes(
+    routes: &[crate::config::NativeRouteConfig],
+    port_map: &PortMap,
+    branch: Option<&str>,
+) -> Result<(), String> {
+    for r in routes {
+        if r.port.contains("${ports.") && r.port.contains('}') {
+            resolve_template(&r.port, port_map, branch).map_err(|e| {
+                format!(
+                    "native_routes port template error for service '{}': {}",
+                    r.service, e
+                )
+            })?;
+        } else if r.port.parse::<u16>().is_ok() {
+            // literal port — ok
+        } else if r.port.trim().is_empty() {
+            return Err(format!(
+                "native_routes for service '{}' has invalid port '{}'",
+                r.service, r.port
+            ));
+        } else if r.port.contains("${") {
+            return Err(format!(
+                "native_routes for service '{}' port '{}' must be '${{ports.<name>}}' or literal port",
+                r.service, r.port
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Ensures `ports` top-level is defined when any template references `${ports.*}`.
+/// Checks service `cmd`/`shutdown_cmd`/`env`/`health_check`, proxy routes, and
+/// native routes. Returns `Err` with the same message previously duplicated in
+/// `main.rs` and `runtime.rs`.
+pub fn ensure_ports_defined(
+    config_ports: Option<&std::collections::HashMap<String, u16>>,
+    script: &crate::config::ScriptConfig,
+    native_routes: Option<&Vec<crate::config::NativeRouteConfig>>,
+) -> Result<(), String> {
+    if config_ports.is_some() {
+        return Ok(());
+    }
+    let has_template = script.service.as_ref().is_some_and(|entries| {
+        entries.iter().any(|e| {
+            has_template(&e.cmd)
+                || e.shutdown_cmd.as_ref().is_some_and(|s| has_template(s))
+                || e.env
+                    .as_ref()
+                    .is_some_and(|m| m.values().any(|v| has_template(v)))
+                || e.health_check.as_ref().is_some_and(|hc| match hc {
+                    crate::config::HealthCheckSpec::Single(c) => has_template(&c.target),
+                    crate::config::HealthCheckSpec::Multiple(v) => {
+                        v.iter().any(|c| has_template(&c.target))
+                    }
+                })
+        })
+    }) || script.proxy.as_ref().is_some_and(|p| {
+        p.routes
+            .iter()
+            .any(|r| has_template(&r.upstream) || r.host.as_ref().is_some_and(|h| has_template(h)))
+    }) || native_routes
+        .is_some_and(|routes| routes.iter().any(|r| has_template(&r.port)));
+    if has_template {
+        return Err("config uses ${ports.*} but top-level 'ports' is not defined".to_string());
+    }
+    Ok(())
 }
 
 #[cfg(test)]

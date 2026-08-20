@@ -354,46 +354,13 @@ pub fn build_with_ports(
     let entries: Vec<ConfigEntry> = if ports.is_empty() && branch.is_none() {
         raw_entries
     } else {
-        let mut out = Vec::with_capacity(raw_entries.len());
-        for e in &raw_entries {
-            // If the entry contains any template but ports is empty, that's the
-            // explicit-not-allowed case: user referenced ${ports.*} without top-level ports.
-            if !ports.is_empty() || !crate::ports::has_template(&e.cmd) {
-                out.push(resolve_service_templates(e, ports, branch.as_deref())?);
-            } else {
-                // Detect explicit violation: template without ports map
-                if crate::ports::has_template(&e.cmd)
-                    || e.shutdown_cmd
-                        .as_ref()
-                        .is_some_and(|s| crate::ports::has_template(s))
-                    || e.env
-                        .as_ref()
-                        .is_some_and(|m| m.values().any(|v| crate::ports::has_template(v)))
-                {
-                    return Err(format!(
-                        "service '{}' uses ${{ports.*}} but top-level 'ports' is not defined",
-                        e.name.as_deref().unwrap_or("?")
-                    ));
-                }
-                // Health check target also
-                if let Some(hc) = &e.health_check {
-                    let has_hc = match hc {
-                        HealthCheckSpec::Single(c) => crate::ports::has_template(&c.target),
-                        HealthCheckSpec::Multiple(v) => {
-                            v.iter().any(|c| crate::ports::has_template(&c.target))
-                        }
-                    };
-                    if has_hc {
-                        return Err(format!(
-                            "service '{}' uses ${{ports.*}} but top-level 'ports' is not defined",
-                            e.name.as_deref().unwrap_or("?")
-                        ));
-                    }
-                }
-                out.push(e.clone());
-            }
+        if ports.is_empty() {
+            crate::ports::ensure_ports_defined(None, script, None)?;
         }
-        out
+        raw_entries
+            .iter()
+            .map(|e| resolve_service_templates(e, ports, branch.as_deref()))
+            .collect::<Result<Vec<_>, _>>()?
     };
     let dep_order = resolve_dep_order(&entries)?;
 
