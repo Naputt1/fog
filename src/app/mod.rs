@@ -31,58 +31,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::{io, time::Duration};
 
+mod switch;
+use switch::SwitchPopup;
+
 enum Mode {
     Normal,
     TerminalInput,
     ProxyFilter,
-}
-
-/// An open worktree-switch popup: the repository's worktrees plus an
-/// incremental fuzzy filter, a selected row, live-branch markers, and a
-/// transient status line. `f`-search mode feeds the filter (Esc returns to
-/// browsing); `d` terminates the selected branch's live instances.
-struct SwitchPopup {
-    worktrees: Vec<Worktree>,
-    filter: String,
-    selected: usize,
-    searching: bool,
-    /// Branches that currently have a live fog instance serving them,
-    /// rendered with a green asterisk.
-    running: Vec<String>,
-    /// Transient status message (e.g. the terminate outcome), cleared by the
-    /// next key press.
-    status: Option<String>,
-}
-
-impl SwitchPopup {
-    /// The worktrees matching the current filter, in original order.
-    fn matches(&self) -> Vec<Worktree> {
-        if self.filter.is_empty() {
-            return self.worktrees.clone();
-        }
-        self.worktrees
-            .iter()
-            .filter(|w| {
-                subsequence_match(&w.label(), &self.filter)
-                    || subsequence_match(&w.path.to_string_lossy(), &self.filter)
-            })
-            .cloned()
-            .collect()
-    }
-}
-
-/// Case-insensitive subsequence test: every char of `needle` appears in
-/// `haystack` in order, not necessarily contiguously.
-fn subsequence_match(haystack: &str, needle: &str) -> bool {
-    let mut needle = needle.chars().flat_map(char::to_lowercase);
-    let mut expected = needle.next();
-    for c in haystack.chars().flat_map(char::to_lowercase) {
-        let Some(exp) = expected else { return true };
-        if c == exp {
-            expected = needle.next();
-        }
-    }
-    expected.is_none()
 }
 
 /// A service waiting for its dependencies to become ready.
