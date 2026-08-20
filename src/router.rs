@@ -181,7 +181,13 @@ fn default_dynamic_dir_for_config(cfg: &crate::config::Config) -> PathBuf {
 /// Sanitizes a string for use as a Traefik router/service name and filename.
 fn sanitize_name(s: &str) -> String {
     s.chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -206,21 +212,30 @@ pub fn ensure_native_routes(
         let host = match crate::ports::resolve_template(&r.host, ports, branch) {
             Ok(h) => h,
             Err(e) => {
-                messages.push(format!("⚠ native route for service '{}' host error: {}", r.service, e));
+                messages.push(format!(
+                    "⚠ native route for service '{}' host error: {}",
+                    r.service, e
+                ));
                 continue;
             }
         };
         let port_str = match crate::ports::resolve_template(&r.port, ports, branch) {
             Ok(p) => p,
             Err(e) => {
-                messages.push(format!("⚠ native route for service '{}' port error: {}", r.service, e));
+                messages.push(format!(
+                    "⚠ native route for service '{}' port error: {}",
+                    r.service, e
+                ));
                 continue;
             }
         };
         let port: u16 = match port_str.parse() {
             Ok(p) => p,
             Err(_) => {
-                messages.push(format!("⚠ native route for service '{}' has non-numeric port '{}'", r.service, port_str));
+                messages.push(format!(
+                    "⚠ native route for service '{}' has non-numeric port '{}'",
+                    r.service, port_str
+                ));
                 continue;
             }
         };
@@ -254,13 +269,21 @@ pub fn ensure_native_routes(
 "#
         );
         let file = dynamic_dir.join(format!("{}.toml", name));
-        let changed = fs::read_to_string(&file).map(|c| c != content).unwrap_or(true);
+        let changed = fs::read_to_string(&file)
+            .map(|c| c != content)
+            .unwrap_or(true);
         if changed {
             if let Err(e) = fs::write(&file, &content) {
-                messages.push(format!("⚠ could not write native route {}: {e}", file.display()));
+                messages.push(format!(
+                    "⚠ could not write native route {}: {e}",
+                    file.display()
+                ));
                 continue;
             }
-            messages.push(format!("  + native route {} -> host.docker.internal:{} for Host({})", r.service, port, host));
+            messages.push(format!(
+                "  + native route {} -> host.docker.internal:{} for Host({})",
+                r.service, port, host
+            ));
         }
     }
 
@@ -273,7 +296,9 @@ pub fn cleanup_native_routes(branch: Option<&str>, cfg: &crate::config::Config) 
     let prefix = branch
         .map(|b| format!("native-{}-", sanitize_name(b)))
         .unwrap_or_else(|| "native-".to_string());
-    let Ok(entries) = fs::read_dir(&dynamic_dir) else { return };
+    let Ok(entries) = fs::read_dir(&dynamic_dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
         if name.starts_with(&prefix) && name.ends_with(".toml") {

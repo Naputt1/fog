@@ -1369,11 +1369,19 @@ fn api_services(_network: &str) -> Response<RespBody> {
                 continue;
             }
             // Resolve host and port templates with this instance's PortMap+branch.
-            let host = match crate::ports::resolve_template(&route.host, &inst.ports, inst.branch.as_deref()) {
+            let host = match crate::ports::resolve_template(
+                &route.host,
+                &inst.ports,
+                inst.branch.as_deref(),
+            ) {
                 Ok(h) => h,
                 Err(_) => continue,
             };
-            let port_str = match crate::ports::resolve_template(&route.port, &inst.ports, inst.branch.as_deref()) {
+            let port_str = match crate::ports::resolve_template(
+                &route.port,
+                &inst.ports,
+                inst.branch.as_deref(),
+            ) {
                 Ok(p) => p,
                 Err(_) => continue,
             };
@@ -1388,10 +1396,15 @@ fn api_services(_network: &str) -> Response<RespBody> {
             } else {
                 format!("https://{}/", host)
             };
-            let health = health_map.get(route.service.as_str()).copied().unwrap_or("unknown");
+            let health = health_map
+                .get(route.service.as_str())
+                .copied()
+                .unwrap_or("unknown");
             // Avoid duplicating a docker entry that already covers this host (e.g. if a
             // service is both docker and native in different worktrees, keep both).
-            if list.iter().any(|e| e.service == route.service && e.worktree == worktree && e.project == project) {
+            if list.iter().any(|e| {
+                e.service == route.service && e.worktree == worktree && e.project == project
+            }) {
                 continue;
             }
             list.push(ApiService {
@@ -1418,7 +1431,9 @@ fn api_services(_network: &str) -> Response<RespBody> {
             }
             // Only show if this service used a port (heuristic: health target contains port or env PORT)
             // For now, show all running native services that are not docker and not already listed.
-            let already = list.iter().any(|e| e.service == svc.name && e.worktree == worktree && e.project == project);
+            let already = list
+                .iter()
+                .any(|e| e.service == svc.name && e.worktree == worktree && e.project == project);
             if already {
                 continue;
             }

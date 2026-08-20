@@ -963,7 +963,8 @@ impl App {
             match crate::ports::allocate_ports(specs) {
                 Ok(m) => m,
                 Err(e) => {
-                    self.errors.push(format!("switch worktree: port allocation: {e}"));
+                    self.errors
+                        .push(format!("switch worktree: port allocation: {e}"));
                     return;
                 }
             }
@@ -974,20 +975,30 @@ impl App {
             let has_ports_template = script.service.as_ref().is_some_and(|entries| {
                 entries.iter().any(|e| {
                     crate::ports::has_template(&e.cmd)
-                        || e.shutdown_cmd.as_ref().is_some_and(|s| crate::ports::has_template(s))
-                        || e.env.as_ref().is_some_and(|m| m.values().any(|v| crate::ports::has_template(v)))
+                        || e.shutdown_cmd
+                            .as_ref()
+                            .is_some_and(|s| crate::ports::has_template(s))
+                        || e.env
+                            .as_ref()
+                            .is_some_and(|m| m.values().any(|v| crate::ports::has_template(v)))
                 })
             });
             if has_ports_template {
-                self.errors
-                    .push("switch worktree: config uses ${ports.*} but top-level 'ports' is not defined".to_string());
+                self.errors.push(
+                    "switch worktree: config uses ${ports.*} but top-level 'ports' is not defined"
+                        .to_string(),
+                );
                 return;
             }
         }
         // Publish new ports/routes to IPC before ensuring Traefik, so the index UI
         // can synthesize native entries for the Services page.
         {
-            *self.ipc_state.ports.lock().unwrap_or_else(|e| e.into_inner()) = port_map.clone();
+            *self
+                .ipc_state
+                .ports
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = port_map.clone();
             let routes: Vec<crate::ipc::NativeRouteInfo> = config
                 .native_routes
                 .clone()
@@ -1000,7 +1011,11 @@ impl App {
                     path_prefix: r.path_prefix,
                 })
                 .collect();
-            *self.ipc_state.native_routes.lock().unwrap_or_else(|e| e.into_inner()) = routes;
+            *self
+                .ipc_state
+                .native_routes
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = routes;
         }
         // Clean up stale native routes from the previous branch before ensuring the new ones
         let prev_branch = runtime::resolve_branch(
@@ -1012,7 +1027,12 @@ impl App {
             crate::router::cleanup_native_routes(prev_branch.as_deref(), &config);
         }
         if let Some(routes) = &config.native_routes {
-            for msg in crate::router::ensure_native_routes(routes, &port_map, branch_for_ports.as_deref(), &config) {
+            for msg in crate::router::ensure_native_routes(
+                routes,
+                &port_map,
+                branch_for_ports.as_deref(),
+                &config,
+            ) {
                 self.errors.push(msg);
             }
         }

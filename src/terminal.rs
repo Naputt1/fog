@@ -2006,8 +2006,16 @@ mod tests {
 
     #[test]
     fn test_extract_handoff_live_process() {
-        let mut t =
-            Terminal::spawn_command(".", "echo hello-fog", "svc".into(), 100, None, None, Default::default()).unwrap();
+        let mut t = Terminal::spawn_command(
+            ".",
+            "echo hello-fog",
+            "svc".into(),
+            100,
+            None,
+            None,
+            Default::default(),
+        )
+        .unwrap();
         let handoff = t.extract_handoff().expect("live process should hand off");
         assert_eq!(handoff.name, "svc");
         assert!(handoff.pid > 0);

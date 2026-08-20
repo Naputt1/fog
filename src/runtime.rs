@@ -209,15 +209,15 @@ fn resolve_service_templates(
     }
     if let Some(cmd) = &e.shutdown_cmd {
         if crate::ports::has_template(cmd) {
-            e.shutdown_cmd = Some(
-                crate::ports::resolve_template(cmd, ports, branch).map_err(|err| {
+            e.shutdown_cmd = Some(crate::ports::resolve_template(cmd, ports, branch).map_err(
+                |err| {
                     format!(
                         "service '{}' shutdown_cmd template error: {}",
                         e.name.as_deref().unwrap_or("?"),
                         err
                     )
-                })?,
-            );
+                },
+            )?);
         }
     }
     if let Some(env) = &e.env {
@@ -243,8 +243,8 @@ fn resolve_service_templates(
         let resolve_one = |c: &HealthCheckConfig| -> Result<HealthCheckConfig, String> {
             let mut nc = c.clone();
             if crate::ports::has_template(&nc.target) {
-                nc.target = crate::ports::resolve_template(&nc.target, ports, branch)
-                    .map_err(|err| {
+                nc.target =
+                    crate::ports::resolve_template(&nc.target, ports, branch).map_err(|err| {
                         format!(
                             "service '{}' health_check.target template error: {}",
                             e.name.as_deref().unwrap_or("?"),
@@ -301,7 +301,18 @@ pub fn build(
     log_dir: Option<std::path::PathBuf>,
     adopted: &mut HashMap<String, HandoffItem>,
 ) -> Result<Runtime, String> {
-    build_with_ports(script, script_name, config_dir, project, save_logs, scrollback, log_dir, adopted, &HashMap::new(), None)
+    build_with_ports(
+        script,
+        script_name,
+        config_dir,
+        project,
+        save_logs,
+        scrollback,
+        log_dir,
+        adopted,
+        &HashMap::new(),
+        None,
+    )
 }
 
 /// Same as `build` but with explicit `ports` allocation and `branch` override.
@@ -356,8 +367,12 @@ pub fn build_with_ports(
             } else {
                 // Detect explicit violation: template without ports map
                 if crate::ports::has_template(&e.cmd)
-                    || e.shutdown_cmd.as_ref().is_some_and(|s| crate::ports::has_template(s))
-                    || e.env.as_ref().is_some_and(|m| m.values().any(|v| crate::ports::has_template(v)))
+                    || e.shutdown_cmd
+                        .as_ref()
+                        .is_some_and(|s| crate::ports::has_template(s))
+                    || e.env
+                        .as_ref()
+                        .is_some_and(|m| m.values().any(|v| crate::ports::has_template(v)))
                 {
                     return Err(format!(
                         "service '{}' uses ${{ports.*}} but top-level 'ports' is not defined",
@@ -368,7 +383,9 @@ pub fn build_with_ports(
                 if let Some(hc) = &e.health_check {
                     let has_hc = match hc {
                         HealthCheckSpec::Single(c) => crate::ports::has_template(&c.target),
-                        HealthCheckSpec::Multiple(v) => v.iter().any(|c| crate::ports::has_template(&c.target)),
+                        HealthCheckSpec::Multiple(v) => {
+                            v.iter().any(|c| crate::ports::has_template(&c.target))
+                        }
                     };
                     if has_hc {
                         return Err(format!(
@@ -582,39 +599,33 @@ pub fn build_with_ports(
         .map(|t| t.expect("all items should be filled"))
         .collect();
 
-    let proxy = script
-        .proxy
-        .clone()
-        .map(|mut pc| {
-            // Resolve upstream/host templates with ports+branch
-            for route in &mut pc.routes {
-                if crate::ports::has_template(&route.upstream) {
-                    route.upstream = crate::ports::resolve_template(
-                        &route.upstream,
-                        ports,
-                        branch.as_deref(),
-                    )
-                    .unwrap_or_else(|e| panic!("proxy upstream template error: {}", e));
-                }
-                if let Some(h) = &route.host {
-                    if crate::ports::has_template(h) {
-                        route.host = Some(
-                            crate::ports::resolve_template(h, ports, branch.as_deref())
-                                .unwrap_or_else(|e| panic!("proxy host template error: {}", e)),
-                        );
-                    }
+    let proxy = script.proxy.clone().map(|mut pc| {
+        // Resolve upstream/host templates with ports+branch
+        for route in &mut pc.routes {
+            if crate::ports::has_template(&route.upstream) {
+                route.upstream =
+                    crate::ports::resolve_template(&route.upstream, ports, branch.as_deref())
+                        .unwrap_or_else(|e| panic!("proxy upstream template error: {}", e));
+            }
+            if let Some(h) = &route.host {
+                if crate::ports::has_template(h) {
+                    route.host = Some(
+                        crate::ports::resolve_template(h, ports, branch.as_deref())
+                            .unwrap_or_else(|e| panic!("proxy host template error: {}", e)),
+                    );
                 }
             }
-            let routes: Vec<RouteEntry> = pc
-                .routes
-                .into_iter()
-                .map(|r| RouteEntry {
-                    path: r.path,
-                    host: r.host,
-                    upstream: r.upstream,
-                    ws: r.ws.unwrap_or(false),
-                })
-                .collect();
+        }
+        let routes: Vec<RouteEntry> = pc
+            .routes
+            .into_iter()
+            .map(|r| RouteEntry {
+                path: r.path,
+                host: r.host,
+                upstream: r.upstream,
+                ws: r.ws.unwrap_or(false),
+            })
+            .collect();
         let max_log_entries = pc.max_log_entries.unwrap_or(1000);
         let mut p = ProxyInstance::new(
             pc.port,

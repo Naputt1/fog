@@ -85,11 +85,7 @@ pub fn allocate_ports(specs: &HashMap<String, u16>) -> Result<PortMap, String> {
 ///
 /// Any `${ports.X}` where `X` not in `port_map` returns `Err`.
 /// Unknown atoms also error. Literal `${` without closing `}` errors.
-pub fn resolve_template(
-    s: &str,
-    ports: &PortMap,
-    branch: Option<&str>,
-) -> Result<String, String> {
+pub fn resolve_template(s: &str, ports: &PortMap, branch: Option<&str>) -> Result<String, String> {
     let mut out = String::with_capacity(s.len());
     let mut i = 0;
     let bytes = s.as_bytes();
@@ -116,9 +112,14 @@ fn resolve_atom(atom: &str, ports: &PortMap, branch: Option<&str>) -> Result<Str
         if name.is_empty() {
             return Err(format!("empty port name in '${{{}}}'", atom));
         }
-        let port = ports
-            .get(name)
-            .ok_or_else(|| format!("unknown port '{}' in '${{{}}}' (available: {})", name, atom, port_keys(ports)))?;
+        let port = ports.get(name).ok_or_else(|| {
+            format!(
+                "unknown port '{}' in '${{{}}}' (available: {})",
+                name,
+                atom,
+                port_keys(ports)
+            )
+        })?;
         return Ok(port.to_string());
     }
     if atom == "branch" || atom == "FOG_BRANCH" {
@@ -190,15 +191,27 @@ mod tests {
     #[test]
     fn test_resolve_simple() {
         let m = pm(&[("api", 1234), ("web", 5678)]);
-        assert_eq!(resolve_template("x=${ports.api}/y", &m, None).unwrap(), "x=1234/y");
-        assert_eq!(resolve_template("http://localhost:${ports.web}", &m, None).unwrap(), "http://localhost:5678");
+        assert_eq!(
+            resolve_template("x=${ports.api}/y", &m, None).unwrap(),
+            "x=1234/y"
+        );
+        assert_eq!(
+            resolve_template("http://localhost:${ports.web}", &m, None).unwrap(),
+            "http://localhost:5678"
+        );
     }
 
     #[test]
     fn test_resolve_branch() {
         let m = pm(&[]);
-        assert_eq!(resolve_template("${branch}.acme", &m, Some("main")).unwrap(), "main.acme");
-        assert_eq!(resolve_template("${FOG_BRANCH}", &m, Some("feat")).unwrap(), "feat");
+        assert_eq!(
+            resolve_template("${branch}.acme", &m, Some("main")).unwrap(),
+            "main.acme"
+        );
+        assert_eq!(
+            resolve_template("${FOG_BRANCH}", &m, Some("feat")).unwrap(),
+            "feat"
+        );
     }
 
     #[test]

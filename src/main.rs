@@ -904,7 +904,10 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
                     let _ = execute!(stdout(), LeaveAlternateScreen, DisableMouseCapture);
                     let _ = disable_raw_mode();
                 }
-                return Err(io::Error::new(io::ErrorKind::InvalidData, format!("error: {}", e)));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("error: {}", e),
+                ));
             }
         }
     } else {
@@ -917,12 +920,20 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
             if r.port.contains("${ports.") && r.port.contains('}') {
                 // Extract port names and check existence
                 // Use has_template + resolve attempt to surface error early
-                if let Err(e) = fog::ports::resolve_template(&r.port, &port_map, branch_for_ports.as_deref()) {
+                if let Err(e) =
+                    fog::ports::resolve_template(&r.port, &port_map, branch_for_ports.as_deref())
+                {
                     if !detached {
                         let _ = execute!(stdout(), LeaveAlternateScreen, DisableMouseCapture);
                         let _ = disable_raw_mode();
                     }
-                    return Err(io::Error::new(io::ErrorKind::InvalidData, format!("error: native_routes port template error for service '{}': {}", r.service, e)));
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "error: native_routes port template error for service '{}': {}",
+                            r.service, e
+                        ),
+                    ));
                 }
             } else if let Ok(n) = r.port.parse::<u16>() {
                 let _ = n;
@@ -931,13 +942,25 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
                     let _ = execute!(stdout(), LeaveAlternateScreen, DisableMouseCapture);
                     let _ = disable_raw_mode();
                 }
-                return Err(io::Error::new(io::ErrorKind::InvalidData, format!("error: native_routes for service '{}' has invalid port '{}'", r.service, r.port)));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "error: native_routes for service '{}' has invalid port '{}'",
+                        r.service, r.port
+                    ),
+                ));
             } else if r.port.contains("${") {
                 if !detached {
                     let _ = execute!(stdout(), LeaveAlternateScreen, DisableMouseCapture);
                     let _ = disable_raw_mode();
                 }
-                return Err(io::Error::new(io::ErrorKind::InvalidData, format!("error: native_routes for service '{}' port '{}' must be '${{ports.<name>}}' or literal port", r.service, r.port)));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "error: native_routes for service '{}' port '{}' must be '${{ports.<name>}}' or literal port",
+                        r.service, r.port
+                    ),
+                ));
             }
         }
     }
@@ -946,22 +969,39 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
         let has_ports_template = script.service.as_ref().is_some_and(|entries| {
             entries.iter().any(|e| {
                 fog::ports::has_template(&e.cmd)
-                    || e.shutdown_cmd.as_ref().is_some_and(|s| fog::ports::has_template(s))
-                    || e.env.as_ref().is_some_and(|m| m.values().any(|v| fog::ports::has_template(v)))
+                    || e.shutdown_cmd
+                        .as_ref()
+                        .is_some_and(|s| fog::ports::has_template(s))
+                    || e.env
+                        .as_ref()
+                        .is_some_and(|m| m.values().any(|v| fog::ports::has_template(v)))
                     || e.health_check.as_ref().is_some_and(|hc| match hc {
-                        fog::config::HealthCheckSpec::Single(c) => fog::ports::has_template(&c.target),
-                        fog::config::HealthCheckSpec::Multiple(v) => v.iter().any(|c| fog::ports::has_template(&c.target)),
+                        fog::config::HealthCheckSpec::Single(c) => {
+                            fog::ports::has_template(&c.target)
+                        }
+                        fog::config::HealthCheckSpec::Multiple(v) => {
+                            v.iter().any(|c| fog::ports::has_template(&c.target))
+                        }
                     })
             })
         }) || script.proxy.as_ref().is_some_and(|p| {
-            p.routes.iter().any(|r| fog::ports::has_template(&r.upstream) || r.host.as_ref().is_some_and(|h| fog::ports::has_template(h)))
-        }) || config.native_routes.as_ref().is_some_and(|routes| routes.iter().any(|r| fog::ports::has_template(&r.port)));
+            p.routes.iter().any(|r| {
+                fog::ports::has_template(&r.upstream)
+                    || r.host.as_ref().is_some_and(|h| fog::ports::has_template(h))
+            })
+        }) || config
+            .native_routes
+            .as_ref()
+            .is_some_and(|routes| routes.iter().any(|r| fog::ports::has_template(&r.port)));
         if has_ports_template {
             if !detached {
                 let _ = execute!(stdout(), LeaveAlternateScreen, DisableMouseCapture);
                 let _ = disable_raw_mode();
             }
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "error: config uses ${ports.*} but top-level 'ports' is not defined"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "error: config uses ${ports.*} but top-level 'ports' is not defined",
+            ));
         }
     }
     // Publish allocated ports + native routes to IPC so the index server can synthesize
@@ -980,11 +1020,19 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
                 path_prefix: r.path_prefix,
             })
             .collect();
-        *ipc_state.native_routes.lock().unwrap_or_else(|e| e.into_inner()) = routes;
+        *ipc_state
+            .native_routes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = routes;
     }
     // Bring up native Traefik routes for allocated ports (explicit only)
     if let Some(routes) = &config.native_routes {
-        for msg in fog::router::ensure_native_routes(routes, &port_map, branch_for_ports.as_deref(), &config) {
+        for msg in fog::router::ensure_native_routes(
+            routes,
+            &port_map,
+            branch_for_ports.as_deref(),
+            &config,
+        ) {
             eprintln!("{msg}");
         }
     }
