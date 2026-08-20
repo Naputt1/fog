@@ -479,14 +479,28 @@ fn build_upstream_uri(
 }
 
 fn forward_headers(incoming: &hyper::HeaderMap) -> hyper::HeaderMap {
+    // Headers listed in the Connection header are hop-by-hop per RFC 7230 §6.1
+    // and must be stripped alongside the fixed HOP_BY_HOP set.
+    let mut connection_tokens = std::collections::HashSet::new();
+    for v in incoming.get_all(hyper::header::CONNECTION).iter() {
+        if let Ok(s) = v.to_str() {
+            for token in s.split(',') {
+                let t = token.trim().to_ascii_lowercase();
+                if !t.is_empty() {
+                    connection_tokens.insert(t);
+                }
+            }
+        }
+    }
     let mut out = hyper::HeaderMap::new();
     for (key, value) in incoming.iter() {
-        let k = key.as_str().to_lowercase();
-        if !HOP_BY_HOP.contains(&k.as_str()) {
-            // `append` preserves multi-value headers (e.g. duplicate cookies),
-            // unlike `insert` which would collapse them to the last value.
-            out.append(key.clone(), value.clone());
+        let k = key.as_str().to_ascii_lowercase();
+        if HOP_BY_HOP.contains(&k.as_str()) || connection_tokens.contains(&k) {
+            continue;
         }
+        // `append` preserves multi-value headers (e.g. duplicate cookies),
+        // unlike `insert` which would collapse them to the last value.
+        out.append(key.clone(), value.clone());
     }
     out
 }
@@ -882,11 +896,25 @@ async fn handle_http(
 
             // Stream the upstream body through unchanged (SSE, long-polling and
             // large downloads work) and strip hop-by-hop response headers.
+            // Also strip headers listed in the upstream's Connection header.
+            let mut connection_tokens = std::collections::HashSet::new();
+            for v in parts.headers.get_all(hyper::header::CONNECTION).iter() {
+                if let Ok(s) = v.to_str() {
+                    for token in s.split(',') {
+                        let t = token.trim().to_ascii_lowercase();
+                        if !t.is_empty() {
+                            connection_tokens.insert(t);
+                        }
+                    }
+                }
+            }
             let mut resp_builder = Response::builder().status(parts.status);
             for (k, v) in &parts.headers {
-                if !is_hop_by_hop_response(k) {
-                    resp_builder = resp_builder.header(k.clone(), v.clone());
+                let k_lower = k.as_str().to_ascii_lowercase();
+                if is_hop_by_hop_response(k) || connection_tokens.contains(&k_lower) {
+                    continue;
                 }
+                resp_builder = resp_builder.header(k.clone(), v.clone());
             }
             let resp = resp_builder
                 .body(body.boxed_unsync())
