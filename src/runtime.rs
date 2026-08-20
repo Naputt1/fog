@@ -17,7 +17,7 @@ pub struct Runtime {
 /// Returns indices into `entries` in dependency order, or an error if there
 /// is a cycle or a dependency references an unknown service name.
 pub fn resolve_dep_order(entries: &[ConfigEntry]) -> Result<Vec<usize>, String> {
-    let name_to_idx: HashMap<&str, usize> = entries
+    let name_to_idx: HashMap<String, usize> = entries
         .iter()
         .enumerate()
         .map(|(i, e)| {
@@ -28,11 +28,7 @@ pub fn resolve_dep_order(entries: &[ConfigEntry]) -> Result<Vec<usize>, String> 
                     .to_string_lossy()
                     .into_owned()
             });
-            // Use leak to get a &'static str from the owned String — safe because
-            // entries live for the rest of the program and we only need the map
-            // during this function.
-            let leaked: &'static str = Box::leak(name.into_boxed_str());
-            (leaked, i)
+            (name, i)
         })
         .collect();
 
@@ -207,18 +203,18 @@ fn resolve_service_templates(
             )
         })?;
     }
-    if let Some(cmd) = &e.shutdown_cmd {
-        if crate::ports::has_template(cmd) {
-            e.shutdown_cmd = Some(crate::ports::resolve_template(cmd, ports, branch).map_err(
-                |err| {
-                    format!(
-                        "service '{}' shutdown_cmd template error: {}",
-                        e.name.as_deref().unwrap_or("?"),
-                        err
-                    )
-                },
-            )?);
-        }
+    if let Some(cmd) = &e.shutdown_cmd
+        && crate::ports::has_template(cmd)
+    {
+        e.shutdown_cmd = Some(crate::ports::resolve_template(cmd, ports, branch).map_err(
+            |err| {
+                format!(
+                    "service '{}' shutdown_cmd template error: {}",
+                    e.name.as_deref().unwrap_or("?"),
+                    err
+                )
+            },
+        )?);
     }
     if let Some(env) = &e.env {
         let mut resolved = HashMap::new();
@@ -252,18 +248,18 @@ fn resolve_service_templates(
                         )
                     })?;
             }
-            if let Some(f) = &nc.compose_file {
-                if crate::ports::has_template(f) {
-                    nc.compose_file = Some(
-                        crate::ports::resolve_template(f, ports, branch).map_err(|err| {
-                            format!(
-                                "service '{}' health_check.compose_file template error: {}",
-                                e.name.as_deref().unwrap_or("?"),
-                                err
-                            )
-                        })?,
-                    );
-                }
+            if let Some(f) = &nc.compose_file
+                && crate::ports::has_template(f)
+            {
+                nc.compose_file = Some(crate::ports::resolve_template(f, ports, branch).map_err(
+                    |err| {
+                        format!(
+                            "service '{}' health_check.compose_file template error: {}",
+                            e.name.as_deref().unwrap_or("?"),
+                            err
+                        )
+                    },
+                )?);
             }
             Ok(nc)
         };
@@ -599,45 +595,48 @@ pub fn build_with_ports(
         .map(|t| t.expect("all items should be filled"))
         .collect();
 
-    let proxy = script.proxy.clone().map(|mut pc| {
-        // Resolve upstream/host templates with ports+branch
-        for route in &mut pc.routes {
-            if crate::ports::has_template(&route.upstream) {
-                route.upstream =
-                    crate::ports::resolve_template(&route.upstream, ports, branch.as_deref())
-                        .unwrap_or_else(|e| panic!("proxy upstream template error: {}", e));
-            }
-            if let Some(h) = &route.host {
-                if crate::ports::has_template(h) {
+    let proxy = match script.proxy.clone() {
+        Some(mut pc) => {
+            // Resolve upstream/host templates with ports+branch
+            for route in &mut pc.routes {
+                if crate::ports::has_template(&route.upstream) {
+                    route.upstream =
+                        crate::ports::resolve_template(&route.upstream, ports, branch.as_deref())
+                            .map_err(|e| format!("proxy upstream template error: {e}"))?;
+                }
+                if let Some(h) = &route.host
+                    && crate::ports::has_template(h)
+                {
                     route.host = Some(
                         crate::ports::resolve_template(h, ports, branch.as_deref())
-                            .unwrap_or_else(|e| panic!("proxy host template error: {}", e)),
+                            .map_err(|e| format!("proxy host template error: {e}"))?,
                     );
                 }
             }
+            let routes: Vec<RouteEntry> = pc
+                .routes
+                .into_iter()
+                .map(|r| RouteEntry {
+                    path: r.path,
+                    host: r.host,
+                    upstream: r.upstream,
+                    ws: r.ws.unwrap_or(false),
+                })
+                .collect();
+            let max_log_entries = pc.max_log_entries.unwrap_or(1000);
+            let mut p = ProxyInstance::new(
+                pc.port,
+                pc.host,
+                routes,
+                max_log_entries,
+                pc.tls_cert,
+                pc.tls_key,
+            );
+            p.start();
+            Some(p)
         }
-        let routes: Vec<RouteEntry> = pc
-            .routes
-            .into_iter()
-            .map(|r| RouteEntry {
-                path: r.path,
-                host: r.host,
-                upstream: r.upstream,
-                ws: r.ws.unwrap_or(false),
-            })
-            .collect();
-        let max_log_entries = pc.max_log_entries.unwrap_or(1000);
-        let mut p = ProxyInstance::new(
-            pc.port,
-            pc.host,
-            routes,
-            max_log_entries,
-            pc.tls_cert,
-            pc.tls_key,
-        );
-        p.start();
-        p
-    });
+        None => None,
+    };
 
     Ok(Runtime {
         items,
