@@ -1,12 +1,11 @@
+#![allow(unused_imports)]
 use crate::proxy::LogEntry;
-#[allow(unused_imports)]
 use std::collections::VecDeque;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
-#[allow(unused_imports)]
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
