@@ -135,22 +135,20 @@ fn test_proxy_strips_connection_listed_request_headers() {
             let req = String::from_utf8_lossy(&buf[..n]).to_string();
             let lower = req.to_ascii_lowercase();
             // Parse header lines to avoid matching token inside Connection value.
-            let has_x_custom = lower
-                .split("\r\n")
-                .any(|l| l.starts_with("x-custom:"));
-            let has_x_keep = lower
-                .split("\r\n")
-                .any(|l| l.starts_with("x-keep:"));
-            let has_connection = lower
-                .split("\r\n")
-                .any(|l| l.starts_with("connection:"));
-            let has_keep_alive_header = lower
-                .split("\r\n")
-                .any(|l| l.starts_with("keep-alive:"));
+            let has_x_custom = lower.split("\r\n").any(|l| l.starts_with("x-custom:"));
+            let has_x_keep = lower.split("\r\n").any(|l| l.starts_with("x-keep:"));
+            let has_connection = lower.split("\r\n").any(|l| l.starts_with("connection:"));
+            let has_keep_alive_header = lower.split("\r\n").any(|l| l.starts_with("keep-alive:"));
             let response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
             let _ = stream.write_all(response.as_bytes());
             let _ = stream.flush();
-            let _ = tx.send((has_x_custom, has_x_keep, has_connection, has_keep_alive_header, req));
+            let _ = tx.send((
+                has_x_custom,
+                has_x_keep,
+                has_connection,
+                has_keep_alive_header,
+                req,
+            ));
         }
     });
 
@@ -180,9 +178,9 @@ fn test_proxy_strips_connection_listed_request_headers() {
         .unwrap();
     assert_eq!(resp.status(), 200);
 
-    let (has_x_custom, has_x_keep, has_connection, has_keep_alive_header, req) =
-        rx.recv_timeout(Duration::from_secs(3))
-            .expect("upstream should have received request");
+    let (has_x_custom, has_x_keep, has_connection, has_keep_alive_header, req) = rx
+        .recv_timeout(Duration::from_secs(3))
+        .expect("upstream should have received request");
 
     assert!(
         !has_x_custom,

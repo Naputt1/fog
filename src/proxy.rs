@@ -1357,20 +1357,23 @@ mod tests {
         headers.insert("x-keep", "should-pass".parse().unwrap());
         headers.insert(hyper::header::HOST, "example.com".parse().unwrap());
         let out = forward_headers(&headers);
-        assert!(!out.contains_key("x-custom"), "X-Custom listed in Connection must be stripped");
+        assert!(
+            !out.contains_key("x-custom"),
+            "X-Custom listed in Connection must be stripped"
+        );
         assert!(!out.contains_key(hyper::header::CONNECTION));
         assert!(!out.contains_key("keep-alive"), "keep-alive is hop-by-hop");
-        assert!(out.contains_key("x-keep"), "unlisted header must be forwarded");
+        assert!(
+            out.contains_key("x-keep"),
+            "unlisted header must be forwarded"
+        );
         assert!(!out.contains_key(hyper::header::HOST), "host is hop-by-hop");
     }
 
     #[test]
     fn test_forward_headers_case_insensitive_connection_tokens() {
         let mut headers = hyper::HeaderMap::new();
-        headers.insert(
-            hyper::header::CONNECTION,
-            "X-Custom".parse().unwrap(),
-        );
+        headers.insert(hyper::header::CONNECTION, "X-Custom".parse().unwrap());
         headers.insert("x-custom", "secret".parse().unwrap());
         headers.insert("x-other", "ok".parse().unwrap());
         let out = forward_headers(&headers);
@@ -1381,14 +1384,8 @@ mod tests {
     #[test]
     fn test_forward_headers_multiple_connection_headers() {
         let mut headers = hyper::HeaderMap::new();
-        headers.insert(
-            hyper::header::CONNECTION,
-            "keep-alive".parse().unwrap(),
-        );
-        headers.append(
-            hyper::header::CONNECTION,
-            "X-Custom".parse().unwrap(),
-        );
+        headers.insert(hyper::header::CONNECTION, "keep-alive".parse().unwrap());
+        headers.append(hyper::header::CONNECTION, "X-Custom".parse().unwrap());
         headers.insert("x-custom", "secret".parse().unwrap());
         headers.insert("x-keep", "pass".parse().unwrap());
         let out = forward_headers(&headers);
@@ -1437,7 +1434,10 @@ mod tests {
             }
             filtered.append(k.clone(), v.clone());
         }
-        assert!(!filtered.contains_key("x-upstream-custom"), "listed in Connection must be stripped from response");
+        assert!(
+            !filtered.contains_key("x-upstream-custom"),
+            "listed in Connection must be stripped from response"
+        );
         assert!(filtered.contains_key("x-normal"));
         assert!(!filtered.contains_key(hyper::header::CONNECTION));
     }
