@@ -1,13 +1,4 @@
-#![allow(unused_imports)]
-use crate::proxy::LogEntry;
-use std::collections::VecDeque;
-use std::fs::{self, File};
-use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
-use std::thread;
+use std::path::PathBuf;
 use std::time::Duration;
 
 const READ_TIMEOUT_SECS: u64 = 5;
@@ -34,6 +25,7 @@ pub use server::{
     cleanup_socket, find_instances, query_status, send_kill, send_kill_with_reuse,
     send_service_action, spawn_server,
 };
+#[allow(unused_imports)]
 pub(crate) use server::{
     client_closed, handle_connection, handle_logs, proxy_running, read_tail_lines,
     sanitize_service_name, send_service_action_with_timeout, service_running, stream_proxy_log,
@@ -61,6 +53,16 @@ pub fn current_socket_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proxy::LogEntry;
+    use std::collections::VecDeque;
+    use std::fs::{self};
+    use std::io::{BufReader, Read, Seek, SeekFrom, Write};
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::path::PathBuf;
+    use std::sync::atomic::Ordering;
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+    use std::time::Duration;
 
     #[test]
     fn test_socket_path_format() {

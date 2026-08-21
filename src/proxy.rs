@@ -1343,4 +1343,102 @@ mod tests {
     fn test_build_upstream_uri_invalid_fails() {
         assert!(build_upstream_uri("http://", "/x", None).is_err());
     }
+
+    // --- forward_headers (RFC 7230 §6.1) ---
+
+    #[test]
+    fn test_forward_headers_strips_connection_listed() {
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert(
+            hyper::header::CONNECTION,
+            "keep-alive, X-Custom".parse().unwrap(),
+        );
+        headers.insert("x-custom", "secret".parse().unwrap());
+        headers.insert("x-keep", "should-pass".parse().unwrap());
+        headers.insert(hyper::header::HOST, "example.com".parse().unwrap());
+        let out = forward_headers(&headers);
+        assert!(!out.contains_key("x-custom"), "X-Custom listed in Connection must be stripped");
+        assert!(!out.contains_key(hyper::header::CONNECTION));
+        assert!(!out.contains_key("keep-alive"), "keep-alive is hop-by-hop");
+        assert!(out.contains_key("x-keep"), "unlisted header must be forwarded");
+        assert!(!out.contains_key(hyper::header::HOST), "host is hop-by-hop");
+    }
+
+    #[test]
+    fn test_forward_headers_case_insensitive_connection_tokens() {
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert(
+            hyper::header::CONNECTION,
+            "X-Custom".parse().unwrap(),
+        );
+        headers.insert("x-custom", "secret".parse().unwrap());
+        headers.insert("x-other", "ok".parse().unwrap());
+        let out = forward_headers(&headers);
+        assert!(!out.contains_key("x-custom"));
+        assert!(out.contains_key("x-other"));
+    }
+
+    #[test]
+    fn test_forward_headers_multiple_connection_headers() {
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert(
+            hyper::header::CONNECTION,
+            "keep-alive".parse().unwrap(),
+        );
+        headers.append(
+            hyper::header::CONNECTION,
+            "X-Custom".parse().unwrap(),
+        );
+        headers.insert("x-custom", "secret".parse().unwrap());
+        headers.insert("x-keep", "pass".parse().unwrap());
+        let out = forward_headers(&headers);
+        assert!(!out.contains_key("x-custom"));
+        assert!(out.contains_key("x-keep"));
+        assert!(!out.contains_key(hyper::header::CONNECTION));
+    }
+
+    #[test]
+    fn test_forward_headers_preserves_non_hop_headers() {
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert("x-normal", "value".parse().unwrap());
+        headers.insert(hyper::header::ACCEPT, "text/html".parse().unwrap());
+        let out = forward_headers(&headers);
+        assert!(out.contains_key("x-normal"));
+        assert!(out.contains_key(hyper::header::ACCEPT));
+    }
+
+    #[test]
+    fn test_forward_headers_strips_response_connection_tokens() {
+        // Simulate upstream response header filtering done in handle_http.
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert(
+            hyper::header::CONNECTION,
+            "X-Upstream-Custom".parse().unwrap(),
+        );
+        headers.insert("x-upstream-custom", "secret".parse().unwrap());
+        headers.insert("x-normal", "keep".parse().unwrap());
+        // Mirror the logic in handle_http: build token set from Connection header.
+        let mut connection_tokens = std::collections::HashSet::new();
+        for v in headers.get_all(hyper::header::CONNECTION).iter() {
+            if let Ok(s) = v.to_str() {
+                for token in s.split(',') {
+                    let t = token.trim().to_ascii_lowercase();
+                    if !t.is_empty() {
+                        connection_tokens.insert(t);
+                    }
+                }
+            }
+        }
+        let mut filtered = hyper::HeaderMap::new();
+        for (k, v) in &headers {
+            let k_lower = k.as_str().to_ascii_lowercase();
+            if is_hop_by_hop_response(k) || connection_tokens.contains(&k_lower) {
+                continue;
+            }
+            filtered.append(k.clone(), v.clone());
+        }
+        assert!(!filtered.contains_key("x-upstream-custom"), "listed in Connection must be stripped from response");
+        assert!(filtered.contains_key("x-normal"));
+        assert!(!filtered.contains_key(hyper::header::CONNECTION));
+    }
 }
