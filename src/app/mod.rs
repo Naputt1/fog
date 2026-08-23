@@ -763,6 +763,13 @@ impl App {
                     }
                 });
                 if let Some(wt) = selected {
+                    let config_dir = self.config_path.parent().unwrap_or_else(|| Path::new("."));
+                    if wt.contains(config_dir) {
+                        if let Some(p) = &mut self.switch_popup {
+                            p.status = Some("already on this branch".to_string());
+                        }
+                        return;
+                    }
                     self.switch_popup = None;
                     self.switch_worktree(&wt);
                 }
@@ -798,9 +805,10 @@ impl App {
     /// Terminates every live fog instance serving the selected worktree's
     /// branch (via IPC kill requests with a SIGTERM fallback) and reports the
     /// outcome in the popup's transient status line. This instance is never
-    /// a target: the instance scan excludes the current process.
+    /// a target: the instance scan excludes the current process, so `d` on
+    /// the current branch only kills *other* instances sharing that branch.
     fn terminate_selected_branch(&mut self) {
-        let branch = {
+        let (branch, is_current) = {
             let Some(popup) = &self.switch_popup else {
                 return;
             };
@@ -808,21 +816,19 @@ impl App {
             if matches.is_empty() {
                 return;
             }
-            matches[popup.selected.min(matches.len() - 1)]
-                .branch
-                .clone()
+            let wt = &matches[popup.selected.min(matches.len() - 1)];
+            let config_dir = self.config_path.parent().unwrap_or_else(|| Path::new("."));
+            let is_current = wt.contains(config_dir);
+            (wt.branch.clone(), is_current)
         };
-        let Some(branch) = branch else {
-            if let Some(popup) = &mut self.switch_popup {
-                popup.status = Some("no branch to terminate (detached)".to_string());
-            }
-            return;
-        };
+        // Detached worktrees have `branch == None`. They are still killable
+        // by matching `branch == None` instances (legacy/detached runs), so
+        // we don't early-return here — we let the `find_*` scan decide.
         let project = self.ipc_state.project.clone();
         let script = self.ipc_state.script.clone();
         let instances = match project {
             Some(project) => {
-                ipc::find_instances_with_status(&project, &script, Some(branch.as_str()))
+                ipc::find_instances_with_status(&project, &script, branch.as_deref())
                     .into_iter()
                     .map(|(pid, path, _)| (pid, path))
                     .collect::<Vec<_>>()
@@ -832,6 +838,8 @@ impl App {
         let terminated = ipc::terminate_instances(&instances);
         if let Some(popup) = &mut self.switch_popup {
             popup.status = Some(match terminated {
+                0 if branch.is_none() => "no running instances on this branch (detached)".to_string(),
+                0 if is_current => "no other instances on this branch".to_string(),
                 0 => "no running instances on this branch".to_string(),
                 1 => "terminated 1 instance".to_string(),
                 n => format!("terminated {n} instances"),
@@ -844,6 +852,11 @@ impl App {
     /// are torn down, and tabs/proxy/config-watcher are rebuilt from the
     /// target worktree's config file.
     fn switch_worktree(&mut self, wt: &Worktree) {
+        // Guard against switching to the worktree we are already on.
+        let current_dir = self.config_path.parent().unwrap_or_else(|| Path::new("."));
+        if wt.contains(current_dir) {
+            return;
+        }
         // Resolve and validate the target worktree's config first, so a failure
         // leaves the current instance untouched.
         let config_path = if self.config_rel.is_absolute() {
@@ -1385,7 +1398,10 @@ impl App {
                     .running
                     .iter()
                     .any(|b| wt.branch.as_deref() == Some(b.as_str()));
-                let (prefix, label_style) = if i == popup.selected {
+                let (prefix, label_style) = if is_current {
+                    let p = if i == popup.selected { " >" } else { "  " };
+                    (p, Style::default().fg(Color::Rgb(255, 176, 0)).bold())
+                } else if i == popup.selected {
                     (" >", Style::default().fg(self.theme.highlight).bold())
                 } else {
                     ("  ", Style::default())
@@ -2075,7 +2091,33 @@ mod tests {
         app.handle_switch_key(KeyEvent::from(KeyCode::Char('d')));
         assert_eq!(
             app.switch_popup.as_ref().unwrap().status.as_deref(),
-            Some("no branch to terminate (detached)")
+            Some("no running instances on this branch (detached)")
+        );
+    }
+
+    #[test]
+    fn test_switch_popup_d_on_current_branch_no_other_instances() {
+        // `d` on the current branch should report "no other instances" rather
+        // than "no running instances" to clarify that self is excluded.
+        let tabs = ClickTab::new(vec!["svc".into()], 10, 30);
+        let mut app = make_app(vec![], None, tabs, Mode::Normal, Rect::default());
+        // Make this app's config_dir be /repo/fog so the worktree counts as current.
+        app.config_path = PathBuf::from("/repo/fog/fog.json");
+        app.switch_popup = Some(SwitchPopup {
+            worktrees: vec![Worktree {
+                path: PathBuf::from("/repo/fog"),
+                branch: Some("main".to_string()),
+            }],
+            filter: String::new(),
+            selected: 0,
+            searching: false,
+            running: Vec::new(),
+            status: None,
+        });
+        app.handle_switch_key(KeyEvent::from(KeyCode::Char('d')));
+        assert_eq!(
+            app.switch_popup.as_ref().unwrap().status.as_deref(),
+            Some("no other instances on this branch")
         );
     }
 }
