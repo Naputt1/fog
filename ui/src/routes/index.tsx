@@ -180,8 +180,8 @@ function ServicesTable({ services }: { services: Service[] }) {
   };
 
   return (
-    <Card className="gap-0 overflow-x-auto py-0">
-      <div className="max-h-[70vh] overflow-auto">
+    <Card className="flex min-h-0 flex-1 flex-col gap-0 overflow-hidden py-0">
+      <div className="min-h-0 flex-1 overflow-auto">
         <Table className="min-w-[720px]">
           <TableHeader className="[&_th]:bg-card sticky top-0 z-10 [&_th]:shadow-[inset_0_-1px_0_var(--color-border)]">
             <TableRow>
@@ -437,7 +437,7 @@ function ServicesPage() {
   const running = data?.filter((s) => s.status === "running").length ?? 0;
 
   return (
-    <div className="min-w-0 space-y-6">
+    <div className="flex min-w-0 flex-col gap-6 lg:h-[calc(100dvh-6.5rem)] lg:min-h-0 lg:overflow-hidden">
       <PageHeader
         title="Services"
         description="Docker-discovered containers managed by fog, grouped by project and worktree."
@@ -473,7 +473,7 @@ function ServicesPage() {
       ) : (
         <>
           <StatsStrip services={data} />
-          <div className="hidden lg:block">
+          <div className="hidden min-h-0 flex-1 flex-col lg:flex">
             <ServicesTable services={data} />
           </div>
           <div className="lg:hidden">

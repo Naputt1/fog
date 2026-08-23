@@ -111,13 +111,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   return (
     <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
-      <div className="bg-background text-foreground flex min-h-dvh w-full overflow-x-hidden">
+      <div className="bg-background text-foreground flex h-dvh w-full overflow-hidden">
         {/* Desktop sidebar */}
         <aside className="border-border bg-card hidden w-60 shrink-0 border-r md:block">
           <SidebarContent />
         </aside>
 
-        <div className="flex min-w-0 flex-1 flex-col">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
           {/* Topbar */}
           <header className="border-border bg-card/60 flex h-14 shrink-0 items-center gap-3 border-b px-4 backdrop-blur">
             <SheetTrigger asChild className="md:hidden">
@@ -143,7 +143,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </div>
           </header>
 
-          <ScrollArea className="flex-1">
+          <ScrollArea className="flex-1 min-h-0">
             <main className="mx-auto w-full max-w-6xl min-w-0 p-4 md:p-6">
               {children}
             </main>
