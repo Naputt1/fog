@@ -30,10 +30,10 @@ cargo install fog-tui  # installs binary `fog`
 
 # from git
 cargo install --git https://github.com/Naputt1/fog.git
-cargo install --git https://github.com/Naputt1/fog.git --tag v0.1.0
+cargo install --git https://github.com/Naputt1/fog.git --tag v0.1.1
 ```
 
-If `ui/dist` is absent on a git install, `build.rs` fetches the prebuilt SPA from the GitHub Release. For offline builds use `FOG_SKIP_SPA_DOWNLOAD=1`.
+If `ui/dist` is absent on a git install, `build.rs` fetches the prebuilt SPA from the GitHub Release. For offline builds use `FOG_SKIP_SPA_DOWNLOAD=1`. Use `FOG_REQUIRE_SPA=1` to fail the build instead of embedding the fallback page.
 
 ## Quick start
 

@@ -48,6 +48,11 @@ jobs:
         run: |
           cargo package --allow-dirty --list | grep -q "ui/dist/index.html" || (echo "ui/dist not included in package" && cargo package --allow-dirty --list && exit 1)
           cargo package --allow-dirty --list
+      - name: Verify SPA is embedded (no fallback)
+        run: |
+          cargo clean
+          FOG_REQUIRE_SPA=1 cargo build
+          echo "SPA embedded correctly (FOG_REQUIRE_SPA=1 build succeeded)"
       - name: Create SPA tarball for git installs
         run: |
           TAG="${{ inputs.tag }}"

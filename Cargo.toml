@@ -7,7 +7,7 @@ license = "MIT"
 keywords = ["tui", "proxy", "orchestrator", "terminal", "ratatui"]
 categories = ["command-line-utilities", "development-tools"]
 edition = "2024"
-include = ["src/**/*", "/build.rs", "/ui/dist/**/*", "/README.md", "/LICENSE", "/fog.schema.json", "/fog.json"]
+include = ["src/**/*", "build.rs", "ui/dist/**/*", "README.md", "LICENSE", "fog.schema.json", "fog.json"]
 readme = "README.md"
 
 [lib]

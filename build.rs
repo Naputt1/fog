@@ -30,6 +30,7 @@ fn main() {
     println!("cargo:rerun-if-changed=ui/dist");
     println!("cargo:rerun-if-changed=ui");
     println!("cargo:rerun-if-env-changed=FOG_SKIP_SPA_DOWNLOAD");
+    println!("cargo:rerun-if-env-changed=FOG_REQUIRE_SPA");
     println!("cargo:rerun-if-env-changed=CARGO_NET_OFFLINE");
 
     // Fast path: local build present.
@@ -41,6 +42,11 @@ fn main() {
     // Try to fetch prebuilt SPA from GitHub Release (for `cargo install --git`).
     // Skipped when offline or explicitly disabled.
     if env::var("FOG_SKIP_SPA_DOWNLOAD").is_ok() || env::var("CARGO_NET_OFFLINE").is_ok() {
+        if env::var("FOG_REQUIRE_SPA").is_ok() {
+            panic!(
+                "ui/dist not found and SPA download skipped (FOG_SKIP_SPA_DOWNLOAD/CARGO_NET_OFFLINE set) but FOG_REQUIRE_SPA=1 — refusing to embed fallback"
+            );
+        }
         println!(
             "cargo:warning=ui/dist not found and SPA download skipped (FOG_SKIP_SPA_DOWNLOAD/CARGO_NET_OFFLINE set); embedding fallback page"
         );
@@ -55,6 +61,12 @@ fn main() {
         return;
     }
 
+    if env::var("FOG_REQUIRE_SPA").is_ok() {
+        panic!(
+            "ui/dist not found and SPA fetch failed (tried v{} + latest) but FOG_REQUIRE_SPA=1 — run `cd ui && pnpm install && pnpm build` or ensure GitHub Release has fog-spa tarball",
+            env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "unknown".to_string())
+        );
+    }
     println!(
         "cargo:warning=ui/dist not found and SPA fetch failed; embedding fallback page (run `cd ui && pnpm install && pnpm build` to embed full SPA)"
     );
@@ -134,10 +146,14 @@ fn try_fetch_spa(out_dir: &Path) -> Option<PathBuf> {
 
     for url in &urls {
         let tar_path = out_dir.join("fog-spa.tar.gz");
-        if fetch_url(url, &tar_path)
-            && let Some(dist) = extract_tar(&tar_path, out_dir)
-        {
-            return Some(dist);
+        let fetched = fetch_url(url, &tar_path);
+        if fetched {
+            if let Some(dist) = extract_tar(&tar_path, out_dir) {
+                return Some(dist);
+            }
+            println!("cargo:warning=SPA tarball fetched from {url} but extraction failed");
+        } else {
+            println!("cargo:warning=SPA fetch failed for {url} (curl/wget missing or 404)");
         }
     }
     None
@@ -148,7 +164,8 @@ fn fetch_url(url: &str, dest: &Path) -> bool {
     for (prog, args) in [("curl", vec!["-fsSL", url, "-o"]), ("wget", vec!["-qO"])] {
         let mut cmd = Command::new(prog);
         if prog == "curl" {
-            cmd.args([args[0], url, args[1]]).arg(dest);
+            // args = ["-fsSL", url, "-o"] -> curl -fsSL <url> -o <dest>
+            cmd.args([args[0], args[1], args[2]]).arg(dest);
         } else {
             cmd.args([args[0]]).arg(dest).arg(url);
         }
