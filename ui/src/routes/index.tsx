@@ -1,12 +1,11 @@
 import { Fragment, useEffect, useRef, useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
-import { Check, Copy, GitBranch } from "lucide-react";
+import { Check, ChevronRight, Copy, GitBranch } from "lucide-react";
 
 import { useServices } from "@/lib/hooks";
 import type { Service } from "@/lib/api";
 import { PageHeader, LoadingState, ErrorState } from "@/components/page-state";
 import { StatusBadge } from "@/components/status-badge";
-import { BrandCloud } from "@/components/brand-cloud";
 import {
   Table,
   TableBody,
@@ -17,7 +16,7 @@ import {
 } from "@/components/ui/table";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { toDisplayUrl, isDnsOnly, isLocalHost, getRequestHostname } from "@/lib/utils";
+import { cn, toDisplayUrl, isDnsOnly, isLocalHost, getRequestHostname } from "@/lib/utils";
 
 export const Route = createFileRoute("/")({
   component: ServicesPage,
@@ -169,6 +168,16 @@ function StatsStrip({ services }: { services: Service[] }) {
 
 function ServicesTable({ services }: { services: Service[] }) {
   const groups = groupByProjectAndWorktree(services);
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
+
+  const toggle = (project: string) => {
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(project)) next.delete(project);
+      else next.add(project);
+      return next;
+    });
+  };
 
   return (
     <Card className="gap-0 overflow-x-auto py-0">
@@ -183,58 +192,193 @@ function ServicesTable({ services }: { services: Service[] }) {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {groups.map((project) => (
-              <Fragment key={project.project}>
-                {/* Project group row */}
-                <TableRow className="border-primary/20 bg-secondary/40 hover:bg-secondary/40 border-t">
-                  <TableCell
-                    colSpan={4}
-                    className="border-primary/50 border-l-2 px-3 py-1.5"
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="flex min-w-0 items-center gap-2 font-mono text-sm font-semibold">
-                        <BrandCloud
-                          variant="mono"
-                          className="text-primary/70 size-3.5 shrink-0"
-                        />
-                        <span className="truncate">{project.project}</span>
-                      </div>
-                      <span className="border-primary/30 bg-primary/10 text-primary shrink-0 rounded-full border px-2 font-mono text-[10px]">
-                        {project.total}
+            {groups.map((project) => {
+              const isCollapsed = collapsed.has(project.project);
+              return (
+                <Fragment key={project.project}>
+                  {/* Project group row — collapsible toggle */}
+                  <TableRow className="border-primary/20 bg-secondary/40 hover:bg-secondary/60 border-t">
+                    <TableCell
+                      colSpan={4}
+                      className="border-primary/50 border-l-2 p-0"
+                    >
+                      <button
+                        type="button"
+                        onClick={() => toggle(project.project)}
+                        aria-expanded={!isCollapsed}
+                        aria-label={`${isCollapsed ? "Expand" : "Collapse"} ${project.project}`}
+                        className="flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left"
+                      >
+                        <span className="flex min-w-0 items-center gap-2 font-mono text-sm font-semibold">
+                          <ChevronRight
+                            className={cn(
+                              "text-muted-foreground size-3.5 shrink-0 transition-transform duration-150",
+                              !isCollapsed && "rotate-90"
+                            )}
+                          />
+                          <span className="truncate">{project.project}</span>
+                        </span>
+                        <span className="border-primary/30 bg-primary/10 text-primary shrink-0 rounded-full border px-2 font-mono text-[10px]">
+                          {project.total}
+                        </span>
+                      </button>
+                    </TableCell>
+                  </TableRow>
+
+                  {!isCollapsed &&
+                    project.worktrees.map((worktree) => (
+                      <Fragment key={`${project.project}:${worktree.worktree}`}>
+                        {/* Worktree sub-group row */}
+                        <TableRow className="hover:bg-transparent">
+                          <TableCell colSpan={4} className="px-3 py-1 pl-8">
+                            <div className="text-muted-foreground flex items-center gap-1.5 font-mono text-[11px] tracking-wider uppercase">
+                              <GitBranch className="size-3 shrink-0" />
+                              <span className="truncate">
+                                {worktree.worktree || DEFAULT_WORKTREE}
+                              </span>
+                              <span className="text-muted-foreground/60">
+                                {worktree.services.length}
+                              </span>
+                            </div>
+                          </TableCell>
+                        </TableRow>
+
+                        {/* Service rows */}
+                        {worktree.services.map((svc) => (
+                          <TableRow
+                            key={`${svc.project}/${svc.worktree}/${svc.service}`}
+                          >
+                            <TableCell className="font-mono font-medium">
+                              {svc.service}
+                            </TableCell>
+                            <TableCell>
+                              <StatusBadge status={svc.status} />
+                            </TableCell>
+                            <TableCell>
+                              {svc.url
+                                ? (() => {
+                                    const displayUrl = toDisplayUrl(svc.url, svc.ports);
+                                    const dnsOnly =
+                                      isDnsOnly(svc.url, svc.ports) &&
+                                      !isLocalHost(getRequestHostname());
+                                    return (
+                                      <div className="flex min-w-0 items-center gap-1">
+                                        <a
+                                          href={displayUrl}
+                                          target="_blank"
+                                          rel="noreferrer"
+                                          title={displayUrl}
+                                          className="text-primary max-w-[320px] min-w-0 truncate font-mono underline-offset-4 hover:underline"
+                                        >
+                                          {displayUrl}
+                                        </a>
+                                        <CopyUrlButton url={displayUrl} />
+                                        {dnsOnly ? (
+                                          <span
+                                            title="Traefik-only, no host port published — reachable via DNS (*.gems/*.red-fox) or add ports: [8080] in compose"
+                                            className="border-warning/30 bg-warning/10 text-warning shrink-0 rounded-full border px-1.5 py-0.5 font-mono text-[9px] tracking-wide uppercase"
+                                          >
+                                            DNS
+                                          </span>
+                                        ) : null}
+                                      </div>
+                                    );
+                                  })()
+                                : (
+                                <span className="text-muted-foreground font-mono">
+                                  —
+                                </span>
+                              )}
+                            </TableCell>
+                            <TableCell className="text-muted-foreground font-mono">
+                              {svc.ports.length ? svc.ports.join(", ") : "—"}
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </Fragment>
+                    ))}
+                </Fragment>
+              );
+            })}
+          </TableBody>
+        </Table>
+      </div>
+    </Card>
+  );
+}
+
+/**
+ * Mobile (<lg) fallback for the services table. The wide table only fits once
+ * the sidebar has room, so below that we render grouped cards instead — the
+ * same project/worktree grouping as the table, without forcing horizontal
+ * scrolling on narrow viewports.
+ */
+function ServiceCardList({ services }: { services: Service[] }) {
+  const groups = groupByProjectAndWorktree(services);
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
+
+  const toggle = (project: string) => {
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(project)) next.delete(project);
+      else next.add(project);
+      return next;
+    });
+  };
+
+  return (
+    <div className="space-y-4">
+      {groups.map((project) => {
+        const isCollapsed = collapsed.has(project.project);
+        return (
+          <Card key={project.project} className="gap-0 py-0">
+            <button
+              type="button"
+              onClick={() => toggle(project.project)}
+              aria-expanded={!isCollapsed}
+              aria-label={`${isCollapsed ? "Expand" : "Collapse"} ${project.project}`}
+              className="border-primary/50 bg-secondary/40 hover:bg-secondary/60 flex w-full items-center justify-between gap-2 border-b border-l-2 px-3 py-1.5 text-left transition-colors"
+            >
+              <span className="flex min-w-0 items-center gap-2 font-mono text-sm font-semibold">
+                <ChevronRight
+                  className={cn(
+                    "text-muted-foreground size-3.5 shrink-0 transition-transform duration-150",
+                    !isCollapsed && "rotate-90"
+                  )}
+                />
+                <span className="truncate">{project.project}</span>
+              </span>
+              <span className="border-primary/30 bg-primary/10 text-primary shrink-0 rounded-full border px-2 font-mono text-[10px]">
+                {project.total}
+              </span>
+            </button>
+
+            {!isCollapsed && (
+              <div className="flex flex-col gap-4 px-3 py-3">
+                {project.worktrees.map((worktree) => (
+                  <div key={`${project.project}:${worktree.worktree}`}>
+                    <div className="text-muted-foreground flex items-center gap-1.5 font-mono text-[11px] tracking-wider uppercase">
+                      <GitBranch className="size-3 shrink-0" />
+                      <span className="truncate">
+                        {worktree.worktree || DEFAULT_WORKTREE}
+                      </span>
+                      <span className="text-muted-foreground/60">
+                        {worktree.services.length}
                       </span>
                     </div>
-                  </TableCell>
-                </TableRow>
 
-                {project.worktrees.map((worktree) => (
-                  <Fragment key={`${project.project}:${worktree.worktree}`}>
-                    {/* Worktree sub-group row */}
-                    <TableRow className="hover:bg-transparent">
-                      <TableCell colSpan={4} className="px-3 py-1 pl-8">
-                        <div className="text-muted-foreground flex items-center gap-1.5 font-mono text-[11px] tracking-wider uppercase">
-                          <GitBranch className="size-3 shrink-0" />
-                          <span className="truncate">
-                            {worktree.worktree || DEFAULT_WORKTREE}
-                          </span>
-                          <span className="text-muted-foreground/60">
-                            {worktree.services.length}
-                          </span>
-                        </div>
-                      </TableCell>
-                    </TableRow>
-
-                    {/* Service rows */}
-                    {worktree.services.map((svc) => (
-                      <TableRow
-                        key={`${svc.project}/${svc.worktree}/${svc.service}`}
-                      >
-                        <TableCell className="font-mono font-medium">
-                          {svc.service}
-                        </TableCell>
-                        <TableCell>
-                          <StatusBadge status={svc.status} />
-                        </TableCell>
-                        <TableCell>
+                    <div className="mt-1.5 space-y-2">
+                      {worktree.services.map((svc) => (
+                        <div
+                          key={`${svc.project}/${svc.worktree}/${svc.service}`}
+                          className="border-border rounded-md border px-3 py-2"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="min-w-0 truncate font-mono text-sm font-medium">
+                              {svc.service}
+                            </span>
+                            <StatusBadge status={svc.status} />
+                          </div>
                           {svc.url
                             ? (() => {
                                 const displayUrl = toDisplayUrl(svc.url, svc.ports);
@@ -242,13 +386,13 @@ function ServicesTable({ services }: { services: Service[] }) {
                                   isDnsOnly(svc.url, svc.ports) &&
                                   !isLocalHost(getRequestHostname());
                                 return (
-                                  <div className="flex min-w-0 items-center gap-1">
+                                  <div className="mt-1.5 flex items-center gap-1">
                                     <a
                                       href={displayUrl}
                                       target="_blank"
                                       rel="noreferrer"
                                       title={displayUrl}
-                                      className="text-primary max-w-[320px] min-w-0 truncate font-mono underline-offset-4 hover:underline"
+                                      className="text-primary min-w-0 font-mono text-xs break-all underline-offset-4 hover:underline"
                                     >
                                       {displayUrl}
                                     </a>
@@ -265,127 +409,25 @@ function ServicesTable({ services }: { services: Service[] }) {
                                 );
                               })()
                             : (
-                            <span className="text-muted-foreground font-mono">
+                            <div className="text-muted-foreground mt-1.5 font-mono text-xs">
                               —
-                            </span>
+                            </div>
                           )}
-                        </TableCell>
-                        <TableCell className="text-muted-foreground font-mono">
-                          {svc.ports.length ? svc.ports.join(", ") : "—"}
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </Fragment>
-                ))}
-              </Fragment>
-            ))}
-          </TableBody>
-        </Table>
-      </div>
-    </Card>
-  );
-}
-
-/**
- * Mobile (<lg) fallback for the services table. The wide table only fits once
- * the sidebar has room, so below that we render grouped cards instead — the
- * same project/worktree grouping as the table, without forcing horizontal
- * scrolling on narrow viewports.
- */
-function ServiceCardList({ services }: { services: Service[] }) {
-  const groups = groupByProjectAndWorktree(services);
-
-  return (
-    <div className="space-y-4">
-      {groups.map((project) => (
-        <Card key={project.project} className="gap-0 py-0">
-          <div className="border-primary/50 bg-secondary/40 border-b border-l-2 px-3 py-1.5">
-            <div className="flex items-center justify-between gap-2">
-              <div className="flex min-w-0 items-center gap-2 font-mono text-sm font-semibold">
-                <BrandCloud
-                  variant="mono"
-                  className="text-primary/70 size-3.5 shrink-0"
-                />
-                <span className="truncate">{project.project}</span>
-              </div>
-              <span className="border-primary/30 bg-primary/10 text-primary shrink-0 rounded-full border px-2 font-mono text-[10px]">
-                {project.total}
-              </span>
-            </div>
-          </div>
-
-          <div className="flex flex-col gap-4 px-3 py-3">
-            {project.worktrees.map((worktree) => (
-              <div key={`${project.project}:${worktree.worktree}`}>
-                <div className="text-muted-foreground flex items-center gap-1.5 font-mono text-[11px] tracking-wider uppercase">
-                  <GitBranch className="size-3 shrink-0" />
-                  <span className="truncate">
-                    {worktree.worktree || DEFAULT_WORKTREE}
-                  </span>
-                  <span className="text-muted-foreground/60">
-                    {worktree.services.length}
-                  </span>
-                </div>
-
-                <div className="mt-1.5 space-y-2">
-                  {worktree.services.map((svc) => (
-                    <div
-                      key={`${svc.project}/${svc.worktree}/${svc.service}`}
-                      className="border-border rounded-md border px-3 py-2"
-                    >
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="min-w-0 truncate font-mono text-sm font-medium">
-                          {svc.service}
-                        </span>
-                        <StatusBadge status={svc.status} />
-                      </div>
-                      {svc.url
-                        ? (() => {
-                            const displayUrl = toDisplayUrl(svc.url, svc.ports);
-                            const dnsOnly =
-                              isDnsOnly(svc.url, svc.ports) &&
-                              !isLocalHost(getRequestHostname());
-                            return (
-                              <div className="mt-1.5 flex items-center gap-1">
-                                <a
-                                  href={displayUrl}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  title={displayUrl}
-                                  className="text-primary min-w-0 font-mono text-xs break-all underline-offset-4 hover:underline"
-                                >
-                                  {displayUrl}
-                                </a>
-                                <CopyUrlButton url={displayUrl} />
-                                {dnsOnly ? (
-                                  <span
-                                    title="Traefik-only, no host port published — reachable via DNS (*.gems/*.red-fox) or add ports: [8080] in compose"
-                                    className="border-warning/30 bg-warning/10 text-warning shrink-0 rounded-full border px-1.5 py-0.5 font-mono text-[9px] tracking-wide uppercase"
-                                  >
-                                    DNS
-                                  </span>
-                                ) : null}
-                              </div>
-                            );
-                          })()
-                        : (
-                        <div className="text-muted-foreground mt-1.5 font-mono text-xs">
-                          —
+                          {svc.ports.length > 0 ? (
+                            <div className="text-muted-foreground mt-1.5 font-mono text-xs break-all">
+                              {svc.ports.join(", ")}
+                            </div>
+                          ) : null}
                         </div>
-                      )}
-                      {svc.ports.length > 0 ? (
-                        <div className="text-muted-foreground mt-1.5 font-mono text-xs break-all">
-                          {svc.ports.join(", ")}
-                        </div>
-                      ) : null}
+                      ))}
                     </div>
-                  ))}
-                </div>
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
-        </Card>
-      ))}
+            )}
+          </Card>
+        );
+      })}
     </div>
   );
 }
