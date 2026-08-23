@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. v0.1.1)"
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -44,8 +50,12 @@ jobs:
           cargo package --allow-dirty --list
       - name: Create SPA tarball for git installs
         run: |
-          TAG=${GITHUB_REF#refs/tags/}
+          TAG="${{ inputs.tag }}"
+          if [ -z "$TAG" ]; then TAG="$GITHUB_REF"; fi
+          TAG=${TAG#refs/tags/}
+          if [ "$TAG" = "$GITHUB_REF" ] || [ -z "$TAG" ]; then TAG=$(grep '^version' Cargo.toml | head -1 | sed -E 's/.*"(.*)".*/v\1/'); TAG="v$TAG"; fi
           VERSION=${TAG#v}
+          echo "Using TAG=$TAG VERSION=$VERSION"
           tar czf fog-spa-v${VERSION}.tar.gz -C ui dist
           tar czf fog-spa.tar.gz -C ui dist
           ls -lh fog-spa*.tar.gz
