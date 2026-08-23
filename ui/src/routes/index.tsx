@@ -337,7 +337,7 @@ function ServiceCardList({ services }: { services: Service[] }) {
               onClick={() => toggle(project.project)}
               aria-expanded={!isCollapsed}
               aria-label={`${isCollapsed ? "Expand" : "Collapse"} ${project.project}`}
-              className="border-primary/50 bg-secondary/40 hover:bg-secondary/60 flex w-full items-center justify-between gap-2 border-b border-l-2 px-3 py-1.5 text-left transition-colors"
+              className="bg-secondary/40 hover:bg-secondary/60 flex w-full items-center justify-between gap-2 border-b px-3 py-1.5 text-left transition-colors"
             >
               <span className="flex min-w-0 items-center gap-2 font-mono text-sm font-semibold">
                 <ChevronRight
