@@ -1,6 +1,6 @@
 [package]
 name = "fog-tui"
-version = "0.1.0"
+version = "0.1.1"
 description = "Terminal-based service orchestrator & reverse-proxy dashboard"
 repository = "https://github.com/Naputt1/fog"
 license = "MIT"
