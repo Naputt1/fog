@@ -17,6 +17,7 @@ import {
 } from "@/components/ui/table";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { toDisplayUrl, isDnsOnly, isLocalHost, getRequestHostname } from "@/lib/utils";
 
 export const Route = createFileRoute("/")({
   component: ServicesPage,
@@ -234,20 +235,36 @@ function ServicesTable({ services }: { services: Service[] }) {
                           <StatusBadge status={svc.status} />
                         </TableCell>
                         <TableCell>
-                          {svc.url ? (
-                            <div className="flex min-w-0 items-center gap-1">
-                              <a
-                                href={svc.url}
-                                target="_blank"
-                                rel="noreferrer"
-                                title={svc.url}
-                                className="text-primary max-w-[320px] min-w-0 truncate font-mono underline-offset-4 hover:underline"
-                              >
-                                {svc.url}
-                              </a>
-                              <CopyUrlButton url={svc.url} />
-                            </div>
-                          ) : (
+                          {svc.url
+                            ? (() => {
+                                const displayUrl = toDisplayUrl(svc.url, svc.ports);
+                                const dnsOnly =
+                                  isDnsOnly(svc.url, svc.ports) &&
+                                  !isLocalHost(getRequestHostname());
+                                return (
+                                  <div className="flex min-w-0 items-center gap-1">
+                                    <a
+                                      href={displayUrl}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      title={displayUrl}
+                                      className="text-primary max-w-[320px] min-w-0 truncate font-mono underline-offset-4 hover:underline"
+                                    >
+                                      {displayUrl}
+                                    </a>
+                                    <CopyUrlButton url={displayUrl} />
+                                    {dnsOnly ? (
+                                      <span
+                                        title="Traefik-only, no host port published — reachable via DNS (*.gems/*.red-fox) or add ports: [8080] in compose"
+                                        className="border-warning/30 bg-warning/10 text-warning shrink-0 rounded-full border px-1.5 py-0.5 font-mono text-[9px] tracking-wide uppercase"
+                                      >
+                                        DNS
+                                      </span>
+                                    ) : null}
+                                  </div>
+                                );
+                              })()
+                            : (
                             <span className="text-muted-foreground font-mono">
                               —
                             </span>
@@ -322,20 +339,36 @@ function ServiceCardList({ services }: { services: Service[] }) {
                         </span>
                         <StatusBadge status={svc.status} />
                       </div>
-                      {svc.url ? (
-                        <div className="mt-1.5 flex items-center gap-1">
-                          <a
-                            href={svc.url}
-                            target="_blank"
-                            rel="noreferrer"
-                            title={svc.url}
-                            className="text-primary min-w-0 font-mono text-xs break-all underline-offset-4 hover:underline"
-                          >
-                            {svc.url}
-                          </a>
-                          <CopyUrlButton url={svc.url} />
-                        </div>
-                      ) : (
+                      {svc.url
+                        ? (() => {
+                            const displayUrl = toDisplayUrl(svc.url, svc.ports);
+                            const dnsOnly =
+                              isDnsOnly(svc.url, svc.ports) &&
+                              !isLocalHost(getRequestHostname());
+                            return (
+                              <div className="mt-1.5 flex items-center gap-1">
+                                <a
+                                  href={displayUrl}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  title={displayUrl}
+                                  className="text-primary min-w-0 font-mono text-xs break-all underline-offset-4 hover:underline"
+                                >
+                                  {displayUrl}
+                                </a>
+                                <CopyUrlButton url={displayUrl} />
+                                {dnsOnly ? (
+                                  <span
+                                    title="Traefik-only, no host port published — reachable via DNS (*.gems/*.red-fox) or add ports: [8080] in compose"
+                                    className="border-warning/30 bg-warning/10 text-warning shrink-0 rounded-full border px-1.5 py-0.5 font-mono text-[9px] tracking-wide uppercase"
+                                  >
+                                    DNS
+                                  </span>
+                                ) : null}
+                              </div>
+                            );
+                          })()
+                        : (
                         <div className="text-muted-foreground mt-1.5 font-mono text-xs">
                           —
                         </div>

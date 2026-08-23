@@ -10,7 +10,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 
-import { cn } from "@/lib/utils";
+import { cn, getHostLabel } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -82,6 +82,7 @@ function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
 }
 
 function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
+  const hostLabel = getHostLabel();
   return (
     <div className="flex h-full flex-col gap-4">
       <div className="border-border flex h-14 items-center border-b px-4">
@@ -91,7 +92,7 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
       <div className="border-border mt-auto border-t p-4">
         <div className="text-muted-foreground flex items-center gap-2 font-mono text-xs">
           <Cog className="size-3.5" />
-          127.0.0.1:18080
+          {hostLabel}
         </div>
       </div>
     </div>
