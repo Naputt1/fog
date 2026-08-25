@@ -21,7 +21,7 @@ use ratatui::{
     style::{Color, Style},
     symbols::border,
     text::{Line, Span, Text},
-    widgets::{Block, Clear, Paragraph},
+    widgets::{Block, Clear, Paragraph, Wrap},
 };
 use std::collections::HashMap;
 use std::io::Write;
@@ -764,14 +764,27 @@ impl App {
                 });
                 if let Some(wt) = selected {
                     let config_dir = self.config_path.parent().unwrap_or_else(|| Path::new("."));
-                    if wt.contains(config_dir) {
+                    let already_here = self
+                        .switch_popup
+                        .as_ref()
+                        .map(|p| worktree::is_current_worktree(&wt, &p.worktrees, config_dir))
+                        .unwrap_or_else(|| wt.contains(config_dir));
+                    if already_here {
                         if let Some(p) = &mut self.switch_popup {
                             p.status = Some("already on this branch".to_string());
                         }
                         return;
                     }
-                    self.switch_popup = None;
-                    self.switch_worktree(&wt);
+                    let result = self.switch_worktree(&wt);
+                    if let Err(e) = result {
+                        if let Some(p) = &mut self.switch_popup {
+                            p.status = Some(e);
+                        } else {
+                            self.errors.push(e);
+                        }
+                    } else {
+                        self.switch_popup = None;
+                    }
                 }
             }
             KeyCode::Up | KeyCode::Down => {
@@ -818,7 +831,7 @@ impl App {
             }
             let wt = &matches[popup.selected.min(matches.len() - 1)];
             let config_dir = self.config_path.parent().unwrap_or_else(|| Path::new("."));
-            let is_current = wt.contains(config_dir);
+            let is_current = worktree::is_current_worktree(wt, &popup.worktrees, config_dir);
             (wt.branch.clone(), is_current)
         };
         // Detached worktrees have `branch == None`. They are still killable
@@ -827,18 +840,18 @@ impl App {
         let project = self.ipc_state.project.clone();
         let script = self.ipc_state.script.clone();
         let instances = match project {
-            Some(project) => {
-                ipc::find_instances_with_status(&project, &script, branch.as_deref())
-                    .into_iter()
-                    .map(|(pid, path, _)| (pid, path))
-                    .collect::<Vec<_>>()
-            }
+            Some(project) => ipc::find_instances_with_status(&project, &script, branch.as_deref())
+                .into_iter()
+                .map(|(pid, path, _)| (pid, path))
+                .collect::<Vec<_>>(),
             None => Vec::new(),
         };
         let terminated = ipc::terminate_instances(&instances);
         if let Some(popup) = &mut self.switch_popup {
             popup.status = Some(match terminated {
-                0 if branch.is_none() => "no running instances on this branch (detached)".to_string(),
+                0 if branch.is_none() => {
+                    "no running instances on this branch (detached)".to_string()
+                }
                 0 if is_current => "no other instances on this branch".to_string(),
                 0 => "no running instances on this branch".to_string(),
                 1 => "terminated 1 instance".to_string(),
@@ -851,41 +864,87 @@ impl App {
     /// shared (reuse) services are handed over internally, non-reuse services
     /// are torn down, and tabs/proxy/config-watcher are rebuilt from the
     /// target worktree's config file.
-    fn switch_worktree(&mut self, wt: &Worktree) {
+    ///
+    /// Returns `Ok(())` on success (popup should be closed) or `Err(msg)` on
+    /// failure (caller should keep the popup open and show `msg` as status).
+    fn switch_worktree(&mut self, wt: &Worktree) -> Result<(), String> {
         // Guard against switching to the worktree we are already on.
         let current_dir = self.config_path.parent().unwrap_or_else(|| Path::new("."));
-        if wt.contains(current_dir) {
-            return;
+        let already_here = if let Some(list) = worktree::list(current_dir) {
+            worktree::is_current_worktree(wt, &list, current_dir)
+        } else {
+            wt.contains(current_dir)
+        };
+        if already_here {
+            return Err("already on this branch".to_string());
         }
         // Resolve and validate the target worktree's config first, so a failure
         // leaves the current instance untouched.
+        //
+        // When `--config` was an absolute path that lives inside the current
+        // worktree (the `cargo run -- --config /…/worktree/<id>/ui` case), we
+        // rebase it onto the target worktree instead of sharing the same file.
+        // Absolute paths outside any worktree (e.g. `~/.config/fog/fog.json`)
+        // stay shared, per user preference.
         let config_path = if self.config_rel.is_absolute() {
-            self.config_rel.clone()
+            if let Some(list) = worktree::list(current_dir) {
+                let cur_root = worktree::containing_worktree(&list, &self.config_path)
+                    .or_else(|| worktree::containing_worktree(&list, &self.config_rel));
+                if let Some(cur_root) = cur_root {
+                    let cur_can = cur_root
+                        .path
+                        .canonicalize()
+                        .unwrap_or_else(|_| cur_root.path.clone());
+                    let cfg_can = self
+                        .config_path
+                        .canonicalize()
+                        .unwrap_or_else(|_| self.config_path.clone());
+                    let rel_can = self
+                        .config_rel
+                        .canonicalize()
+                        .unwrap_or_else(|_| self.config_rel.clone());
+                    // Try canonical strip first, then raw strip for non-existent paths
+                    let rel = cfg_can
+                        .strip_prefix(&cur_can)
+                        .or_else(|_| rel_can.strip_prefix(&cur_can))
+                        .ok()
+                        .or_else(|| {
+                            self.config_path
+                                .strip_prefix(&cur_root.path)
+                                .or_else(|_| self.config_rel.strip_prefix(&cur_root.path))
+                                .ok()
+                        });
+                    if let Some(rel) = rel {
+                        wt.path.join(rel)
+                    } else {
+                        // Inside repo but strip failed (e.g. symlinks) — fall back to share
+                        self.config_rel.clone()
+                    }
+                } else {
+                    // Absolute outside any worktree -> share
+                    self.config_rel.clone()
+                }
+            } else {
+                self.config_rel.clone()
+            }
         } else {
             wt.path.join(&self.config_rel)
         };
-        let config = match crate::config::load(&config_path) {
-            Ok(c) => c,
-            Err(e) => {
-                self.errors.push(format!("switch worktree: {e}"));
-                return;
-            }
-        };
+        let config =
+            crate::config::load(&config_path).map_err(|e| format!("switch worktree: {e}"))?;
         let script_name = self.ipc_state.script.clone();
         let Some(script) = config.scripts.get(&script_name) else {
-            self.errors.push(format!(
+            return Err(format!(
                 "switch worktree: script '{}' not found in '{}'",
                 script_name,
                 config_path.display()
             ));
-            return;
         };
         // Validate the dependency graph up front so a bad target script leaves
         // the current instance untouched instead of tearing it down first.
         let entries = script.service.clone().unwrap_or_default();
         if let Err(e) = runtime::resolve_dep_order(&entries) {
-            self.errors.push(format!("switch worktree: {e}"));
-            return;
+            return Err(format!("switch worktree: {e}"));
         }
         let config_path = config_path.canonicalize().unwrap_or(config_path);
         let config_dir = config_path
@@ -893,11 +952,25 @@ impl App {
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
 
-        // Preserve shared services: mark reuse/share terminals handed off so
-        // dropping the old set neither kills their processes nor runs their
-        // shutdown_cmds. Adopted terminals transfer their live fd; borrowed
-        // (assumed-up) terminals are marked handed off so the successor keeps
-        // the resource.
+        // Allocate ports and validate before tearing down the current instance,
+        // so a failure leaves the running services untouched.
+        let branch_for_ports = runtime::resolve_branch(&config_dir);
+        let port_map = if let Some(specs) = &config.ports {
+            crate::ports::allocate_ports(specs)
+                .map_err(|e| format!("switch worktree: port allocation: {e}"))?
+        } else {
+            std::collections::HashMap::new()
+        };
+        if let Err(e) = crate::ports::ensure_ports_defined(
+            config.ports.as_ref(),
+            script,
+            config.native_routes.as_ref(),
+        ) {
+            return Err(format!("switch worktree: {e}"));
+        }
+
+        // Build the new runtime *before* tearing down the old one, so a
+        // build failure doesn't leave the UI empty.
         let mut adopted: HashMap<String, ipc::HandoffItem> = HashMap::new();
         for item in &mut self.items {
             if item.reused || item.shared {
@@ -908,6 +981,29 @@ impl App {
                 }
             }
         }
+        let built = match runtime::build_with_ports(
+            script,
+            &script_name,
+            &config_dir,
+            self.ipc_state.project.clone(),
+            self.save_logs,
+            self.scrollback,
+            None,
+            &mut adopted,
+            &port_map,
+            branch_for_ports.clone(),
+        ) {
+            Ok(b) => b,
+            Err(e) => {
+                // Close any fds we duped for handoff that didn't get consumed
+                for (_, handoff) in adopted.drain() {
+                    unsafe {
+                        libc::close(handoff.fd);
+                    }
+                }
+                return Err(format!("switch worktree: {e}"));
+            }
+        };
 
         // The project identity is the repo's git-common-dir, shared by every
         // worktree, so `ipc_state.project` stays unchanged across switches.
@@ -919,29 +1015,6 @@ impl App {
         self.pending_services.clear();
         self.tabs = ClickTab::new(Vec::new(), self.sidebar_min, self.sidebar_max);
         self.proxy_tab_index = None;
-
-        // Allocate ports and handle native routes for the target worktree.
-        let branch_for_ports = runtime::resolve_branch(&config_dir);
-        let port_map = if let Some(specs) = &config.ports {
-            match crate::ports::allocate_ports(specs) {
-                Ok(m) => m,
-                Err(e) => {
-                    self.errors
-                        .push(format!("switch worktree: port allocation: {e}"));
-                    return;
-                }
-            }
-        } else {
-            std::collections::HashMap::new()
-        };
-        if let Err(e) = crate::ports::ensure_ports_defined(
-            config.ports.as_ref(),
-            script,
-            config.native_routes.as_ref(),
-        ) {
-            self.errors.push(format!("switch worktree: {e}"));
-            return;
-        }
         // Publish new ports/routes to IPC before ensuring Traefik, so the index UI
         // can synthesize native entries for the Services page.
         {
@@ -980,24 +1053,6 @@ impl App {
             }
         }
 
-        let built = match runtime::build_with_ports(
-            script,
-            &script_name,
-            &config_dir,
-            self.ipc_state.project.clone(),
-            self.save_logs,
-            self.scrollback,
-            None,
-            &mut adopted,
-            &port_map,
-            branch_for_ports,
-        ) {
-            Ok(b) => b,
-            Err(e) => {
-                self.errors.push(format!("switch worktree: {e}"));
-                return;
-            }
-        };
         let (tabs, proxy_tab_index) = Self::build_tabs(
             &built.items,
             &built.pending_services,
@@ -1029,6 +1084,7 @@ impl App {
         self.select_end = None;
         self.scrollbar_dragging = false;
         self.auto_scrolling = None;
+        Ok(())
     }
 
     fn restart_current(&mut self) {
@@ -1385,6 +1441,8 @@ impl App {
             let config_dir = self.config_path.parent().unwrap_or_else(|| Path::new("."));
             let matches = popup.matches();
 
+            let overlay_width = 80u16.min(area.width.saturating_sub(4));
+            let inner_width = overlay_width.saturating_sub(2) as usize;
             let mut lines = vec![
                 Line::from(vec![
                     Span::raw(" filter: "),
@@ -1393,7 +1451,7 @@ impl App {
                 Line::from(""),
             ];
             for (i, wt) in matches.iter().enumerate() {
-                let is_current = wt.contains(config_dir);
+                let is_current = worktree::is_current_worktree(wt, &popup.worktrees, config_dir);
                 let is_running = popup
                     .running
                     .iter()
@@ -1422,8 +1480,22 @@ impl App {
                 if is_running {
                     spans.push(Span::styled(" *", Style::default().fg(Color::Blue).bold()));
                 }
+                // Truncate path to single line to avoid wrap-induced overlay overflow.
+                // Reserve space for stars + two spaces + label/prefix already in spans.
+                let prefix_len = 3usize; // " >" + space
+                let stars_len = (is_current as usize) * 2 + (is_running as usize) * 2;
+                let label_len = wt.label().len();
+                let used = prefix_len + label_len + stars_len + 2; // 2 = "  " before path
+                let avail = inner_width.saturating_sub(used);
+                let path_str = wt.path.display().to_string();
+                let truncated = if path_str.len() > avail && avail > 3 {
+                    // show tail with ellipsis, keeps worktree id visible
+                    format!("...{}", &path_str[path_str.len() - (avail - 3)..])
+                } else {
+                    path_str
+                };
                 spans.push(Span::styled(
-                    format!("  {}", wt.path.display()),
+                    format!("  {truncated}"),
                     Style::default().dim(),
                 ));
                 lines.push(Line::from(spans));
@@ -1443,8 +1515,12 @@ impl App {
                 Style::default().dim(),
             )));
 
-            let overlay_width = 64u16.min(area.width.saturating_sub(4));
-            let overlay_height = ((lines.len() as u16) + 2).min(area.height);
+            let status_extra = popup
+                .status
+                .as_ref()
+                .map(|s| s.len() as u16 / overlay_width.max(1))
+                .unwrap_or(0);
+            let overlay_height = ((lines.len() as u16) + 2 + status_extra).min(area.height);
             let overlay_x = (area.width.saturating_sub(overlay_width)) / 2;
             let overlay_y = (area.height.saturating_sub(overlay_height)) / 2;
             let overlay_area = Rect {
@@ -1457,7 +1533,8 @@ impl App {
             let block = Block::bordered().title(" Switch worktree ");
             let widget = Paragraph::new(Text::from(lines))
                 .block(block)
-                .alignment(Alignment::Left);
+                .alignment(Alignment::Left)
+                .wrap(Wrap { trim: false });
 
             frame.render_widget(Clear, overlay_area);
             frame.render_widget(widget, overlay_area);

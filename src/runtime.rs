@@ -142,10 +142,8 @@ pub fn normalize_service_path(path: &Path) -> String {
 /// Returns `None` when the directory is not inside a git worktree (or the
 /// worktree is detached).
 pub fn resolve_branch(config_dir: &Path) -> Option<String> {
-    crate::worktree::list(config_dir)?
-        .into_iter()
-        .find(|w| w.contains(config_dir))
-        .and_then(|w| w.branch)
+    let worktrees = crate::worktree::list(config_dir)?;
+    crate::worktree::containing_worktree(&worktrees, config_dir).and_then(|w| w.branch.clone())
 }
 
 /// Resolves the `compose_file` of any `docker`-kind health checks against the

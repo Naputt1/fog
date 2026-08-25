@@ -27,6 +27,19 @@ impl Worktree {
         let p = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         p.starts_with(&wt)
     }
+
+    /// Returns `true` when this worktree's path equals `other` after
+    /// canonicalization (resolves symlinks like `/Users` on macOS). Used to
+    /// decide "already on this branch" without false-positives for nested
+    /// worktrees (where a parent `contains` a child path).
+    pub fn path_equals(&self, other: &Path) -> bool {
+        let a = self
+            .path
+            .canonicalize()
+            .unwrap_or_else(|_| self.path.clone());
+        let b = other.canonicalize().unwrap_or_else(|_| other.to_path_buf());
+        a == b
+    }
 }
 
 /// Lists every worktree of the git repository containing `config_dir`.
@@ -86,6 +99,50 @@ pub fn resolve(config_dir: &Path, branch: &str) -> Option<Worktree> {
     list(config_dir)?
         .into_iter()
         .find(|w| w.branch.as_deref() == Some(branch))
+}
+
+/// Returns the worktree that most specifically contains `path`, if any.
+///
+/// When worktrees are nested (e.g. `./wt-feature` inside the main checkout),
+/// more than one entry's `contains` will be true; this picks the deepest
+/// (longest canonical path) so we identify the *actual* worktree the path
+/// lives in rather than an ancestor.
+pub fn containing_worktree<'a>(worktrees: &'a [Worktree], path: &Path) -> Option<&'a Worktree> {
+    let mut best: Option<&'a Worktree> = None;
+    let mut best_len: Option<usize> = None;
+    for wt in worktrees {
+        if wt.contains(path) {
+            let len = wt
+                .path
+                .canonicalize()
+                .unwrap_or_else(|_| wt.path.clone())
+                .components()
+                .count();
+            if best_len.is_none_or(|l| len > l) {
+                best = Some(wt);
+                best_len = Some(len);
+            }
+        }
+    }
+    best
+}
+
+/// Returns `true` when `candidate` is the worktree that actually contains
+/// `path` (the deepest `contains` match). This is the correct test for
+/// "already on this worktree" — a plain `candidate.contains(path)` is true
+/// for every ancestor of a nested worktree.
+pub fn is_current_worktree(candidate: &Worktree, worktrees: &[Worktree], path: &Path) -> bool {
+    match containing_worktree(worktrees, path) {
+        Some(cur) => {
+            let cur_can = cur.path.canonicalize().unwrap_or_else(|_| cur.path.clone());
+            let cand_can = candidate
+                .path
+                .canonicalize()
+                .unwrap_or_else(|_| candidate.path.clone());
+            cur_can == cand_can
+        }
+        None => false,
+    }
 }
 
 #[cfg(test)]
@@ -164,5 +221,99 @@ prunable gitdir file points to non-existent location
         assert!(wt.contains(Path::new("/repo/fog")));
         assert!(wt.contains(Path::new("/repo/fog/sub")));
         assert!(!wt.contains(Path::new("/repo/fog-feature")));
+    }
+
+    #[test]
+    fn test_containing_worktree_picks_deepest_for_nested() {
+        let wts = vec![
+            Worktree {
+                path: PathBuf::from("/repo/fog"),
+                branch: Some("main".to_string()),
+            },
+            Worktree {
+                path: PathBuf::from("/repo/fog/wt-feature"),
+                branch: Some("feature".to_string()),
+            },
+        ];
+        // Inside nested worktree — should pick the nested one, not the ancestor
+        let cur = containing_worktree(&wts, Path::new("/repo/fog/wt-feature")).unwrap();
+        assert_eq!(cur.branch.as_deref(), Some("feature"));
+        let cur = containing_worktree(&wts, Path::new("/repo/fog/wt-feature/sub")).unwrap();
+        assert_eq!(cur.branch.as_deref(), Some("feature"));
+        // Inside main — should pick main
+        let cur = containing_worktree(&wts, Path::new("/repo/fog")).unwrap();
+        assert_eq!(cur.branch.as_deref(), Some("main"));
+        // Sibling not inside either's ancestor
+        let wts2 = vec![
+            Worktree {
+                path: PathBuf::from("/repo/fog"),
+                branch: Some("main".to_string()),
+            },
+            Worktree {
+                path: PathBuf::from("/repo/fog-feature"),
+                branch: Some("feature".to_string()),
+            },
+        ];
+        assert!(
+            containing_worktree(&wts2, Path::new("/repo/fog"))
+                .unwrap()
+                .branch
+                == Some("main".to_string())
+        );
+        assert!(containing_worktree(&wts2, Path::new("/repo/other")).is_none());
+    }
+
+    #[test]
+    fn test_is_current_worktree_nested_false_positive_fix() {
+        let wts = vec![
+            Worktree {
+                path: PathBuf::from("/repo/fog"),
+                branch: Some("main".to_string()),
+            },
+            Worktree {
+                path: PathBuf::from("/repo/fog/wt-feature"),
+                branch: Some("feature".to_string()),
+            },
+        ];
+        let config_dir_in_nested = Path::new("/repo/fog/wt-feature");
+        // Parent contains the nested path, but is NOT the current worktree
+        assert!(wts[0].contains(config_dir_in_nested));
+        assert!(!is_current_worktree(&wts[0], &wts, config_dir_in_nested));
+        // Nested worktree is the current one
+        assert!(is_current_worktree(&wts[1], &wts, config_dir_in_nested));
+        // From main, nested is not current
+        let config_dir_in_main = Path::new("/repo/fog");
+        assert!(is_current_worktree(&wts[0], &wts, config_dir_in_main));
+        assert!(!is_current_worktree(&wts[1], &wts, config_dir_in_main));
+    }
+
+    #[test]
+    fn test_is_current_worktree_subdir_same_worktree() {
+        // fog.json in a subdir (e.g. infra/) is still the same worktree
+        let wts = vec![Worktree {
+            path: PathBuf::from("/repo/fog"),
+            branch: Some("main".to_string()),
+        }];
+        assert!(is_current_worktree(
+            &wts[0],
+            &wts,
+            Path::new("/repo/fog/infra")
+        ));
+        // But a sibling worktree is not considered current
+        let wts2 = vec![
+            Worktree {
+                path: PathBuf::from("/repo/fog"),
+                branch: Some("main".to_string()),
+            },
+            Worktree {
+                path: PathBuf::from("/repo/fog-feature"),
+                branch: Some("feature".to_string()),
+            },
+        ];
+        assert!(!is_current_worktree(
+            &wts2[1],
+            &wts2,
+            Path::new("/repo/fog/infra")
+        ));
     }
 }
