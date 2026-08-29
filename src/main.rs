@@ -67,6 +67,11 @@ struct Cli {
     /// `$TMPDIR/fog-<pid>.logs/` for inspection with `fog logs <pid>`.
     #[arg(short, long)]
     detach: bool,
+
+    /// Ignore shared services: even if `share:true`/`reuse:true` with a passing
+    /// `health_check`, start a fresh instance instead of borrowing/reusing.
+    #[arg(long)]
+    no_share: bool,
 }
 
 /// Resolves the config file to use, honoring `--branch`:
@@ -843,10 +848,14 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
         // Concurrent scripts (default) start alongside existing instances of the
         // same project+script instead of replacing them, so no coordination or
         // reclaim happens. Only single-instance scripts take over from a previous
-        // run (handing over `reuse` services).
-        if !script.concurrent {
+        // run (handing over `reuse` services). `--no-share` disables reuse handoff.
+        if !script.concurrent && !cli.no_share {
             let reuse = reuse_names(script);
             (adopted, owner_lock) = reconcile_instance(project, name, branch.as_deref(), &reuse);
+        } else if !script.concurrent && cli.no_share {
+            // Still reclaim the old instance (single-instance semantics) but
+            // without adopting any services.
+            (adopted, owner_lock) = reconcile_instance(project, name, branch.as_deref(), &[]);
         }
     }
 
@@ -971,7 +980,7 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
         }
     }
 
-    let runtime = fog::runtime::build_with_ports(
+    let runtime = fog::runtime::build_with_ports_no_share(
         script,
         name,
         &config_dir,
@@ -982,6 +991,7 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
         &mut adopted,
         &port_map,
         branch_for_ports.clone(),
+        cli.no_share,
     )
     .map_err(|e| {
         // Restore the terminal before reporting so it is usable again.
@@ -1018,10 +1028,10 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
         config_watcher::spawn_config_watcher(config_path.clone(), Arc::new(AtomicBool::new(false)))
     };
 
-    let mut app = App::new(
-        runtime.items,
-        runtime.pending_services,
-        runtime.proxy,
+    let mut app = App::new_with_opts(fog::app::AppCreateOpts {
+        items: runtime.items,
+        pending_services: runtime.pending_services,
+        proxy: runtime.proxy,
         sigint,
         scrollback,
         sidebar_min,
@@ -1030,9 +1040,10 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
         config_path,
         config_rx,
         ipc_state,
-        cli.config.clone(),
-        cli.save_logs,
-    );
+        config_rel: cli.config.clone(),
+        save_logs: cli.save_logs,
+        no_share: cli.no_share,
+    });
     if detached {
         app.run_headless()?;
     } else {

@@ -27,6 +27,7 @@ pub struct BuildOpts<'a> {
     pub adopted: &'a mut HashMap<String, HandoffItem>,
     pub ports: &'a crate::ports::PortMap,
     pub branch_override: Option<String>,
+    pub no_share: bool,
 }
 
 /// Options for spawning a checked terminal.
@@ -387,6 +388,37 @@ pub fn build_with_ports(
         adopted,
         ports,
         branch_override,
+        no_share: false,
+    })
+}
+
+/// Same as `build_with_ports` but with `no_share` flag to ignore shared services.
+#[allow(clippy::too_many_arguments)]
+pub fn build_with_ports_no_share(
+    script: &ScriptConfig,
+    script_name: &str,
+    config_dir: &Path,
+    project: Option<String>,
+    save_logs: bool,
+    scrollback: usize,
+    log_dir: Option<std::path::PathBuf>,
+    adopted: &mut HashMap<String, HandoffItem>,
+    ports: &crate::ports::PortMap,
+    branch_override: Option<String>,
+    no_share: bool,
+) -> Result<Runtime, String> {
+    build_with_opts(BuildOpts {
+        script,
+        script_name,
+        config_dir,
+        project,
+        save_logs,
+        scrollback,
+        log_dir,
+        adopted,
+        ports,
+        branch_override,
+        no_share,
     })
 }
 
@@ -403,6 +435,7 @@ pub fn build_with_opts(opts: BuildOpts) -> Result<Runtime, String> {
         adopted,
         ports,
         branch_override,
+        no_share,
     } = opts;
     // Resolve branch: override from caller (allocated ports context) wins,
     // otherwise infer from git worktree.
@@ -470,7 +503,10 @@ pub fn build_with_opts(opts: BuildOpts) -> Result<Runtime, String> {
         // instance (concurrent: false) shares via `reuse` (handed over during a
         // reclaim/worktree switch); concurrent mode shares via `share` (borrowed
         // if already up). The other flag is ignored in its mode.
-        let shared = if script.concurrent {
+        // `--no-share` disables both mechanisms globally.
+        let shared = if no_share {
+            false
+        } else if script.concurrent {
             entry.share
         } else {
             entry.reuse
@@ -975,6 +1011,64 @@ mod tests {
         assert!(
             !rt.items[0].reused,
             "share is ignored in single-instance mode: the service must be started"
+        );
+        assert!(!rt.items[0].shared);
+    }
+
+    #[test]
+    fn test_build_no_share_ignores_share_even_when_healthy() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let script =
+            script_with_concurrent(vec![share_entry("db", Some(tcp_health(&addr.to_string())))]);
+        let mut adopted = HashMap::new();
+        let rt = build_with_ports_no_share(
+            &script,
+            "dev",
+            Path::new("."),
+            None,
+            false,
+            100,
+            None,
+            &mut adopted,
+            &HashMap::new(),
+            None,
+            true,
+        )
+        .unwrap();
+        assert!(
+            !rt.items[0].reused,
+            "--no-share must not borrow an up shared resource"
+        );
+        assert!(
+            !rt.items[0].shared,
+            "--no-share must not mark the terminal as shared"
+        );
+    }
+
+    #[test]
+    fn test_build_no_share_ignores_reuse_even_when_healthy() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let script = script_with(vec![reuse_entry("infra", Some(tcp_health(&addr.to_string())))]);
+        let mut adopted = HashMap::new();
+        let rt = build_with_ports_no_share(
+            &script,
+            "dev",
+            Path::new("."),
+            None,
+            false,
+            100,
+            None,
+            &mut adopted,
+            &HashMap::new(),
+            None,
+            true,
+        )
+        .unwrap();
+        assert!(
+            !rt.items[0].reused,
+            "--no-share must not borrow an up reused resource"
         );
         assert!(!rt.items[0].shared);
     }
