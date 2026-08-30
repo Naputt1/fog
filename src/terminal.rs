@@ -75,8 +75,9 @@ pub struct Terminal {
     /// Extra env vars resolved from `service.env` templates (`${ports.*}` etc).
     pub injected_env: std::collections::HashMap<String, String>,
     /// Git branch of the worktree this service runs in, if any. Exposed to the
-    /// spawned process as `FOG_BRANCH` so compose files can derive per-branch
-    /// project names, hostnames, and ports.
+    /// spawned process as `FOG_BRANCH` (DNS-safe slug, `/` → `-`) and
+    /// `FOG_BRANCH_RAW` (original `feat/book`). `FOG_BRANCH_SLUG` mirrors
+    /// `FOG_BRANCH` for explicitness.
     pub branch: Option<String>,
     /// Project identity (git-common-dir) of the instance this terminal serves,
     /// used to decide whether shared reuse infrastructure may be torn down.
@@ -184,10 +185,10 @@ fn check_target(config: &HealthCheckConfig, branch: Option<&str>) -> bool {
 /// The compose file is resolved relative to the service's working directory at
 /// build time, so `config.compose_file` is already absolute here.
 ///
-/// `branch` (the worktree branch, exported to services as `FOG_BRANCH`) is
-/// forwarded to the subprocess so branch-suffixed compose project names
-/// (e.g. `redfox-${FOG_BRANCH:-main}`) resolve to the running project instead
-/// of the `main` default.
+/// `branch` (the worktree branch, exported to services as `FOG_BRANCH` (slug)
+/// and `FOG_BRANCH_RAW` (raw)) is forwarded to the subprocess so
+/// branch-suffixed compose project names (e.g. `redfox-${FOG_BRANCH:-main}`)
+/// resolve to the running project instead of the `main` default.
 fn check_docker_target(config: &HealthCheckConfig, branch: Option<&str>) -> bool {
     let timeout = config.timeout_ms.unwrap_or(2000);
     let compose_file = config
@@ -201,7 +202,10 @@ fn check_docker_target(config: &HealthCheckConfig, branch: Option<&str>) -> bool
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
     if let Some(branch) = branch {
-        cmd.env("FOG_BRANCH", branch);
+        let slug = crate::ports::branch_slug(branch).unwrap_or_else(|_| branch.replace('/', "-"));
+        cmd.env("FOG_BRANCH", slug.clone());
+        cmd.env("FOG_BRANCH_RAW", branch);
+        cmd.env("FOG_BRANCH_SLUG", slug);
     }
 
     let mut child = match cmd.spawn() {
@@ -977,7 +981,10 @@ impl Terminal {
         let mut cmd_builder = CommandBuilder::new(&shell);
         cmd_builder.cwd(path);
         if let Some(branch) = &self.branch {
-            cmd_builder.env("FOG_BRANCH", branch);
+            let slug = crate::ports::branch_slug(branch).unwrap_or_else(|_| branch.replace('/', "-"));
+            cmd_builder.env("FOG_BRANCH", slug.clone());
+            cmd_builder.env("FOG_BRANCH_RAW", branch);
+            cmd_builder.env("FOG_BRANCH_SLUG", slug);
         }
         for (k, v) in &self.injected_env {
             cmd_builder.env(k.clone(), v.clone());
@@ -1616,7 +1623,10 @@ impl Terminal {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
         if let Some(branch) = &self.branch {
-            cmd.env("FOG_BRANCH", branch);
+            let slug = crate::ports::branch_slug(branch).unwrap_or_else(|_| branch.replace('/', "-"));
+            cmd.env("FOG_BRANCH", slug.clone());
+            cmd.env("FOG_BRANCH_RAW", branch);
+            cmd.env("FOG_BRANCH_SLUG", slug);
         }
         if let Some(dir) = cwd {
             cmd.current_dir(dir);

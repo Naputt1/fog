@@ -179,7 +179,7 @@ Services flagged `"share": true` are **shared between all concurrent instances**
 
 ### `FOG_BRANCH` environment variable
 
-When fog runs a script in a git worktree (via `--branch` or an in-place worktree switch), it injects a `FOG_BRANCH` environment variable naming the checked-out branch into every service process. This lets a compose file derive per-branch names — compose project, container hostnames, and host ports — so multiple branches of the same repo never collide:
+When fog runs a script in a git worktree (via `--branch` or an in-place worktree switch), it injects `FOG_BRANCH` (DNS-safe **slug**, `/` → `-`, lowercased, `feat/book` → `feat-book`) and `FOG_BRANCH_RAW` (original `feat/book`) into every service process, plus `FOG_BRANCH_SLUG` as an alias for the slug. This lets a compose file derive per-branch names — compose project, container hostnames, and host ports — so multiple branches of the same repo never collide. Templates `${branch}` / `${FOG_BRANCH}` resolve to the slug; `${branch_raw}` / `${FOG_BRANCH_RAW}` resolve to the raw name:
 
 ```json
 {
@@ -188,6 +188,8 @@ When fog runs a script in a git worktree (via `--branch` or an in-place worktree
   "cmd": "docker compose -p redfox-${FOG_BRANCH:-main} up -d"
 }
 ```
+
+A branch like `feat/book` sanitizes to `feat-book` (`feat/book.acme` would be an invalid DNS hostname). Use `${branch_raw}` only for display/logging — never for `Host()` or DNS. If the slug would be empty or exceed 63 chars (DNS label limit) fog errors.
 
 When the script is not in a git worktree (or the worktree is detached), `FOG_BRANCH` is unset; use `:-` fallbacks (e.g. `${FOG_BRANCH:-main}`) in compose files to keep them usable outside fog.
 

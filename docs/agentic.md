@@ -94,7 +94,7 @@ fog logs 5678 --tail 100  # or SSE via web UI /logs/stream?pid=5678
 
 `db` with `share:true` was borrowed — first instance owns it, second shows re-used tab. `api`/`web` used `ports:{api:0}` random per-instance + templated `upstream`, so no collision. Last `fog kill` tears DB down; any sibling keeps it alive.
 
-**Per-branch isolation:** `FOG_BRANCH` is injected into every service; compose files use `docker compose -p redfox-${FOG_BRANCH:-main}` so `main` and `feature-x` branches get distinct project names/ports. Templates `${branch}` / `${FOG_BRANCH}` work in `cmd`, `env`, `health_check.target`, and `proxy.upstream/host`.
+**Per-branch isolation:** `FOG_BRANCH` (slug, `feat/book` → `feat-book`) and `FOG_BRANCH_RAW` (raw) are injected into every service; compose files use `docker compose -p redfox-${FOG_BRANCH:-main}` so `main` and `feature-x` branches get distinct project names/ports. Templates `${branch}` / `${FOG_BRANCH}` are slugs; `${branch_raw}` / `${FOG_BRANCH_RAW}` are raw and work in `cmd`, `env`, `health_check.target`, and `proxy.upstream/host`.
 
 ## Worktree switch in the TUI — `s`
 

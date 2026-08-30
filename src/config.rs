@@ -49,7 +49,8 @@ pub enum HealthCheckSpec {
 ///
 /// Explicit only: if you want `http://<branch>.acme` to reach a native
 /// service on a random port, declare it here. `port` must be a `${ports.*}`
-/// template (or literal port); `host` may contain `${branch}` / `${FOG_BRANCH}`.
+/// template (or literal port); `host` may contain `${branch}` / `${FOG_BRANCH}`
+/// (DNS-safe slug, `/` → `-`) or `${branch_raw}` / `${FOG_BRANCH_RAW}` (raw).
 #[derive(Debug, Deserialize, Clone, serde::Serialize)]
 pub struct NativeRouteConfig {
     /// Host rule, e.g. `"${branch}.acme"` or `"api.${branch}.acme"`.
@@ -79,7 +80,8 @@ pub struct ConfigEntry {
     /// May contain `${ports.*}` templates.
     pub shutdown_cmd: Option<String>,
     /// Environment variables injected into the service process. Values may
-    /// contain `${ports.*}` and `${branch}`/`${FOG_BRANCH}` templates.
+    /// contain `${ports.*}` and `${branch}`/`${FOG_BRANCH}` (slug) or
+    /// `${branch_raw}`/`${FOG_BRANCH_RAW}` (raw) templates.
     pub env: Option<HashMap<String, String>>,
     /// When another instance of the same project+script starts, this service's
     /// `shutdown_cmd` is skipped (and its live process handed over) instead of

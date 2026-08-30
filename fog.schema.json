@@ -28,7 +28,7 @@
                 },
                 "env": {
                   "type": "object",
-                  "description": "Environment variables injected into the service process. Values may contain ${ports.<name>} and ${branch}/${FOG_BRANCH} templates, e.g. {\"PORT\": \"${ports.api}\"}",
+                  "description": "Environment variables injected into the service process. Values may contain ${ports.<name>} and ${branch}/${FOG_BRANCH} (DNS-safe slug, '/' → '-') or ${branch_raw}/${FOG_BRANCH_RAW} (raw) templates, e.g. {\"PORT\": \"${ports.api}\"}",
                   "additionalProperties": { "type": "string" }
                 },
                 "reuse": {
@@ -132,7 +132,7 @@
         "type": "object",
         "required": ["host", "service", "port"],
         "properties": {
-          "host": { "type": "string", "description": "Host rule, may contain ${branch} / ${FOG_BRANCH} (e.g. \"${branch}.acme\")" },
+          "host": { "type": "string", "description": "Host rule, may contain ${branch} / ${FOG_BRANCH} (DNS-safe slug, '/' → '-', e.g. \"${branch}.acme\") or ${branch_raw} / ${FOG_BRANCH_RAW} (raw)" },
           "service": { "type": "string", "description": "Service name this route points to" },
           "port": { "type": "string", "description": "Port template, must be ${ports.<name>} or literal port (e.g. \"${ports.api}\" or \"3000\")" },
           "path_prefix": { "type": "string", "description": "Optional PathPrefix to combine with host (e.g. \"/api\")" }
