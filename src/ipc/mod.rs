@@ -86,7 +86,7 @@ mod tests {
         // Build the state before wrapping it in an Arc so the plain `config_dir`
         // field (which is set once, before the server shares the state) can be
         // populated, mirroring `run_script`.
-        let mut state = IpcState::new("dev".to_string(), None, None);
+        let mut state = IpcState::new("dev".to_string(), None, None, false);
         state.services.lock().unwrap().push(ServiceStatus {
             name: "web".into(),
             running: true,
@@ -127,7 +127,7 @@ mod tests {
 
     #[test]
     fn test_kill_sets_flag() {
-        let state = Arc::new(IpcState::new("dev".to_string(), None, None));
+        let state = Arc::new(IpcState::new("dev".to_string(), None, None, false));
         let path = std::env::temp_dir().join("fog-test-kill.sock");
         let _ = fs::remove_file(&path);
         let listener = UnixListener::bind(&path).unwrap();
@@ -150,7 +150,7 @@ mod tests {
         // A live socket server must receive the kill request even though the
         // instance PID is long gone; the nonexistent PID also exercises the
         // signal fallback path without signalling anything real.
-        let state = Arc::new(IpcState::new("dev".to_string(), None, None));
+        let state = Arc::new(IpcState::new("dev".to_string(), None, None, false));
         let path = std::env::temp_dir().join("fog-test-terminate.sock");
         let _ = fs::remove_file(&path);
         let listener = UnixListener::bind(&path).unwrap();
@@ -184,7 +184,7 @@ mod tests {
         let dup_fd = unsafe { libc::dup(master_fd) };
         assert!(dup_fd >= 0);
 
-        let state = Arc::new(IpcState::new("dev".to_string(), None, None));
+        let state = Arc::new(IpcState::new("dev".to_string(), None, None, false));
         state.handoff_results.lock().unwrap().push(HandoffItem {
             name: "db".into(),
             pid: 99_999,
@@ -240,7 +240,7 @@ mod tests {
         let dup_fd = unsafe { libc::dup(master_fd) };
         assert!(dup_fd >= 0);
 
-        let state = Arc::new(IpcState::new("dev".to_string(), None, None));
+        let state = Arc::new(IpcState::new("dev".to_string(), None, None, false));
         state.handoff_results.lock().unwrap().push(HandoffItem {
             name: "db".into(),
             pid: 99_999,
@@ -295,7 +295,7 @@ mod tests {
     fn test_plain_kill_does_not_consume_handoffs() {
         // A plain kill arriving while a handoff is pending must not take the
         // prepared results away from the reclaiming client.
-        let state = Arc::new(IpcState::new("dev".to_string(), None, None));
+        let state = Arc::new(IpcState::new("dev".to_string(), None, None, false));
         let pty = portable_pty::native_pty_system()
             .openpty(portable_pty::PtySize {
                 rows: 24,
@@ -351,7 +351,7 @@ mod tests {
 
     #[test]
     fn test_service_action_roundtrip() {
-        let state = Arc::new(IpcState::new("dev".to_string(), None, None));
+        let state = Arc::new(IpcState::new("dev".to_string(), None, None, false));
         let path = unique("svcaction.sock");
         let _ = fs::remove_file(&path);
         let listener = UnixListener::bind(&path).unwrap();
@@ -397,7 +397,7 @@ mod tests {
 
     #[test]
     fn test_service_action_timeout() {
-        let state = Arc::new(IpcState::new("dev".to_string(), None, None));
+        let state = Arc::new(IpcState::new("dev".to_string(), None, None, false));
         let path = unique("svcaction-timeout.sock");
         let _ = fs::remove_file(&path);
         let listener = UnixListener::bind(&path).unwrap();
@@ -490,7 +490,7 @@ mod tests {
 
         let listener = UnixListener::bind(&sock).unwrap();
         let dir_clone = dir.clone();
-        let state = Arc::new(IpcState::new("dev".to_string(), None, None));
+        let state = Arc::new(IpcState::new("dev".to_string(), None, None, false));
         let server_state = state.clone();
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
@@ -517,7 +517,7 @@ mod tests {
 
         let listener = UnixListener::bind(&sock).unwrap();
         let dir_clone = dir.clone();
-        let state = Arc::new(IpcState::new("dev".to_string(), None, None));
+        let state = Arc::new(IpcState::new("dev".to_string(), None, None, false));
         let server_state = state.clone();
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
@@ -537,7 +537,7 @@ mod tests {
 
     #[test]
     fn test_stream_proxy_log_tail() {
-        let state = Arc::new(IpcState::new("dev".to_string(), None, None));
+        let state = Arc::new(IpcState::new("dev".to_string(), None, None, false));
         let q = Arc::new(Mutex::new(VecDeque::new()));
         {
             let mut lk = q.lock().unwrap();
@@ -586,7 +586,7 @@ mod tests {
 
     #[test]
     fn test_logs_request_missing_file_roundtrip() {
-        let state = Arc::new(IpcState::new("dev".to_string(), None, None));
+        let state = Arc::new(IpcState::new("dev".to_string(), None, None, false));
         let sock = unique("logsreq.sock");
         let _ = fs::remove_file(&sock);
         let listener = UnixListener::bind(&sock).unwrap();

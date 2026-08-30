@@ -254,6 +254,12 @@ impl App {
     /// Extracts live services requested for handover by a replacing instance
     /// and publishes them for the IPC thread to send over the socket.
     fn perform_handoff(&mut self) {
+        if self.no_share {
+            self.ipc_state
+                .handoff_prepared
+                .store(true, Ordering::SeqCst);
+            return;
+        }
         let req = self
             .ipc_state
             .handoff_req
@@ -266,6 +272,7 @@ impl App {
         let mut results = Vec::new();
         for item in &mut self.items {
             if names.contains(&item.name)
+                && (item.reused || item.shared)
                 && let Some(handoff) = item.extract_handoff()
             {
                 results.push(handoff);
@@ -1781,7 +1788,7 @@ mod tests {
             save_logs: false,
             config_rx: rx,
             config_watcher_stop: Arc::new(AtomicBool::new(false)),
-            ipc_state: Arc::new(IpcState::new("test".to_string(), None, None)),
+            ipc_state: Arc::new(IpcState::new("test".to_string(), None, None, false)),
             proxy_tab_index,
             sidebar_min: 10,
             sidebar_max: 30,

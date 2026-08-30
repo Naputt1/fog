@@ -85,6 +85,7 @@ pub(crate) fn handle_connection(mut stream: UnixStream, state: Arc<IpcState>) {
                 started_at: state.started_at,
                 ports,
                 native_routes,
+                no_share: state.no_share,
             })
             .unwrap_or_default();
             let mut writer = stream;
