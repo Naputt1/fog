@@ -207,6 +207,40 @@ impl Default for IndexConfig {
     }
 }
 
+/// Hardening limits and authentication for the built-in terminal WebSocket
+/// gateway (`/ws/terminal`).
+///
+/// These are safety valves for an endpoint that otherwise spawns an unbounded
+/// number of PTYs (each a live shell): cap concurrent sessions per client IP,
+/// cap the size of a single inbound frame, bound the idle timeout, and
+/// optionally require a shared `auth_token` passed as a query parameter.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct TerminalConfig {
+    /// Maximum number of concurrent terminal sessions per client IP (default
+    /// `8`). Exceeding it returns `429 Too Many Requests`.
+    pub max_sessions_per_ip: usize,
+    /// Maximum size in bytes of a single inbound frame (default `65536`, 64
+    /// KiB). Larger frames close the socket with code `1009`.
+    pub max_message_bytes: usize,
+    /// Session idle timeout in seconds (default `900`, i.e. 15 minutes).
+    pub idle_timeout_secs: u64,
+    /// Optional shared secret required via an `auth_token` query parameter.
+    /// When set, a request without a matching token is rejected with `401`.
+    pub auth_token: Option<String>,
+}
+
+impl Default for TerminalConfig {
+    fn default() -> Self {
+        Self {
+            max_sessions_per_ip: 8,
+            max_message_bytes: 64 * 1024,
+            idle_timeout_secs: 900,
+            auth_token: None,
+        }
+    }
+}
+
 /// A named script: a full set of services and optional proxy configuration.
 #[derive(Debug, Deserialize, Clone)]
 pub struct ScriptConfig {
@@ -214,6 +248,10 @@ pub struct ScriptConfig {
     pub service: Option<Vec<ConfigEntry>>,
     /// Optional reverse proxy configuration.
     pub proxy: Option<ProxyConfig>,
+    /// Optional hardening limits and auth for the terminal WebSocket gateway.
+    /// Falls back to built-in defaults when absent.
+    #[serde(default)]
+    pub terminal: Option<TerminalConfig>,
     /// Allow multiple concurrent instances of this script in the same
     /// project+branch. When true (default), running the script again starts
     /// alongside existing instances instead of killing them; services flagged

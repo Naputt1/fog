@@ -18,5 +18,6 @@ pub mod router;
 pub mod runtime;
 pub mod selection;
 pub mod terminal;
+pub mod terminal_ws;
 pub mod theme;
 pub mod worktree;

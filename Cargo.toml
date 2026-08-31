@@ -48,6 +48,9 @@ tokio-rustls = "0.26"
 rustls = "0.23"
 rustls-pemfile = "2"
 notify = "8"
+tokio-tungstenite = "0.30"
+futures-channel = "0.3"
+futures-util = "0.3"
 
 [profile.release]
 opt-level = 3

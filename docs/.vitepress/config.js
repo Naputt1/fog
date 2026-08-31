@@ -31,6 +31,7 @@ export default {
           { text: 'Router & DNS', link: '/router' },
           { text: 'Index Server', link: '/index-server' },
           { text: 'Proxy', link: '/proxy' },
+          { text: 'Terminal Protocol', link: '/terminal-protocol' },
           { text: 'Themes', link: '/themes' },
           { text: 'Architecture', link: '/architecture' },
         ],

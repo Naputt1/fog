@@ -146,6 +146,10 @@ pub struct ProxyInstance {
     pub max_log_entries: usize,
     tls_cert: Option<String>,
     tls_key: Option<String>,
+    /// Hardening limits and auth for the built-in terminal gateway.
+    terminal: Arc<crate::config::TerminalConfig>,
+    /// Shared per-IP session accounting for the terminal gateway.
+    terminal_sessions: Arc<crate::terminal_ws::SessionsRegistry>,
 }
 
 impl ProxyInstance {
@@ -168,7 +172,15 @@ impl ProxyInstance {
             max_log_entries,
             tls_cert,
             tls_key,
+            terminal: Arc::new(crate::config::TerminalConfig::default()),
+            terminal_sessions: Arc::new(crate::terminal_ws::SessionsRegistry::default()),
         }
+    }
+
+    /// Configures the built-in terminal gateway's hardening limits and auth.
+    pub fn with_terminal_config(mut self, cfg: crate::config::TerminalConfig) -> Self {
+        self.terminal = Arc::new(cfg);
+        self
     }
 
     pub fn start(&mut self) {
@@ -183,6 +195,8 @@ impl ProxyInstance {
         let max_entries = self.max_log_entries;
         let running = self.running.clone();
         let shutdown = self.shutdown.clone();
+        let terminal = self.terminal.clone();
+        let terminal_sessions = self.terminal_sessions.clone();
 
         // Load TLS config every start so cert rotation is picked up on
         // `restart()`. A TLS misconfiguration is fatal for the proxy: it must
@@ -273,6 +287,8 @@ impl ProxyInstance {
                             let routes_for_svc = routes.clone();
                             let acceptor = tls_acceptor.clone();
                             let is_tls = tls_acceptor.is_some();
+                            let terminal = terminal.clone();
+                            let terminal_sessions = terminal_sessions.clone();
 
                             tokio::spawn(async move {
                                 let io = if let Some(ref acceptor) = acceptor {
@@ -309,6 +325,8 @@ impl ProxyInstance {
                                         max_entries,
                                         peer_ip.clone(),
                                         is_tls,
+                                        terminal.clone(),
+                                        terminal_sessions.clone(),
                                     )
                                 });
                                 if let Err(e) = http1::Builder::new()
@@ -957,6 +975,7 @@ async fn handle_http(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_request(
     req: Request<hyper::body::Incoming>,
     client: Client<HttpConnector, Full<Bytes>>,
@@ -965,6 +984,8 @@ async fn handle_request(
     max_log_entries: usize,
     peer_ip: String,
     is_tls: bool,
+    terminal: Arc<crate::config::TerminalConfig>,
+    terminal_sessions: Arc<crate::terminal_ws::SessionsRegistry>,
 ) -> Result<Response<BoxedBody>, std::convert::Infallible> {
     let method = req.method().to_string();
     let path = req.uri().path().to_string();
@@ -973,6 +994,33 @@ async fn handle_request(
         .headers()
         .get(hyper::header::HOST)
         .and_then(|v| v.to_str().ok());
+
+    // The terminal gateway is a built-in endpoint, so it must be served before
+    // any configured route (and independently of route/host matching).
+    if crate::terminal_ws::is_terminal_upgrade(&req) {
+        // Optional `?service=<name>` attach target (working-directory attach).
+        let service = req.uri().query().and_then(|q| {
+            q.split('&')
+                .find_map(|pair| pair.strip_prefix("service=").map(String::from))
+        });
+        let target = service
+            .as_ref()
+            .and_then(|s| crate::index::resolve_service_target(s));
+        if service.is_some() && target.is_none() {
+            return Ok(hyper::Response::builder()
+                .status(hyper::StatusCode::NOT_FOUND)
+                .body(body_full(Bytes::from("unknown or not running service")))
+                .expect("response builder failed"));
+        }
+        return crate::terminal_ws::handle_terminal_upgrade(
+            req,
+            terminal,
+            terminal_sessions,
+            peer_ip,
+            target,
+        )
+        .await;
+    }
 
     let matched = routes
         .iter()

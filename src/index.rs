@@ -739,16 +739,32 @@ fn serve_blocking(port: u16, network: String) -> io::Result<()> {
         let listener = tokio::net::TcpListener::bind(&addr)
             .await
             .map_err(|e| io::Error::other(format!("bind {addr}: {e}")))?;
+        // The embedded index server is where the web UI (and, via the vite dev
+        // proxy, the dev UI) is actually reached, so it must serve the built-in
+        // terminal gateway too — otherwise `/ws/terminal` would fall through to
+        // the SPA fallback and the browser upgrade would fail. The standalone
+        // server uses the gateway's default hardening limits (it has no
+        // per-script `TerminalConfig`).
+        let terminal = std::sync::Arc::new(crate::config::TerminalConfig::default());
+        let terminal_sessions = std::sync::Arc::new(crate::terminal_ws::SessionsRegistry::default());
         loop {
-            let Ok((stream, _)) = listener.accept().await else {
+            let Ok((stream, peer)) = listener.accept().await else {
                 continue;
             };
+            let peer_ip = peer.ip().to_string();
             let io = TokioIo::new(stream);
             let network = network.clone();
+            let terminal = terminal.clone();
+            let terminal_sessions = terminal_sessions.clone();
             tokio::spawn(async move {
                 let svc = service_fn(move |req: Request<hyper::body::Incoming>| {
                     let network = network.clone();
-                    async move { serve_index(&network, req).await }
+                    let terminal = terminal.clone();
+                    let terminal_sessions = terminal_sessions.clone();
+                    let peer_ip = peer_ip.clone();
+                    async move {
+                        serve_index(&network, req, terminal, terminal_sessions, peer_ip).await
+                    }
                 });
                 let _ = http1::Builder::new()
                     .serve_connection(io, svc)
@@ -762,6 +778,7 @@ fn serve_blocking(port: u16, network: String) -> io::Result<()> {
 }
 
 /// Routes embedded-server requests:
+///   - `/ws/terminal` → the built-in terminal WebSocket gateway (live PTY)
 ///   - `/logs/stream` → SSE stream of a container's `docker logs -f`
 ///   - `/api/...`     → JSON API endpoints consumed by the SPA
 ///   - `/api/instances/{pid}/services/{name}/action` → `POST` a service action
@@ -773,9 +790,46 @@ fn serve_blocking(port: u16, network: String) -> io::Result<()> {
 async fn serve_index(
     network: &str,
     req: Request<Incoming>,
+    terminal: std::sync::Arc<crate::config::TerminalConfig>,
+    terminal_sessions: std::sync::Arc<crate::terminal_ws::SessionsRegistry>,
+    peer_ip: String,
 ) -> Result<Response<RespBody>, Infallible> {
     let method = req.method().clone();
     let path = req.uri().path().to_string();
+
+    // The terminal gateway is a built-in WebSocket endpoint, so it must be
+    // served before any static/API routing. Without this the browser's
+    // `/ws/terminal` upgrade would be answered with the SPA fallback and the
+    // connection would fail immediately.
+    if crate::terminal_ws::is_terminal_upgrade(&req) {
+        // Optional `?service=<name>` attach target, resolved against running
+        // fog instances + the matching fog config.
+        let service = query_param(req.uri().query(), "service");
+        let target = service.as_ref().and_then(|s| resolve_service_target(s));
+        // An explicitly requested service that could not be resolved (not a
+        // running service, or its workdir is unknown) is a 404, not a shell.
+        if service.is_some() && target.is_none() {
+            return Ok(api_error(StatusCode::NOT_FOUND, "unknown or not running service"));
+        }
+        let resp = crate::terminal_ws::handle_terminal_upgrade(
+            req,
+            terminal,
+            terminal_sessions,
+            peer_ip,
+            target,
+        )
+        .await
+        .expect("terminal upgrade handler is infallible");
+        // Rebuild the response with this server's body type. The gateway's
+        // responses are fully buffered (empty body on 101, short text on
+        // 401/429), so collecting is cheap and lossless.
+        let (parts, body) = resp.into_parts();
+        let bytes = match body.collect().await {
+            Ok(collected) => collected.to_bytes(),
+            Err(_) => Bytes::new(),
+        };
+        return Ok(Response::from_parts(parts, Full::new(bytes).boxed()));
+    }
 
     // The action route consumes the request body (and forwards to a blocking
     // IPC call), so handle it before the path-only dispatch below.
@@ -1642,6 +1696,74 @@ fn discover_fog_instances() -> Vec<FogInstance> {
     out
 }
 
+/// Extracts a query parameter value by name from a URI query string.
+fn query_param(query: Option<&str>, name: &str) -> Option<String> {
+    query?.split('&').find_map(|pair| {
+        let mut it = pair.splitn(2, '=');
+        let key = it.next()?;
+        if key == name {
+            Some(it.next().unwrap_or("").to_string())
+        } else {
+            None
+        }
+    })
+}
+
+/// Resolves a `?service=<name>` attach target to a working-directory shell.
+///
+/// This is a *working-directory* attach (pattern B), not a live PTY attach:
+/// the managed service's PTY lives in its own fog daemon process and is only
+/// reachable over IPC, so the web terminal cannot share that exact master.
+/// Instead the shell opens in the service's working directory (its `path`,
+/// resolved against the instance's config dir) with the service's env, which
+/// gives the user a terminal that behaves as if it is inside the running
+/// service. The service process itself is never touched and keeps running
+/// regardless of the terminal session.
+///
+/// Returns `None` when no running instance reports a running service of that
+/// name, or when the instance's config dir is unknown.
+pub fn resolve_service_target(service: &str) -> Option<crate::terminal_ws::ServiceTarget> {
+    use std::path::Path;
+    let inst = discover_fog_instances().into_iter().find(|i| {
+        i.services
+            .iter()
+            .any(|s| s.name == service && s.running)
+    })?;
+    let config_dir = std::path::PathBuf::from(inst.config_dir.clone()?);
+    let mut cwd = config_dir.clone();
+    let mut env: Vec<(String, String)> = Vec::new();
+    // Best-effort: load the instance's fog.json to refine the service's
+    // working directory (its `path`) and surface its declared env vars. If the
+    // config cannot be read or the entry not found, fall back to the instance
+    // config dir, which is still a sensible shell root for the project.
+    if let Ok(cfg) = crate::config::load(&config_dir.join("fog.json")) {
+        for script in cfg.scripts.values() {
+            if let Some(entries) = &script.service {
+                for e in entries {
+                    let name = e.name.clone().unwrap_or_else(|| {
+                        Path::new(&e.path)
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into_owned()
+                    });
+                    if name == service {
+                        cwd = config_dir.join(&e.path);
+                        if let Some(env_map) = &e.env {
+                            env = env_map
+                                .iter()
+                                .map(|(k, v)| (k.clone(), v.clone()))
+                                .collect();
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    Some(crate::terminal_ws::ServiceTarget { cwd, env })
+}
+
 /// A launchable worktree (or the single non-git fallback) reported by
 /// `GET /api/launch/targets`.
 #[derive(serde::Serialize)]
@@ -2401,6 +2523,21 @@ fn command_exists(name: &str) -> bool {
 mod tests {
     use super::*;
     use std::thread;
+
+    #[test]
+    fn test_query_param_extracts_value() {
+        assert_eq!(
+            query_param(Some("service=api&auth_token=abc"), "service"),
+            Some("api".into())
+        );
+        assert_eq!(
+            query_param(Some("service=api&auth_token=abc"), "auth_token"),
+            Some("abc".into())
+        );
+        assert_eq!(query_param(Some("service="), "service"), Some("".into()));
+        assert_eq!(query_param(Some("x=1"), "service"), None);
+        assert_eq!(query_param(None, "service"), None);
+    }
 
     #[test]
     fn test_extract_hosts_simple() {
