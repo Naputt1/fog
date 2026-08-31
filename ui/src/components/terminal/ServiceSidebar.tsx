@@ -17,6 +17,9 @@ interface ProjectBucket {
 
 interface ServiceSidebarProps {
   groups: ProjectBucket[];
+  allGroups?: ProjectBucket[];
+  selectedProject?: string;
+  onSelectProject?: (project: string) => void;
   activeContainer?: string;
   onSelect: (container: string) => void;
   isLoading?: boolean;
@@ -99,8 +102,13 @@ function SidebarContent({ groups, activeContainer, onSelect, isLoading, isError 
 }
 
 export function ServiceSidebar(props: ServiceSidebarProps) {
-  const { groups, activeContainer, onSelect, isLoading, isError } = props;
-  const count = groups.reduce((acc, p) => acc + p.worktrees.reduce((a, w) => a + w.services.length, 0), 0);
+  const { groups, allGroups, selectedProject, onSelectProject, activeContainer, onSelect, isLoading, isError } = props;
+  const displayGroups = groups;
+  const projectOptions = (allGroups ?? groups).map((g) => ({
+    name: g.project,
+    count: g.worktrees.reduce((a, w) => a + w.services.length, 0),
+  }));
+  const count = displayGroups.reduce((acc, p) => acc + p.worktrees.reduce((a, w) => a + w.services.length, 0), 0);
   const ctx = useRightSidebar();
 
   useEffect(() => {
@@ -113,6 +121,26 @@ export function ServiceSidebar(props: ServiceSidebarProps) {
     ctx?.setOpen(false);
   };
 
+  const ProjectDropdown = () => {
+    if (!projectOptions.length || !onSelectProject) return null;
+    return (
+      <div className="border-b px-2 py-2">
+        <label className="text-muted-foreground mb-1 block font-mono text-[10px] tracking-wider uppercase">Project</label>
+        <select
+          value={selectedProject ?? ""}
+          onChange={(e) => onSelectProject(e.target.value)}
+          className="bg-background border-input focus:ring-ring w-full rounded-md border px-2 py-1.5 font-mono text-xs focus:ring-1 focus:outline-none"
+        >
+          {projectOptions.map((p) => (
+            <option key={p.name} value={p.name}>
+              {p.name} ({p.count})
+            </option>
+          ))}
+        </select>
+      </div>
+    );
+  };
+
   return (
     <>
       {/* Desktop: always visible right sidebar */}
@@ -123,9 +151,10 @@ export function ServiceSidebar(props: ServiceSidebarProps) {
             {isLoading ? "…" : count}
           </span>
         </div>
+        <ProjectDropdown />
         <ScrollArea className="flex-1 min-h-0">
           <SidebarContent
-            groups={groups}
+            groups={displayGroups}
             activeContainer={activeContainer}
             onSelect={handleSelect}
             isLoading={isLoading}
@@ -140,9 +169,10 @@ export function ServiceSidebar(props: ServiceSidebarProps) {
           <SheetHeader className="border-b px-4 py-3">
             <SheetTitle className="font-mono text-xs tracking-wider uppercase">Services</SheetTitle>
           </SheetHeader>
-          <ScrollArea className="h-[calc(100dvh-56px)]">
+          <ProjectDropdown />
+          <ScrollArea className="h-[calc(100dvh-96px)]">
             <SidebarContent
-              groups={groups}
+              groups={displayGroups}
               activeContainer={activeContainer}
               onSelect={handleSelect}
               isLoading={isLoading}

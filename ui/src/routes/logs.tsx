@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 
 import type { Service } from "@/lib/api";
@@ -8,6 +8,7 @@ import { ServiceSidebar } from "@/components/terminal/ServiceSidebar";
 
 export const Route = createFileRoute("/logs")({
   validateSearch: (search: Record<string, unknown>) => ({
+    project: typeof search.project === "string" ? search.project : undefined,
     service: typeof search.service === "string" ? search.service : undefined,
   }),
   component: LogsPage,
@@ -59,14 +60,63 @@ function groupServices(services: Service[]): ProjectBucket[] {
   return projects;
 }
 
+const LS_KEY = "fog:terminal:last";
+
+function readStored(): { project?: string; service?: string } {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = window.localStorage.getItem(LS_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return {
+      project: typeof parsed.project === "string" ? parsed.project : undefined,
+      service: typeof parsed.service === "string" ? parsed.service : undefined,
+    };
+  } catch {
+    return {};
+  }
+}
+
+function writeStored(project: string, service: string) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(LS_KEY, JSON.stringify({ project, service }));
+  } catch {
+    // ignore
+  }
+}
+
 function LogsPage() {
   const navigate = useNavigate();
   const search = Route.useSearch();
   const { data: services, isLoading, isError } = useServices();
   const [live, setLive] = useState(true);
 
+  const groups = useMemo(() => groupServices(services ?? []), [services]);
+  const projectNames = useMemo(() => groups.map((g) => g.project), [groups]);
+
+  // Effective project: URL > localStorage > first project
+  const effectiveProject = useMemo(() => {
+    if (search.project && projectNames.includes(search.project)) return search.project;
+    const stored = readStored();
+    if (stored.project && projectNames.includes(stored.project)) return stored.project;
+    return projectNames[0];
+  }, [search.project, projectNames]);
+
+  const filteredGroups = useMemo(() => {
+    if (!effectiveProject) return groups;
+    const found = groups.filter((g) => g.project === effectiveProject);
+    return found.length > 0 ? found : groups;
+  }, [groups, effectiveProject]);
+
+  // All services in the effective project (flattened)
+  const projectServices = useMemo(() => {
+    if (!filteredGroups.length) return [];
+    return filteredGroups.flatMap((g) => g.worktrees.flatMap((w) => w.services));
+  }, [filteredGroups]);
+
   const active = useMemo(() => {
-    const list = services ?? [];
+    const list = projectServices.length > 0 ? projectServices : (services ?? []);
     if (list.length === 0) return null;
     const byContainer = new Map(list.map((s) => [s.container, s]));
     const byService = new Map(list.map((s) => [s.service, s]));
@@ -75,15 +125,70 @@ function LogsPage() {
       service: svc.service,
       pid: svc.pid ?? null,
       label: svc.service,
+      project: svc.project,
     });
+    // Prefer URL service if it belongs to this project
     if (search.service) {
       const svc = byContainer.get(search.service) ?? byService.get(search.service);
       if (svc) return toActive(svc);
+      // If service not in this project, try global list (maybe project param stale)
+      const global = services ?? [];
+      const gByContainer = new Map(global.map((s) => [s.container, s]));
+      const gByService = new Map(global.map((s) => [s.service, s]));
+      const gs = gByContainer.get(search.service) ?? gByService.get(search.service);
+      if (gs) return toActive(gs as (typeof list)[number]);
+    }
+    // Try stored service if it belongs to effective project
+    const stored = readStored();
+    if (stored.service) {
+      const svc = byContainer.get(stored.service) ?? byService.get(stored.service);
+      if (svc) return toActive(svc);
     }
     return toActive(list[0]);
-  }, [services, search.service]);
+  }, [projectServices, services, search.service]);
 
-  const groups = useMemo(() => groupServices(services ?? []), [services]);
+  // Sync URL and localStorage when effective selection is known
+  useEffect(() => {
+    if (!groups.length || !active) return;
+    const targetProject = active.project;
+    const targetService = active.container;
+    const stored = readStored();
+    // Write to storage if changed
+    if (stored.project !== targetProject || stored.service !== targetService) {
+      writeStored(targetProject, targetService);
+    }
+    // Sync URL if missing or mismatched project/service
+    if (search.project !== targetProject || search.service !== targetService) {
+      // Avoid navigating if both are already matching after we just wrote
+      // Use replace to not pollute history when restoring from storage
+      void navigate({
+        to: "/logs",
+        search: { project: targetProject, service: targetService },
+        replace: true,
+      });
+    }
+  }, [groups, active, search.project, search.service, navigate]);
+
+  const handleSelectService = (container: string) => {
+    const svc = (services ?? []).find((s) => s.container === container);
+    const project = svc?.project ?? effectiveProject;
+    if (project && container) writeStored(project, container);
+    void navigate({
+      to: "/logs",
+      search: { project: project ?? effectiveProject, service: container },
+    });
+  };
+
+  const handleSelectProject = (project: string) => {
+    const g = groups.find((x) => x.project === project);
+    const first = g?.worktrees.flatMap((w) => w.services)[0];
+    const svcContainer = first?.container ?? "";
+    if (project && svcContainer) writeStored(project, svcContainer);
+    void navigate({
+      to: "/logs",
+      search: { project, service: svcContainer || undefined },
+    });
+  };
 
   return (
     <div className="flex min-w-0 flex-col gap-3 lg:h-[calc(100dvh-8rem)] lg:flex-row lg:gap-6">
@@ -111,14 +216,12 @@ function LogsPage() {
 
       {/* Right sidebar */}
       <ServiceSidebar
-        groups={groups}
+        groups={filteredGroups}
+        allGroups={groups}
+        selectedProject={effectiveProject}
+        onSelectProject={handleSelectProject}
         activeContainer={active?.container}
-        onSelect={(container) =>
-          void navigate({
-            to: "/logs",
-            search: { service: container },
-          })
-        }
+        onSelect={handleSelectService}
         isLoading={isLoading}
         isError={isError}
       />
