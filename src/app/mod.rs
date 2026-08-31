@@ -104,6 +104,9 @@ pub struct App {
     switch_popup: Option<SwitchPopup>,
     config_watcher_stop: Arc<AtomicBool>,
     ipc_state: Arc<IpcState>,
+    /// Whether `--no-share` was passed: when true shared/reuse services are
+    /// always started fresh instead of borrowed/handed over.
+    no_share: bool,
 }
 
 /// Options for creating an `App` without `clippy::too_many_arguments`.
@@ -121,6 +124,7 @@ pub struct AppCreateOpts {
     pub ipc_state: Arc<IpcState>,
     pub config_rel: PathBuf,
     pub save_logs: bool,
+    pub no_share: bool,
 }
 
 impl App {
@@ -163,6 +167,7 @@ impl App {
             ipc_state,
             config_rel,
             save_logs,
+            no_share: false,
         })
     }
 
@@ -182,6 +187,7 @@ impl App {
             ipc_state,
             config_rel,
             save_logs,
+            no_share,
         } = opts;
         let (tabs, proxy_tab_index) = Self::build_tabs(
             &items,
@@ -223,6 +229,7 @@ impl App {
             auto_scroll_col: 0,
             content_layout: Vec::new(),
             switch_popup: None,
+            no_share,
         }
     }
 
@@ -899,12 +906,14 @@ impl App {
         // (assumed-up) terminals are marked handed off so the successor keeps
         // the resource.
         let mut adopted: HashMap<String, ipc::HandoffItem> = HashMap::new();
-        for item in &mut self.items {
-            if item.reused || item.shared {
-                if let Some(handoff) = item.extract_handoff() {
-                    adopted.insert(handoff.name.clone(), handoff);
-                } else {
-                    item.preserve_for_reuse();
+        if !self.no_share {
+            for item in &mut self.items {
+                if item.reused || item.shared {
+                    if let Some(handoff) = item.extract_handoff() {
+                        adopted.insert(handoff.name.clone(), handoff);
+                    } else {
+                        item.preserve_for_reuse();
+                    }
                 }
             }
         }
@@ -980,7 +989,7 @@ impl App {
             }
         }
 
-        let built = match runtime::build_with_ports(
+        let built = match runtime::build_with_ports_no_share(
             script,
             &script_name,
             &config_dir,
@@ -991,6 +1000,7 @@ impl App {
             &mut adopted,
             &port_map,
             branch_for_ports,
+            self.no_share,
         ) {
             Ok(b) => b,
             Err(e) => {
@@ -1752,6 +1762,7 @@ mod tests {
             auto_scroll_col: 0,
             content_layout: Vec::new(),
             switch_popup: None,
+            no_share: false,
         }
     }
 
