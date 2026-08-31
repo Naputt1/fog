@@ -2,7 +2,6 @@ import { useState } from "react";
 import { Link, useLocation } from "@tanstack/react-router";
 import {
   Boxes,
-  TerminalSquare,
   SquareTerminal,
   HeartPulse,
   Activity,
@@ -27,8 +26,7 @@ interface NavItem {
 
 const NAV_ITEMS: NavItem[] = [
   { to: "/", label: "Services", icon: Boxes, match: "" },
-  { to: "/logs", label: "Logs", icon: TerminalSquare, match: "/logs" },
-  { to: "/terminal", label: "Terminal", icon: SquareTerminal, match: "/terminal" },
+  { to: "/logs", label: "Terminal", icon: SquareTerminal, match: "/logs" },
   { to: "/health", label: "Health", icon: HeartPulse, match: "/health" },
   { to: "/status", label: "Status", icon: Activity, match: "/status" },
 ];

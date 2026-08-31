@@ -22,6 +22,7 @@ import { useServices } from "@/lib/hooks";
 import { PageHeader, ErrorState } from "@/components/page-state";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { TerminalView } from "@/components/terminal/TerminalView";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -411,6 +412,7 @@ function LogsPage() {
   const navigate = useNavigate();
   const search = Route.useSearch();
   const { data: services, isLoading, isError } = useServices();
+  const [viewMode, setViewMode] = useState<"logs" | "terminal">("logs");
 
   // Resolve the active selection. The picker shows friendly service names, but
   // `/logs/stream` needs either a docker container name (`?service=<container>`)
@@ -563,8 +565,12 @@ function LogsPage() {
   return (
     <div className="min-w-0 space-y-6">
       <PageHeader
-        title="Logs"
-        description="Live streaming output from a running service via SSE (docker logs --follow)."
+        title="Terminal"
+        description={
+          viewMode === "logs"
+            ? "Live streaming output from a running service via SSE (docker logs --follow)."
+            : "Interactive PTY shell (bidirectional) via WebSocket — attach to service workdir or ephemeral shell."
+        }
       />
 
       {/* Service picker */}
@@ -641,11 +647,44 @@ function LogsPage() {
         )}
       </div>
 
-      {/* Terminal surface */}
-      <div
-        ref={surfaceRef}
-        className="terminal-surface overflow-hidden rounded-lg"
-      >
+      {/* View mode toggle: Logs (SSE read-only) vs Terminal (bidirectional PTY) */}
+      <div className="flex items-center gap-2">
+        <div className="inline-flex rounded-md border p-1">
+          <Button
+            variant={viewMode === "logs" ? "default" : "ghost"}
+            size="sm"
+            className="h-7 font-mono text-xs"
+            onClick={() => setViewMode("logs")}
+          >
+            Logs (SSE)
+          </Button>
+          <Button
+            variant={viewMode === "terminal" ? "default" : "ghost"}
+            size="sm"
+            className="h-7 font-mono text-xs"
+            onClick={() => setViewMode("terminal")}
+          >
+            Terminal (PTY)
+          </Button>
+        </div>
+        <span className="text-muted-foreground font-mono text-xs">
+          {viewMode === "logs"
+            ? "read-only stream from docker/fog"
+            : `interactive shell${active ? ` — ${active.service} workdir` : " — ephemeral"}`}
+        </span>
+      </div>
+
+      {viewMode === "terminal" ? (
+        <TerminalView
+          key={active?.service ?? "__shell__"}
+          service={active?.service}
+          className="h-[62vh]"
+        />
+      ) : (
+        <div
+          ref={surfaceRef}
+          className="terminal-surface overflow-hidden rounded-lg"
+        >
         <div className="border-border/60 flex flex-wrap items-center gap-x-3 gap-y-2 border-b px-3 py-2">
           <span className="text-muted-foreground font-mono text-xs">
             {active ? `${active.label}.log` : "no service selected"}
@@ -717,6 +756,7 @@ function LogsPage() {
           </pre>
         </ScrollArea>
       </div>
+      )}
     </div>
   );
 }
