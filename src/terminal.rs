@@ -996,7 +996,11 @@ impl Terminal {
         let mut cmd_builder = CommandBuilder::new(&shell);
         cmd_builder.cwd(path);
         if let Some(branch) = &self.branch {
-            cmd_builder.env("FOG_BRANCH", branch);
+            if let Ok(slug) = crate::ports::branch_slug(branch) {
+                cmd_builder.env("FOG_BRANCH", slug.clone());
+                cmd_builder.env("FOG_BRANCH_SLUG", slug);
+            }
+            cmd_builder.env("FOG_BRANCH_RAW", branch);
         }
         for (k, v) in &self.injected_env {
             cmd_builder.env(k.clone(), v.clone());

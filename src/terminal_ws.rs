@@ -314,11 +314,12 @@ async fn run_live_terminal_session(io: TokioIo<Upgraded>, service: String, confi
     let idle_timeout = Duration::from_secs(config.idle_timeout_secs);
     let max_bytes = config.max_message_bytes;
     let mut last_activity = Instant::now();
-    // Prime with current raw snapshot (drain any backlog)
-    if let Ok(chunks) = crate::ipc::query_terminal_snapshot(&daemon_path, &service, 0, 0) {
-        for bytes in chunks {
-            let _ = ws_sink.send(Message::binary(bytes)).await;
+    let mut seen_total = 0;
+    if let Ok((chunks, total)) = crate::ipc::query_terminal_snapshot(&daemon_path, &service, 500, 0) {
+        for bytes in &chunks {
+            let _ = ws_sink.send(Message::binary(bytes.clone())).await;
         }
+        seen_total = total;
     }
     loop {
         tokio::select! {
@@ -354,10 +355,15 @@ async fn run_live_terminal_session(io: TokioIo<Upgraded>, service: String, confi
                 }
             }
             _ = tokio::time::sleep(Duration::from_millis(100)) => {
-                if let Ok(chunks) = crate::ipc::query_terminal_snapshot(&daemon_path, &service, 0, 0) {
-                    for bytes in chunks {
-                        let _ = ws_sink.send(Message::binary(bytes)).await;
-                        last_activity = Instant::now();
+                if let Ok((chunks, total)) = crate::ipc::query_terminal_snapshot(&daemon_path, &service, 500, 0) {
+                    if total > seen_total {
+                        let new_count = (total - seen_total).min(chunks.len());
+                        let start = chunks.len().saturating_sub(new_count);
+                        for bytes in &chunks[start..] {
+                            let _ = ws_sink.send(Message::binary(bytes.clone())).await;
+                            last_activity = Instant::now();
+                        }
+                        seen_total = total;
                     }
                 }
             }

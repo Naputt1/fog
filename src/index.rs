@@ -97,7 +97,11 @@ fn reachable_entries_from(
     // Raw-TCP services exposed via `fog.expose` have no Traefik HTTP router;
     // they are reached by hostname + published host port.
     if expose {
-        let Some(hostname) = labels.get("fog.hostname").cloned() else {
+        let Some(hostname) = labels
+            .get("fog.hostname")
+            .cloned()
+            .map(|h| crate::ports::sanitize_hostname(&h))
+        else {
             return entries;
         };
         let Some(raw_port) = raw_port.clone() else {
@@ -222,10 +226,15 @@ fn derive_group(
     if is_infra {
         (project, "shared".to_string(), true)
     } else {
-        let worktree = project_name
+        let raw_worktree = project_name
             .split_once('-')
             .map(|(_, w)| w.to_string())
             .unwrap_or_else(|| "main".to_string());
+        let worktree = crate::ports::sanitize_hostname(&raw_worktree)
+            .split('.')
+            .next()
+            .unwrap_or("main")
+            .to_string();
         (project, worktree, false)
     }
 }
@@ -264,7 +273,7 @@ fn extract_hosts(rule: &str) -> Vec<String> {
         .map(str::trim)
         .filter(|p| !p.is_empty())
         .filter(|p| p.contains('.') || p.starts_with('{'))
-        .map(String::from)
+        .map(|h| crate::ports::sanitize_hostname(h))
         .collect()
 }
 
@@ -1436,7 +1445,12 @@ fn api_services(_network: &str) -> Response<RespBody> {
             .as_deref()
             .map(project_name_from_common_dir)
             .unwrap_or_else(|| inst.script.clone());
-        let worktree = inst.branch.clone().unwrap_or_else(|| "default".to_string());
+        let raw_worktree = inst.branch.clone().unwrap_or_else(|| "default".to_string());
+        let worktree = crate::ports::sanitize_hostname(&raw_worktree)
+            .split('.')
+            .next()
+            .unwrap_or("default")
+            .to_string();
         // Build a map of service name -> health for quick lookup.
         let health_map: std::collections::HashMap<&str, &str> = inst
             .services
@@ -1456,7 +1470,7 @@ fn api_services(_network: &str) -> Response<RespBody> {
                 &inst.ports,
                 inst.branch.as_deref(),
             ) {
-                Ok(h) => h,
+                Ok(h) => crate::ports::sanitize_hostname(&h),
                 Err(_) => continue,
             };
             let port_str = match crate::ports::resolve_template(

@@ -79,11 +79,134 @@ pub fn allocate_ports(specs: &HashMap<String, u16>) -> Result<PortMap, String> {
     Ok(out)
 }
 
+/// Sanitizes a branch name for DNS/hostname use.
+///
+/// - lowercases
+/// - replaces `/` and any non-`[a-z0-9-]` with `-`
+/// - collapses consecutive `-` and trims leading/trailing `-`
+/// - errors if empty or >63 chars (DNS label limit)
+pub fn branch_slug(branch: &str) -> Result<String, String> {
+    let lower = branch.to_ascii_lowercase();
+    let mut sanitized = String::with_capacity(lower.len());
+    for c in lower.chars() {
+        if c.is_ascii_alphanumeric() || c == '-' {
+            sanitized.push(c);
+        } else {
+            sanitized.push('-');
+        }
+    }
+    // collapse consecutive '-' and trim
+    let mut collapsed = String::with_capacity(sanitized.len());
+    let mut prev_dash = false;
+    for c in sanitized.chars() {
+        if c == '-' {
+            if !prev_dash {
+                collapsed.push(c);
+            }
+            prev_dash = true;
+        } else {
+            collapsed.push(c);
+            prev_dash = false;
+        }
+    }
+    let trimmed = collapsed.trim_matches('-').to_string();
+    if trimmed.is_empty() {
+        return Err(format!(
+            "branch '{}' sanitizes to empty (no alphanumeric characters)",
+            branch
+        ));
+    }
+    if trimmed.len() > 63 {
+        return Err(format!(
+            "branch slug '{}' too long for DNS label ({} > 63 chars); use a shorter branch name",
+            trimmed,
+            trimmed.len()
+        ));
+    }
+    Ok(trimmed)
+}
+
+/// Best-effort sanitization for hostnames already stored in Docker labels /
+/// API output. Unlike `branch_slug`, this never errors — it is used at the
+/// read path (`extract_hosts`, `reachable_entries_from`) where a hard error
+/// would blank the whole `/api/services` list. Malformed labels like
+/// `feat/book.red-fox` are leniently mapped to `feat-book.red-fox`.
+///
+/// Each dot-separated label is slugified independently; labels that already
+/// look DNS-valid are left unchanged. Over-long labels (`>63`) are
+/// truncated rather than erroring.
+pub fn sanitize_hostname(host: &str) -> String {
+    // Preserve empty / wildcard patterns like `{host:.+}` verbatim.
+    if host.starts_with('{') {
+        return host.to_string();
+    }
+    let mut out_parts: Vec<String> = Vec::new();
+    for label in host.split('.') {
+        if label.is_empty() {
+            out_parts.push(String::new());
+            continue;
+        }
+        // Fast-path: already valid DNS label.
+        let is_valid = !label.is_empty()
+            && label.len() <= 63
+            && label
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-')
+            && !label.starts_with('-')
+            && !label.ends_with('-');
+        if is_valid && !label.contains('/') {
+            out_parts.push(label.to_ascii_lowercase());
+            continue;
+        }
+        match branch_slug(label) {
+            Ok(slug) => out_parts.push(slug),
+            Err(_) => {
+                // Lenient fallback: same transform but truncate to 63 instead
+                // of erroring, so the API stays usable for stale containers.
+                let lower = label.to_ascii_lowercase();
+                let mut sanitized = String::with_capacity(lower.len());
+                for c in lower.chars() {
+                    if c.is_ascii_alphanumeric() || c == '-' {
+                        sanitized.push(c);
+                    } else {
+                        sanitized.push('-');
+                    }
+                }
+                let mut collapsed = String::with_capacity(sanitized.len());
+                let mut prev_dash = false;
+                for c in sanitized.chars() {
+                    if c == '-' {
+                        if !prev_dash {
+                            collapsed.push(c);
+                        }
+                        prev_dash = true;
+                    } else {
+                        collapsed.push(c);
+                        prev_dash = false;
+                    }
+                }
+                let mut trimmed = collapsed.trim_matches('-').to_string();
+                if trimmed.is_empty() {
+                    trimmed = "branch".to_string();
+                }
+                if trimmed.len() > 63 {
+                    trimmed.truncate(63);
+                    // avoid trailing '-'
+                    trimmed = trimmed.trim_end_matches('-').to_string();
+                }
+                out_parts.push(trimmed);
+            }
+        }
+    }
+    out_parts.join(".")
+}
+
 /// Resolves a single template string.
 ///
 /// Supported atoms inside `${...}`:
 /// - `ports.<name>` → allocated port number
-/// - `branch` / `FOG_BRANCH` → branch name (when Some)
+/// - `branch` / `FOG_BRANCH` → sanitized branch name (DNS-safe, `/` → `-`)
+/// - `branch_raw` / `FOG_BRANCH_RAW` → raw branch name (when Some)
 ///
 /// Any `${ports.X}` where `X` not in `port_map` returns `Err`.
 /// Unknown atoms also error. Literal `${` without closing `}` errors.
@@ -126,11 +249,16 @@ fn resolve_atom(atom: &str, ports: &PortMap, branch: Option<&str>) -> Result<Str
     }
     if atom == "branch" || atom == "FOG_BRANCH" {
         return branch
+            .map(branch_slug)
+            .ok_or_else(|| format!("'${{{}}}' requires a git branch (not in a worktree)", atom))?;
+    }
+    if atom == "branch_raw" || atom == "FOG_BRANCH_RAW" {
+        return branch
             .map(|b| b.to_string())
             .ok_or_else(|| format!("'${{{}}}' requires a git branch (not in a worktree)", atom));
     }
     Err(format!(
-        "unknown template '${{{}}}' (expected '${{ports.<name>}}' or '${{branch}}')",
+        "unknown template '${{{}}}' (expected '${{ports.<name}}', '${{branch}}' or '${{branch_raw}}')",
         atom
     ))
 }
