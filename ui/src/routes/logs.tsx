@@ -9,28 +9,15 @@ import {
   type CSSProperties,
 } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import {
-  ArrowDownToLine,
-  Check,
-  ChevronsUpDown,
-  Copy,
-  Eraser,
-} from "lucide-react";
+import { ArrowDownToLine, Check, Copy, Eraser } from "lucide-react";
 
 import { subscribeLogs, type Service } from "@/lib/api";
 import { useServices } from "@/lib/hooks";
-import { PageHeader, ErrorState } from "@/components/page-state";
+import { PageHeader } from "@/components/page-state";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { TerminalView } from "@/components/terminal/TerminalView";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuLabel,
-  DropdownMenuRadioGroup,
-  DropdownMenuRadioItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+import { ServiceSidebar } from "@/components/terminal/ServiceSidebar";
 import { cn } from "@/lib/utils";
 
 export const Route = createFileRoute("/logs")({
@@ -571,215 +558,155 @@ function LogsPage() {
   const groups = useMemo(() => groupServices(services ?? []), [services]);
 
   return (
-    <div className="min-w-0 space-y-6">
-      <PageHeader
-        title="Terminal"
-        description={
-          viewMode === "logs"
-            ? "Live streaming output from a running service via SSE (docker logs --follow)."
-            : "Interactive PTY shell (bidirectional) via WebSocket — attach to service workdir or ephemeral shell."
-        }
-      />
+    <div className="flex min-w-0 flex-col gap-6 lg:h-[calc(100dvh-8rem)] lg:flex-row lg:gap-6">
+      {/* Main content */}
+      <div className="flex min-w-0 flex-1 flex-col gap-4 lg:min-h-0">
+        <PageHeader
+          title="Terminal"
+          description={
+            viewMode === "logs"
+              ? "Live streaming output from a running service via SSE (docker logs --follow)."
+              : "Interactive PTY shell (bidirectional) via WebSocket — attach to service workdir or ephemeral shell."
+          }
+        />
 
-      {/* Service picker */}
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="text-muted-foreground font-mono text-xs tracking-wider uppercase">
-          Service
-        </span>
-        {isError ? (
-          <ErrorState message="Could not load services to select from." />
+        {/* View mode toggle: Logs (SSE read-only) vs Terminal (bidirectional PTY) */}
+        <div className="flex items-center gap-2">
+          <div className="inline-flex rounded-md border p-1">
+            <Button
+              variant={viewMode === "logs" ? "default" : "ghost"}
+              size="sm"
+              className="h-7 font-mono text-xs"
+              onClick={() => setViewMode("logs")}
+            >
+              Logs (SSE)
+            </Button>
+            <Button
+              variant={viewMode === "terminal" ? "default" : "ghost"}
+              size="sm"
+              className="h-7 font-mono text-xs"
+              onClick={() => setViewMode("terminal")}
+            >
+              Terminal (PTY)
+            </Button>
+          </div>
+          <span className="text-muted-foreground font-mono text-xs">
+            {viewMode === "logs"
+              ? "read-only stream from docker/fog"
+              : `interactive shell${active ? ` — ${active.service} workdir` : " — ephemeral"}`}
+          </span>
+        </div>
+
+        {viewMode === "terminal" ? (
+          <>
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={live}
+                onChange={(e) => setLive(e.target.checked)}
+                disabled={!active}
+                className="rounded"
+              />
+              <span className={active ? "" : "text-muted-foreground"}>
+                Live — same PTY as TUI (mirror service, bidirectional). Unchecked = fresh shell in service workdir.
+              </span>
+            </label>
+            <TerminalView
+              key={`${active?.service ?? "__shell__"}:${live ? "live" : "cwd"}`}
+              service={active?.service}
+              live={live && !!active}
+              className="flex min-h-[320px] flex-1"
+            />
+          </>
         ) : (
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button
-                variant="outline"
-                size="sm"
-                className="min-w-44 justify-between font-mono"
-                disabled={isLoading && !active}
+          <div ref={surfaceRef} className="terminal-surface flex min-h-[320px] flex-1 flex-col overflow-hidden rounded-lg border">
+            <div className="border-border/60 flex flex-wrap items-center gap-x-3 gap-y-2 border-b px-3 py-2">
+              <span className="text-muted-foreground font-mono text-xs">
+                {active ? `${active.label}.log` : "no service selected"}
+              </span>
+              <span
+                className="text-muted-foreground flex items-center gap-1.5 font-mono text-[11px]"
+                title={statusLabel}
               >
-                <span className="max-w-56 truncate">
-                  {active ? active.label : "select service…"}
-                </span>
-                <ChevronsUpDown className="size-3.5 opacity-60" />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="start" className="max-h-[40vh] w-72">
-              {isLoading ? (
-                <DropdownMenuLabel className="font-mono">
-                  loading…
-                </DropdownMenuLabel>
-              ) : groups.length === 0 ? (
-                <DropdownMenuLabel className="font-mono">
-                  no services running
-                </DropdownMenuLabel>
-              ) : (
-                <DropdownMenuRadioGroup
-                  value={active?.container ?? undefined}
-                  onValueChange={(container) =>
-                    void navigate({
-                      to: "/logs",
-                      search: { service: container },
-                    })
+                <span className={cn("size-1.5 rounded-full", status.dot)} />
+                <span className="max-w-64 truncate">{statusLabel}</span>
+              </span>
+              <span className="text-muted-foreground/70 font-mono text-[11px]">
+                {entries.length} lines
+              </span>
+
+              <div className="ml-auto flex items-center gap-1.5">
+                <Button
+                  variant={follow ? "default" : "outline"}
+                  size="sm"
+                  className="font-mono"
+                  onClick={onToggleFollow}
+                  title={
+                    follow
+                      ? "Pause auto-scroll (or scroll up)"
+                      : "Resume auto-scroll to latest output"
                   }
                 >
-                  {groups.map((project) => (
-                    <Fragment key={project.project}>
-                      <DropdownMenuLabel className="text-primary/80 font-mono text-[11px] tracking-wider uppercase">
-                        {project.project}
-                      </DropdownMenuLabel>
-                      {project.worktrees.map((wt) => (
-                        <Fragment key={`${project.project}:${wt.worktree}`}>
-                          <DropdownMenuLabel
-                            inset
-                            className="text-muted-foreground py-1 font-mono text-[10px] tracking-wider uppercase"
-                          >
-                            {wt.worktree || "default"} · {wt.services.length}
-                          </DropdownMenuLabel>
-                          {wt.services.map((svc) => (
-                            <DropdownMenuRadioItem
-                              key={svc.container}
-                              value={svc.container}
-                              className="font-mono text-xs"
-                            >
-                              {svc.service}
-                            </DropdownMenuRadioItem>
-                          ))}
-                        </Fragment>
-                      ))}
-                    </Fragment>
-                  ))}
-                </DropdownMenuRadioGroup>
-              )}
-            </DropdownMenuContent>
-          </DropdownMenu>
+                  <ArrowDownToLine />
+                  follow
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="font-mono"
+                  onClick={onCopy}
+                  disabled={entries.length === 0}
+                  title="Copy plain log text to clipboard"
+                >
+                  {copied ? <Check /> : <Copy />}
+                  {copied ? "copied" : "copy"}
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="font-mono"
+                  onClick={onClear}
+                  disabled={entries.length === 0}
+                  title="Clear the log buffer (stream keeps running)"
+                >
+                  <Eraser />
+                  clear
+                </Button>
+              </div>
+            </div>
+
+            <ScrollArea className="flex-1 min-h-0">
+              <pre className="text-foreground/90 p-4 font-mono text-[13px] leading-relaxed break-words whitespace-pre-wrap">
+                {entries.length === 0 ? (
+                  <span className="text-muted-foreground">
+                    {active
+                      ? "Waiting for output…"
+                      : "Select a service to stream its logs."}
+                  </span>
+                ) : (
+                  entries.map((entry) => (
+                    <LogLineView key={entry.id} entry={entry} />
+                  ))
+                )}
+              </pre>
+            </ScrollArea>
+          </div>
         )}
       </div>
 
-      {/* View mode toggle: Logs (SSE read-only) vs Terminal (bidirectional PTY) */}
-      <div className="flex items-center gap-2">
-        <div className="inline-flex rounded-md border p-1">
-          <Button
-            variant={viewMode === "logs" ? "default" : "ghost"}
-            size="sm"
-            className="h-7 font-mono text-xs"
-            onClick={() => setViewMode("logs")}
-          >
-            Logs (SSE)
-          </Button>
-          <Button
-            variant={viewMode === "terminal" ? "default" : "ghost"}
-            size="sm"
-            className="h-7 font-mono text-xs"
-            onClick={() => setViewMode("terminal")}
-          >
-            Terminal (PTY)
-          </Button>
-        </div>
-        <span className="text-muted-foreground font-mono text-xs">
-          {viewMode === "logs"
-            ? "read-only stream from docker/fog"
-            : `interactive shell${active ? ` — ${active.service} workdir` : " — ephemeral"}`}
-        </span>
-      </div>
-
-      {viewMode === "terminal" ? (
-        <>
-          <label className="flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
-              checked={live}
-              onChange={(e) => setLive(e.target.checked)}
-              disabled={!active}
-              className="rounded"
-            />
-            <span className={active ? "" : "text-muted-foreground"}>
-              Live — same PTY as TUI (mirror service, bidirectional). Unchecked = fresh shell in service workdir.
-            </span>
-          </label>
-          <TerminalView
-            key={`${active?.service ?? "__shell__"}:${live ? "live" : "cwd"}`}
-            service={active?.service}
-            live={live && !!active}
-            className="h-[62vh]"
-          />
-        </>
-      ) : (
-        <div
-          ref={surfaceRef}
-          className="terminal-surface overflow-hidden rounded-lg"
-        >
-        <div className="border-border/60 flex flex-wrap items-center gap-x-3 gap-y-2 border-b px-3 py-2">
-          <span className="text-muted-foreground font-mono text-xs">
-            {active ? `${active.label}.log` : "no service selected"}
-          </span>
-          <span
-            className="text-muted-foreground flex items-center gap-1.5 font-mono text-[11px]"
-            title={statusLabel}
-          >
-            <span className={cn("size-1.5 rounded-full", status.dot)} />
-            <span className="max-w-64 truncate">{statusLabel}</span>
-          </span>
-          <span className="text-muted-foreground/70 font-mono text-[11px]">
-            {entries.length} lines
-          </span>
-
-          <div className="ml-auto flex items-center gap-1.5">
-            <Button
-              variant={follow ? "default" : "outline"}
-              size="sm"
-              className="font-mono"
-              onClick={onToggleFollow}
-              title={
-                follow
-                  ? "Pause auto-scroll (or scroll up)"
-                  : "Resume auto-scroll to latest output"
-              }
-            >
-              <ArrowDownToLine />
-              follow
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              className="font-mono"
-              onClick={onCopy}
-              disabled={entries.length === 0}
-              title="Copy plain log text to clipboard"
-            >
-              {copied ? <Check /> : <Copy />}
-              {copied ? "copied" : "copy"}
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              className="font-mono"
-              onClick={onClear}
-              disabled={entries.length === 0}
-              title="Clear the log buffer (stream keeps running)"
-            >
-              <Eraser />
-              clear
-            </Button>
-          </div>
-        </div>
-
-        <ScrollArea className="h-[62vh]">
-          <pre className="text-foreground/90 p-4 font-mono text-[13px] leading-relaxed break-words whitespace-pre-wrap">
-            {entries.length === 0 ? (
-              <span className="text-muted-foreground">
-                {active
-                  ? "Waiting for output…"
-                  : "Select a service to stream its logs."}
-              </span>
-            ) : (
-              entries.map((entry) => (
-                <LogLineView key={entry.id} entry={entry} />
-              ))
-            )}
-          </pre>
-        </ScrollArea>
-      </div>
-      )}
+      {/* Right sidebar */}
+      <ServiceSidebar
+        groups={groups}
+        activeContainer={active?.container}
+        onSelect={(container) =>
+          void navigate({
+            to: "/logs",
+            search: { service: container },
+          })
+        }
+        isLoading={isLoading}
+        isError={isError}
+      />
     </div>
   );
 }

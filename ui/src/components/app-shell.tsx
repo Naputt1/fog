@@ -6,9 +6,11 @@ import {
   HeartPulse,
   Activity,
   PanelLeft,
+  PanelRight,
   Cog,
   type LucideIcon,
 } from "lucide-react";
+import { RightSidebarContext } from "@/lib/right-sidebar-context";
 
 import { cn, getHostLabel } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -101,6 +103,8 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [rightOpen, setRightOpen] = useState(false);
+  const [rightEnabled, setRightEnabled] = useState(false);
   const location = useLocation();
   const current =
     NAV_ITEMS.find((i) =>
@@ -110,51 +114,64 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     ) ?? NAV_ITEMS[0];
 
   return (
-    <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
-      <div className="bg-background text-foreground flex h-dvh w-full overflow-hidden">
-        {/* Desktop sidebar */}
-        <aside className="border-border bg-card hidden w-60 shrink-0 border-r md:block">
-          <SidebarContent />
-        </aside>
+    <RightSidebarContext.Provider value={{ open: rightOpen, setOpen: setRightOpen, enabled: rightEnabled, setEnabled: setRightEnabled }}>
+      <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
+        <div className="bg-background text-foreground flex h-dvh w-full overflow-hidden">
+          {/* Desktop sidebar */}
+          <aside className="border-border bg-card hidden w-60 shrink-0 border-r md:block">
+            <SidebarContent />
+          </aside>
 
-        <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-          {/* Topbar */}
-          <header className="border-border bg-card/60 flex h-14 shrink-0 items-center gap-3 border-b px-4 backdrop-blur">
-            <SheetTrigger asChild className="md:hidden">
-              <Button variant="ghost" size="icon" aria-label="Open navigation">
-                <PanelLeft className="size-5" />
-              </Button>
-            </SheetTrigger>
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+            {/* Topbar */}
+            <header className="border-border bg-card/60 flex h-14 shrink-0 items-center gap-3 border-b px-4 backdrop-blur">
+              <SheetTrigger asChild className="md:hidden">
+                <Button variant="ghost" size="icon" aria-label="Open navigation">
+                  <PanelLeft className="size-5" />
+                </Button>
+              </SheetTrigger>
 
-            <div className="flex min-w-0 items-center gap-2 font-mono">
-              <span className="text-primary">~</span>
-              <span className="text-foreground truncate text-sm">
-                /{current.label.toLowerCase()}
-              </span>
-            </div>
-
-            <div className="ml-auto flex items-center gap-3">
-              <div className="border-border bg-background flex items-center gap-1.5 rounded-full border px-2.5 py-1">
-                <span className="bg-primary size-1.5 rounded-full" />
-                <span className="text-muted-foreground font-mono text-[11px]">
-                  connected
+              <div className="flex min-w-0 items-center gap-2 font-mono">
+                <span className="text-primary">~</span>
+                <span className="text-foreground truncate text-sm">
+                  /{current.label.toLowerCase()}
                 </span>
               </div>
-            </div>
-          </header>
 
-          <ScrollArea className="flex-1 min-h-0">
-            <main className="mx-auto w-full max-w-6xl min-w-0 p-4 md:p-6">
-              {children}
-            </main>
-          </ScrollArea>
+              <div className="ml-auto flex items-center gap-3">
+                <div className="border-border bg-background flex items-center gap-1.5 rounded-full border px-2.5 py-1">
+                  <span className="bg-primary size-1.5 rounded-full" />
+                  <span className="text-muted-foreground font-mono text-[11px]">
+                    connected
+                  </span>
+                </div>
+                {rightEnabled && (
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    aria-label="Open services"
+                    className="lg:hidden"
+                    onClick={() => setRightOpen(true)}
+                  >
+                    <PanelRight className="size-5" />
+                  </Button>
+                )}
+              </div>
+            </header>
+
+            <ScrollArea className="flex-1 min-h-0">
+              <main className="mx-auto w-full max-w-6xl min-w-0 p-4 md:p-6">
+                {children}
+              </main>
+            </ScrollArea>
+          </div>
         </div>
-      </div>
 
-      {/* Mobile sidebar (fixed overlay, side="left") */}
-      <SheetContent side="left" className="w-60 p-0">
-        <SidebarContent onNavigate={() => setMobileOpen(false)} />
-      </SheetContent>
-    </Sheet>
+        {/* Mobile sidebar (fixed overlay, side="left") */}
+        <SheetContent side="left" className="w-60 p-0">
+          <SidebarContent onNavigate={() => setMobileOpen(false)} />
+        </SheetContent>
+      </Sheet>
+    </RightSidebarContext.Provider>
   );
 }
