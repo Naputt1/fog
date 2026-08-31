@@ -1,8 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
-
-import { TerminalView } from "@/components/terminal/TerminalView";
-import { PageHeader } from "@/components/page-state";
+import { useEffect } from "react";
 
 export const Route = createFileRoute("/terminal")({
   validateSearch: (search: Record<string, unknown>) => ({
