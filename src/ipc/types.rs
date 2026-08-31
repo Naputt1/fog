@@ -95,6 +95,8 @@ pub struct IpcState {
     pub handoff_prepared: Arc<AtomicBool>,
     /// Set by the IPC thread once handoffs have been sent to the requester.
     pub handoff_done: Arc<AtomicBool>,
+    /// Whether this instance was started with `--no-share`.
+    pub no_share: bool,
     /// Per-service control request published by the IPC thread for the App to
     /// execute; cleared by the App once it has been taken.
     pub control_req: Arc<Mutex<Option<ServiceActionRequest>>>,
@@ -109,7 +111,12 @@ pub struct IpcState {
 
 impl IpcState {
     /// Creates a new empty [`IpcState`] for the given script name.
-    pub fn new(script: String, project: Option<String>, branch: Option<String>) -> Self {
+    pub fn new(
+        script: String,
+        project: Option<String>,
+        branch: Option<String>,
+        no_share: bool,
+    ) -> Self {
         Self {
             services: Arc::new(Mutex::new(Vec::new())),
             proxy: Arc::new(Mutex::new(None)),
@@ -128,6 +135,7 @@ impl IpcState {
             handoff_claimed: Arc::new(AtomicBool::new(false)),
             handoff_prepared: Arc::new(AtomicBool::new(false)),
             handoff_done: Arc::new(AtomicBool::new(false)),
+            no_share,
             control_req: Arc::new(Mutex::new(None)),
             control_result: Arc::new(Mutex::new(None)),
             control_done: Arc::new(AtomicBool::new(false)),
@@ -166,6 +174,9 @@ pub struct StatusResponse {
     /// Native routes (templates) for this instance.
     #[serde(default)]
     pub native_routes: Vec<NativeRouteInfo>,
+    /// Whether this instance was started with `--no-share`.
+    #[serde(default)]
+    pub no_share: bool,
 }
 
 fn default_log_tail() -> usize {

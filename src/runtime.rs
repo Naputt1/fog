@@ -569,26 +569,50 @@ pub fn build_with_opts(opts: BuildOpts) -> Result<Runtime, String> {
                 ));
                 t
             } else if health_checks_pass(&health_checks, branch.as_deref()) {
-                // The resource is genuinely up: borrow it instead of re-running
-                // the start command.
-                let mut reused = Terminal::spawn_reused(
-                    name.clone(),
-                    service_path_str,
-                    entry.cmd.clone(),
-                    scrollback,
-                );
-                reused.save_logs = save_logs;
-                reused.health_checks = health_checks;
-                reused.shutdown_cmd = entry.shutdown_cmd.clone();
-                reused.injected_env = entry.env.clone().unwrap_or_default();
-                reused.branch = branch.clone();
-                reused.project = project;
-                reused.script = script_name;
-                // The probe just passed, so seed Healthy to avoid a short
-                // "stopped" flicker before the background thread's first check.
-                reused.set_health_status(crate::terminal::HealthStatus::Healthy);
-                reused.start_health_checks();
-                reused
+                // Check if any existing instance has --no-share set; if so,
+                // don't borrow from it — start fresh instead.
+                let dominated = project.as_ref().is_some_and(|p| {
+                    let others = crate::ipc::find_instances_any_branch(p, &script_name);
+                    others.iter().any(|(_, _, s)| s.no_share)
+                });
+                if !dominated {
+                    // The resource is genuinely up: borrow it instead of re-running
+                    // the start command.
+                    let mut reused = Terminal::spawn_reused(
+                        name.clone(),
+                        service_path_str,
+                        entry.cmd.clone(),
+                        scrollback,
+                    );
+                    reused.save_logs = save_logs;
+                    reused.health_checks = health_checks;
+                    reused.shutdown_cmd = entry.shutdown_cmd.clone();
+                    reused.injected_env = entry.env.clone().unwrap_or_default();
+                    reused.branch = branch.clone();
+                    reused.project = project;
+                    reused.script = script_name;
+                    // The probe just passed, so seed Healthy to avoid a short
+                    // "stopped" flicker before the background thread's first check.
+                    reused.set_health_status(crate::terminal::HealthStatus::Healthy);
+                    reused.start_health_checks();
+                    reused
+                } else {
+                    let injected_env = entry.env.clone().unwrap_or_default();
+                    spawn_checked_terminal(
+                        &service_path_str,
+                        &entry.cmd,
+                        &name,
+                        scrollback,
+                        save_logs,
+                        log_dir.clone(),
+                        health_checks,
+                        entry.shutdown_cmd.clone(),
+                        branch.clone(),
+                        project,
+                        &script_name,
+                        injected_env,
+                    )
+                }
             } else {
                 // Nothing is running: start the service immediately instead of
                 // waiting out the reuse grace period with a misleading
