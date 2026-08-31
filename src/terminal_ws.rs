@@ -235,6 +235,164 @@ pub async fn handle_terminal_upgrade(
         .expect("response builder failed"))
 }
 
+/// Handles a live service attach: proxies WS bytes to the daemon's PTY via IPC
+/// (TerminalInput/Resize) and streams snapshots back. This is the "same process"
+/// emulation requested by the user.
+pub async fn handle_live_terminal_upgrade(
+    mut req: Request<hyper::body::Incoming>,
+    config: Arc<TerminalConfig>,
+    registry: Arc<SessionsRegistry>,
+    peer_ip: String,
+    service: String,
+) -> Result<Response<BoxBody>, std::convert::Infallible> {
+    if let Some(resp) = check_auth(&req, &config) {
+        return Ok(resp);
+    }
+    let session_key = registry_ip(&peer_ip);
+    if let Err(count) = registry.acquire(&session_key, config.max_sessions_per_ip) {
+        return Ok(Response::builder()
+            .status(StatusCode::TOO_MANY_REQUESTS)
+            .header(hyper::header::RETRY_AFTER, "1")
+            .body(body_full(Bytes::from(format!(
+                "too many terminal sessions from this IP (max {}; active {count})",
+                config.max_sessions_per_ip
+            ))))
+            .expect("response builder failed"));
+    }
+    let on_upgrade = hyper::upgrade::on(&mut req);
+    let svc = service.clone();
+    tokio::spawn(async move {
+        if let Ok(upgraded) = on_upgrade.await {
+            run_live_terminal_session(TokioIo::new(upgraded), svc, config).await;
+        }
+        registry.release(&session_key);
+    });
+    let accept = req
+        .headers()
+        .get(hyper::header::SEC_WEBSOCKET_KEY)
+        .and_then(|v| v.to_str().ok())
+        .map(|key| derive_accept_key(key.as_bytes()))
+        .unwrap_or_default();
+    Ok(Response::builder()
+        .status(StatusCode::SWITCHING_PROTOCOLS)
+        .header(hyper::header::CONNECTION, "Upgrade")
+        .header(hyper::header::UPGRADE, "websocket")
+        .header(hyper::header::SEC_WEBSOCKET_ACCEPT, accept)
+        .body(body_full(Bytes::new()))
+        .expect("response builder failed"))
+}
+
+async fn run_live_terminal_session(io: TokioIo<Upgraded>, service: String, config: Arc<TerminalConfig>) {
+    let ws = WebSocketStream::from_raw_socket(io, Role::Server, None).await;
+    let (mut ws_sink, mut ws_stream) = ws.split();
+    // Find daemon socket that owns this service (first instance where service running).
+    let daemon_path = crate::ipc::find_instances()
+        .ok()
+        .and_then(|instances| {
+            for (_, path) in instances {
+                if let Ok(status) = crate::ipc::query_status(&path) {
+                    if status.services.iter().any(|s| s.name == service && s.running) {
+                        return Some(path);
+                    }
+                }
+            }
+            None
+        });
+    let Some(daemon_path) = daemon_path else {
+        let _ = ws_sink
+            .send(Message::Close(Some(CloseFrame {
+                code: CloseCode::Away,
+                reason: format!("service {service} not running").into(),
+            })))
+            .await;
+        return;
+    };
+    // Send initial snapshot immediately, then poll every 100ms.
+    let mut last_snapshot: Vec<String> = Vec::new();
+    let mut ping = tokio::time::interval(PING_INTERVAL);
+    ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let idle_timeout = Duration::from_secs(config.idle_timeout_secs);
+    let max_bytes = config.max_message_bytes;
+    let mut last_activity = Instant::now();
+    // Prime with current snapshot
+    if let Ok((lines, _)) = crate::ipc::query_terminal_snapshot(&daemon_path, &service, 100, 0) {
+        last_snapshot = lines.clone();
+        let payload = lines.join("\n") + "\n";
+        let _ = ws_sink.send(Message::binary(payload.into_bytes())).await;
+    }
+    loop {
+        tokio::select! {
+            msg = ws_stream.next() => {
+                match msg {
+                    Some(Ok(Message::Text(text))) => {
+                        last_activity = Instant::now();
+                        let s = text.to_string();
+                        if s.len() > max_bytes {
+                            let _ = ws_sink.send(Message::Close(Some(CloseFrame{ code: CloseCode::Size, reason: "frame too large".into()}))).await;
+                            break;
+                        }
+                        if is_live_resize(&s, &daemon_path, &service) {
+                            // handled via IPC resize
+                        } else {
+                            let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, s.as_bytes());
+                            let _ = crate::ipc::send_service_action(&daemon_path, &service, crate::ipc::ServiceAction::TerminalInput{ data: b64 });
+                        }
+                    }
+                    Some(Ok(Message::Binary(data))) => {
+                        last_activity = Instant::now();
+                        if data.len() > max_bytes {
+                            let _ = ws_sink.send(Message::Close(Some(CloseFrame{ code: CloseCode::Size, reason: "frame too large".into()}))).await;
+                            break;
+                        }
+                        let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &data);
+                        let _ = crate::ipc::send_service_action(&daemon_path, &service, crate::ipc::ServiceAction::TerminalInput{ data: b64 });
+                    }
+                    Some(Ok(Message::Ping(_))) => { let _ = ws_sink.send(Message::Pong(Bytes::new())).await; }
+                    Some(Ok(Message::Pong(_))) => {}
+                    Some(Ok(Message::Frame(_))) => {}
+                    Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                }
+            }
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                if let Ok((lines, _)) = crate::ipc::query_terminal_snapshot(&daemon_path, &service, 200, 0) {
+                    if lines != last_snapshot {
+                        // Send only diff tail? For simplicity send full snapshot diff as ANSI? Here join new lines
+                        // Find new lines since last_snapshot
+                        let new_lines = if lines.len() > last_snapshot.len() {
+                            &lines[last_snapshot.len()..]
+                        } else {
+                            &lines[..]
+                        };
+                        if !new_lines.is_empty() {
+                            let payload = new_lines.join("\n") + "\n";
+                            // Send as binary (raw) so xterm renders
+                            let _ = ws_sink.send(Message::binary(payload.into_bytes())).await;
+                            last_activity = Instant::now();
+                        }
+                        last_snapshot = lines;
+                    }
+                }
+            }
+            _ = ping.tick() => {
+                if last_activity.elapsed() >= idle_timeout {
+                    let _ = ws_sink.send(Message::Close(None)).await;
+                    break;
+                }
+                let _ = ws_sink.send(Message::Ping(Bytes::new())).await;
+            }
+        }
+    }
+}
+
+fn is_live_resize(text: &str, daemon_path: &std::path::Path, service: &str) -> bool {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(text) else { return false };
+    if v.get("type").and_then(|t| t.as_str()) != Some("resize") { return false; }
+    let cols = v.get("cols").and_then(|c| c.as_u64()).unwrap_or(DEFAULT_COLS as u64) as u16;
+    let rows = v.get("rows").and_then(|r| r.as_u64()).unwrap_or(DEFAULT_ROWS as u64) as u16;
+    let _ = crate::ipc::send_service_action(daemon_path, service, crate::ipc::ServiceAction::TerminalResize{ cols, rows });
+    true
+}
+
 /// Normalizes a peer IP into a stable session-counting key.
 fn registry_ip(ip: &str) -> String {
     ip.to_string()

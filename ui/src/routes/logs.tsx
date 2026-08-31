@@ -413,6 +413,7 @@ function LogsPage() {
   const search = Route.useSearch();
   const { data: services, isLoading, isError } = useServices();
   const [viewMode, setViewMode] = useState<"logs" | "terminal">("logs");
+  const [live, setLive] = useState(true);
 
   // Resolve the active selection. The picker shows friendly service names, but
   // `/logs/stream` needs either a docker container name (`?service=<container>`)
@@ -675,11 +676,26 @@ function LogsPage() {
       </div>
 
       {viewMode === "terminal" ? (
-        <TerminalView
-          key={active?.service ?? "__shell__"}
-          service={active?.service}
-          className="h-[62vh]"
-        />
+        <>
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={live}
+              onChange={(e) => setLive(e.target.checked)}
+              disabled={!active}
+              className="rounded"
+            />
+            <span className={active ? "" : "text-muted-foreground"}>
+              Live — same PTY as TUI (mirror service, bidirectional). Unchecked = fresh shell in service workdir.
+            </span>
+          </label>
+          <TerminalView
+            key={`${active?.service ?? "__shell__"}:${live ? "live" : "cwd"}`}
+            service={active?.service}
+            live={live && !!active}
+            className="h-[62vh]"
+          />
+        </>
       ) : (
         <div
           ref={surfaceRef}

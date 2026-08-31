@@ -22,8 +22,8 @@ mod handoff;
 pub use handoff::*;
 mod server;
 pub use server::{
-    cleanup_socket, find_instances, query_status, send_kill, send_kill_with_reuse,
-    send_service_action, spawn_server,
+    cleanup_socket, find_instances, query_status, query_terminal_snapshot, send_kill,
+    send_kill_with_reuse, send_service_action, spawn_server,
 };
 #[allow(unused_imports)]
 pub(crate) use server::{

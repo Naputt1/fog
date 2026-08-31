@@ -1479,6 +1479,18 @@ impl App {
             running: p.is_running(),
             port: p.port,
         });
+        // Live terminal snapshots for web emulation (same process as TUI, so `get_all_lines` is cheap - cached by generation).
+        let mut snaps = self
+            .ipc_state
+            .terminal_snapshots
+            .lock()
+            .expect("mutex poisoned");
+        snaps.clear();
+        for item in &self.items {
+            // Skip shell tabs? Keep all - web can attach to any service.
+            let lines = item.get_all_lines();
+            snaps.insert(item.name.clone(), lines);
+        }
     }
 
     /// Executes one per-service control request published by the IPC thread
@@ -1521,6 +1533,32 @@ impl App {
             };
         };
         match req.action {
+            ipc::ServiceAction::TerminalInput { ref data } => {
+                let bytes = match base64::Engine::decode(
+                    &base64::engine::general_purpose::STANDARD,
+                    data,
+                ) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        return ipc::ControlResponse {
+                            ok: false,
+                            reason: format!("invalid base64: {e}"),
+                        }
+                    }
+                };
+                self.items[idx].write(&bytes);
+                ipc::ControlResponse {
+                    ok: true,
+                    reason: String::new(),
+                }
+            }
+            ipc::ServiceAction::TerminalResize { cols, rows } => {
+                self.items[idx].resize(cols, rows);
+                ipc::ControlResponse {
+                    ok: true,
+                    reason: String::new(),
+                }
+            }
             ipc::ServiceAction::Stop => match self.items[idx].stop() {
                 Ok(()) => ipc::ControlResponse {
                     ok: true,

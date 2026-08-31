@@ -803,8 +803,33 @@ async fn serve_index(
     // connection would fail immediately.
     if crate::terminal_ws::is_terminal_upgrade(&req) {
         // Optional `?service=<name>` attach target, resolved against running
-        // fog instances + the matching fog config.
+        // fog instances + the matching fog config. `?live=1` requests live
+        // emulation of the same PTY the TUI is showing (bidirectional, same
+        // process), not a fresh shell in the service's workdir.
         let service = query_param(req.uri().query(), "service");
+        let live = query_param(req.uri().query(), "live")
+            .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+        if live && service.is_some() {
+            let svc = service.clone().unwrap();
+            // Live attach must be a known running service, else 404.
+            let running = discover_fog_instances().iter().any(|i| {
+                i.services.iter().any(|s| s.name == svc && s.running)
+            });
+            if !running {
+                return Ok(api_error(StatusCode::NOT_FOUND, "unknown or not running service"));
+            }
+            let resp = crate::terminal_ws::handle_live_terminal_upgrade(
+                req, terminal, terminal_sessions, peer_ip, svc,
+            )
+            .await
+            .expect("live terminal upgrade handler is infallible");
+            let (parts, body) = resp.into_parts();
+            let bytes = match body.collect().await {
+                Ok(collected) => collected.to_bytes(),
+                Err(_) => Bytes::new(),
+            };
+            return Ok(Response::from_parts(parts, Full::new(bytes).boxed()));
+        }
         let target = service.as_ref().and_then(|s| resolve_service_target(s));
         // An explicitly requested service that could not be resolved (not a
         // running service, or its workdir is unknown) is a 404, not a shell.

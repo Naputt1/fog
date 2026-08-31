@@ -49,7 +49,15 @@ const TERMINAL_THEME = {
 
 type ConnState = "connecting" | "connected" | "disconnected";
 
-export function TerminalView({ className, service }: { className?: string; service?: string }) {
+export function TerminalView({
+  className,
+  service,
+  live = false,
+}: {
+  className?: string;
+  service?: string;
+  live?: boolean;
+}) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -135,15 +143,20 @@ export function TerminalView({ className, service }: { className?: string; servi
     fitAddonRef.current = fitAddon;
 
     let unmounted = false;
-    const svcQuery = service ? `?service=${encodeURIComponent(service)}` : "";
+    const params = new URLSearchParams();
+    if (service) params.set("service", service);
+    if (live && service) params.set("live", "1");
+    const q = params.toString() ? `?${params.toString()}` : "";
     const ws = new WebSocket(
-      `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${WS_PATH}${svcQuery}`
+      `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${WS_PATH}${q}`
     );
     ws.binaryType = "arraybuffer";
     wsRef.current = ws;
 
     ws.onopen = () => {
-      console.info(`[terminal] ws open: ${location.host}${WS_PATH}${svcQuery}${service ? ` (service=${service})` : ""}`);
+      console.info(
+        `[terminal] ws open: ${location.host}${WS_PATH}${q}${service ? ` (service=${service}${live ? ", live" : ""})` : ""}`
+      );
       setConnState("connected");
       // Reconnect budget resets on successful open
       reconnectAttemptRef.current = 0;

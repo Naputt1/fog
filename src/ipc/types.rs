@@ -103,6 +103,8 @@ pub struct IpcState {
     pub control_result: Arc<Mutex<Option<ControlResponse>>>,
     /// Set by the App once the control request has been executed.
     pub control_done: Arc<AtomicBool>,
+    /// Latest snapshot of each service's terminal lines (for live web emulation).
+    pub terminal_snapshots: Arc<Mutex<std::collections::HashMap<String, Vec<String>>>>,
 }
 
 impl IpcState {
@@ -129,6 +131,7 @@ impl IpcState {
             control_req: Arc::new(Mutex::new(None)),
             control_result: Arc::new(Mutex::new(None)),
             control_done: Arc::new(AtomicBool::new(false)),
+            terminal_snapshots: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
 }
@@ -169,6 +172,10 @@ fn default_log_tail() -> usize {
     200
 }
 
+fn default_terminal_rows() -> usize {
+    24
+}
+
 /// A request received over the IPC socket.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -197,6 +204,16 @@ pub(crate) enum Request {
         /// The action to perform.
         action: ServiceAction,
     },
+    TerminalSnapshot {
+        /// Service whose PTY screen to snapshot.
+        service: String,
+        /// Number of visible rows to return (for vt100 get_screen).
+        #[serde(default = "default_terminal_rows")]
+        rows: usize,
+        /// Scroll offset from bottom.
+        #[serde(default)]
+        offset: usize,
+    },
 }
 
 /// The response sent back to a `kill` request.
@@ -210,7 +227,7 @@ pub(crate) struct KillResponse {
 
 /// The action a `service_action` request asks the App to perform on a single
 /// service.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ServiceAction {
     /// Start the service (fails if it is already running).
@@ -219,6 +236,12 @@ pub enum ServiceAction {
     Stop,
     /// Stop the service and spawn it again.
     Restart,
+    /// Write raw bytes to the service's PTY (base64-encoded data).
+    #[serde(rename = "terminal_input")]
+    TerminalInput { data: String },
+    /// Resize the service's PTY.
+    #[serde(rename = "terminal_resize")]
+    TerminalResize { cols: u16, rows: u16 },
 }
 
 /// The response sent back to a `service_action` request.
