@@ -202,7 +202,11 @@ fn check_docker_target(config: &HealthCheckConfig, branch: Option<&str>) -> bool
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
     if let Some(branch) = branch {
-        cmd.env("FOG_BRANCH", branch);
+        if let Ok(slug) = crate::ports::branch_slug(branch) {
+            cmd.env("FOG_BRANCH", slug.clone());
+            cmd.env("FOG_BRANCH_SLUG", slug);
+        }
+        cmd.env("FOG_BRANCH_RAW", branch);
     }
 
     let mut child = match cmd.spawn() {
@@ -1647,7 +1651,11 @@ impl Terminal {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
         if let Some(branch) = &self.branch {
-            cmd.env("FOG_BRANCH", branch);
+            if let Ok(slug) = crate::ports::branch_slug(branch) {
+                cmd.env("FOG_BRANCH", slug.clone());
+                cmd.env("FOG_BRANCH_SLUG", slug);
+            }
+            cmd.env("FOG_BRANCH_RAW", branch);
         }
         if let Some(dir) = cwd {
             cmd.current_dir(dir);
@@ -1707,6 +1715,7 @@ impl Drop for Terminal {
 mod tests {
     use super::*;
     use ratatui::style::{Color, Modifier};
+    static DOCKER_STUB_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn test_spawn_reused_is_ready_without_health_checks() {
@@ -1841,6 +1850,7 @@ mod tests {
 
     #[test]
     fn test_check_docker_target_exports_fog_branch() {
+        let _lock = DOCKER_STUB_LOCK.lock().unwrap();
         // A stub `docker` on PATH that only reports the api healthy when the
         // probe exports `FOG_BRANCH` — regression test for branch-suffixed
         // compose projects (e.g. `redfox-${FOG_BRANCH:-main}`) resolving to
@@ -1885,6 +1895,54 @@ mod tests {
         );
 
         // SAFETY: restores the original PATH for any later test.
+        unsafe { std::env::set_var("PATH", &prev_path) };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_check_docker_target_exports_slug_for_slashed_branch() {
+        let _lock = DOCKER_STUB_LOCK.lock().unwrap();
+        // Regression for `feat/barber` style branches: `spawn_into` exports
+        // FOG_BRANCH as the slug (`feat-barber`) so compose project
+        // `red-fox-infra-${FOG_BRANCH:-main}` matches. The health probe must
+        // do the same – raw `feat/barber` would resolve to a non-existent
+        // `red-fox-infra-feat/barber` project and incorrectly report unhealthy.
+        let dir = std::env::temp_dir().join(format!("fog-stub-docker-slash-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let stub = dir.join("docker");
+        std::fs::write(
+            &stub,
+            "#!/bin/sh\n\
+             [ \"$FOG_BRANCH\" = \"feat-barber\" ] || { echo '[]'; exit 0; }\n\
+             [ \"$FOG_BRANCH_RAW\" = \"feat/barber\" ] || { echo '[]'; exit 0; }\n\
+             [ \"$FOG_BRANCH_SLUG\" = \"feat-barber\" ] || { echo '[]'; exit 0; }\n\
+             echo '[{\"Service\":\"api\",\"State\":\"running\",\"Health\":\"healthy\"}]'\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let prev_path = std::env::var("PATH").unwrap_or_default();
+        let stub_path = format!("{}:{}", dir.display(), prev_path);
+        // SAFETY: stub only shadows `docker`, no other test spawns `docker` concurrently.
+        unsafe { std::env::set_var("PATH", &stub_path) };
+
+        let config = HealthCheckConfig {
+            kind: crate::config::HealthCheckKind::Docker,
+            target: "api".into(),
+            compose_file: Some("compose.yml".into()),
+            interval_ms: None,
+            timeout_ms: Some(2000),
+        };
+        assert!(
+            check_docker_target(&config, Some("feat/barber")),
+            "slashed branch must be slugified for FOG_BRANCH (feat/barber -> feat-barber)"
+        );
+
+        // SAFETY: restores original PATH.
         unsafe { std::env::set_var("PATH", &prev_path) };
         let _ = std::fs::remove_dir_all(&dir);
     }
