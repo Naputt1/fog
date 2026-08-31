@@ -117,6 +117,7 @@ pub struct Terminal {
     screen_generation: Arc<AtomicUsize>,
     #[allow(clippy::type_complexity)]
     line_cache: RefCell<Option<(usize, usize, usize, Vec<Line<'static>>)>>,
+    raw_output: Arc<Mutex<std::collections::VecDeque<Vec<u8>>>>,
     handler: Option<JoinHandle<()>>,
     writer: Option<Box<dyn Write + Send>>,
     child: Option<Box<dyn Child + Send + Sync>>,
@@ -353,6 +354,7 @@ fn make_stop_pipe() -> io::Result<(RawFd, RawFd)> {
 fn spawn_reader(
     parser: Arc<Mutex<vt100::Parser>>,
     generation: Arc<AtomicUsize>,
+    raw_output: Arc<Mutex<std::collections::VecDeque<Vec<u8>>>>,
     fd: RawFd,
     stop: RawFd,
     mut tee: Option<fs::File>,
@@ -390,6 +392,13 @@ fn spawn_reader(
                     p.process(&buf[..n as usize]);
                 }
                 generation.fetch_add(1, Ordering::Relaxed);
+                {
+                    let mut q = raw_output.lock().expect("mutex poisoned");
+                    if q.len() >= 500 {
+                        q.pop_front();
+                    }
+                    q.push_back(buf[..n as usize].to_vec());
+                }
                 if let Some(file) = tee.as_mut() {
                     let _ = file.write_all(&buf[..n as usize]);
                 }
@@ -505,9 +514,11 @@ impl Terminal {
 
         let parser = Arc::new(Mutex::new(vt100::Parser::new(24, 80, scrollback)));
         let screen_generation = Arc::new(AtomicUsize::new(0));
+        let raw_output = Arc::new(Mutex::new(std::collections::VecDeque::new()));
         let handler = spawn_reader(
             parser.clone(),
             screen_generation.clone(),
+            raw_output.clone(),
             reader_fd,
             stop_r,
             None,
@@ -542,6 +553,7 @@ impl Terminal {
             health_stop: Arc::new(AtomicBool::new(false)),
             screen_generation: Arc::new(AtomicUsize::new(0)),
             line_cache: RefCell::new(None),
+            raw_output,
             handler: Some(handler),
             writer: Some(writer),
             child: Some(child),
@@ -605,6 +617,7 @@ impl Terminal {
             health_stop: Arc::new(AtomicBool::new(false)),
             screen_generation: Arc::new(AtomicUsize::new(0)),
             line_cache: RefCell::new(None),
+            raw_output: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             handler: None,
             writer: None,
             child: None,
@@ -659,6 +672,7 @@ impl Terminal {
             health_stop: Arc::new(AtomicBool::new(false)),
             screen_generation: Arc::new(AtomicUsize::new(0)),
             line_cache: RefCell::new(None),
+            raw_output: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             handler: None,
             writer: None,
             child: None,
@@ -714,6 +728,7 @@ impl Terminal {
             health_stop: Arc::new(AtomicBool::new(false)),
             screen_generation: Arc::new(AtomicUsize::new(0)),
             line_cache: RefCell::new(None),
+            raw_output: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             handler: None,
             writer: None,
             child: None,
@@ -770,6 +785,7 @@ impl Terminal {
             health_stop: Arc::new(AtomicBool::new(false)),
             screen_generation: Arc::new(AtomicUsize::new(0)),
             line_cache: RefCell::new(None),
+            raw_output: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             handler: None,
             writer: None,
             child: None,
@@ -813,6 +829,7 @@ impl Terminal {
             );
         }
         let screen_generation = Arc::new(AtomicUsize::new(0));
+        let raw_output = Arc::new(Mutex::new(std::collections::VecDeque::new()));
         let (stop_r, stop_w) = make_stop_pipe().unwrap_or((-1, -1));
         // SAFETY: dup creates an independent descriptor for the reader thread.
         let reader_fd = unsafe { libc::dup(fd) };
@@ -820,6 +837,7 @@ impl Terminal {
             Some(spawn_reader(
                 parser.clone(),
                 screen_generation.clone(),
+                raw_output.clone(),
                 reader_fd,
                 stop_r,
                 tee,
@@ -872,6 +890,7 @@ impl Terminal {
             health_stop: Arc::new(AtomicBool::new(false)),
             screen_generation,
             line_cache: RefCell::new(None),
+            raw_output,
             handler,
             writer,
             child: None,
@@ -1018,9 +1037,12 @@ impl Terminal {
         )));
         *self.line_cache.borrow_mut() = None;
         self.screen_generation.store(0, Ordering::Relaxed);
+        let raw_output = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+        self.raw_output = raw_output.clone();
         self.handler = Some(spawn_reader(
             self.parser.clone(),
             self.screen_generation.clone(),
+            raw_output,
             reader_fd,
             stop_r,
             tee,
@@ -1185,6 +1207,11 @@ impl Terminal {
         result.extend(screen.rows(0, cols));
 
         result
+    }
+
+    pub fn drain_raw_output(&self) -> Vec<Vec<u8>> {
+        let mut q = self.raw_output.lock().expect("mutex poisoned");
+        q.drain(..).collect()
     }
 
     /// Returns the cursor position `(row, col)` if the cursor is visible.

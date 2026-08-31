@@ -45,6 +45,7 @@ use tokio_tungstenite::tungstenite::protocol::Role;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 
 use crate::config::TerminalConfig;
+use base64::Engine as _;
 
 /// How often a keep-alive `ping` frame is sent to the client.
 const PING_INTERVAL: Duration = Duration::from_secs(30);
@@ -308,17 +309,16 @@ async fn run_live_terminal_session(io: TokioIo<Upgraded>, service: String, confi
         return;
     };
     // Send initial snapshot immediately, then poll every 100ms.
-    let mut last_snapshot: Vec<String> = Vec::new();
     let mut ping = tokio::time::interval(PING_INTERVAL);
     ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let idle_timeout = Duration::from_secs(config.idle_timeout_secs);
     let max_bytes = config.max_message_bytes;
     let mut last_activity = Instant::now();
-    // Prime with current snapshot
-    if let Ok((lines, _)) = crate::ipc::query_terminal_snapshot(&daemon_path, &service, 100, 0) {
-        last_snapshot = lines.clone();
-        let payload = lines.join("\n") + "\n";
-        let _ = ws_sink.send(Message::binary(payload.into_bytes())).await;
+    // Prime with current raw snapshot (drain any backlog)
+    if let Ok(chunks) = crate::ipc::query_terminal_snapshot(&daemon_path, &service, 0, 0) {
+        for bytes in chunks {
+            let _ = ws_sink.send(Message::binary(bytes)).await;
+        }
     }
     loop {
         tokio::select! {
@@ -354,22 +354,10 @@ async fn run_live_terminal_session(io: TokioIo<Upgraded>, service: String, confi
                 }
             }
             _ = tokio::time::sleep(Duration::from_millis(100)) => {
-                if let Ok((lines, _)) = crate::ipc::query_terminal_snapshot(&daemon_path, &service, 200, 0) {
-                    if lines != last_snapshot {
-                        // Send only diff tail? For simplicity send full snapshot diff as ANSI? Here join new lines
-                        // Find new lines since last_snapshot
-                        let new_lines = if lines.len() > last_snapshot.len() {
-                            &lines[last_snapshot.len()..]
-                        } else {
-                            &lines[..]
-                        };
-                        if !new_lines.is_empty() {
-                            let payload = new_lines.join("\n") + "\n";
-                            // Send as binary (raw) so xterm renders
-                            let _ = ws_sink.send(Message::binary(payload.into_bytes())).await;
-                            last_activity = Instant::now();
-                        }
-                        last_snapshot = lines;
+                if let Ok(chunks) = crate::ipc::query_terminal_snapshot(&daemon_path, &service, 0, 0) {
+                    for bytes in chunks {
+                        let _ = ws_sink.send(Message::binary(bytes)).await;
+                        last_activity = Instant::now();
                     }
                 }
             }

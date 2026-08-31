@@ -136,6 +136,14 @@ export function TerminalView({
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
     term.loadAddon(new WebLinksAddon());
+    // Allow Ctrl+C to be sent to PTY as \x03 (0x03) instead of browser copy.
+    term.attachCustomKeyEventHandler((e) => {
+      if (e.ctrlKey && e.key.toLowerCase() === "c" && e.type === "keydown") {
+        // Let xterm handle it via onData -> \x03
+        return false;
+      }
+      return true;
+    });
     term.open(el);
     term.focus();
 

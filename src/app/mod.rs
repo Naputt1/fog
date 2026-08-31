@@ -1479,17 +1479,28 @@ impl App {
             running: p.is_running(),
             port: p.port,
         });
-        // Live terminal snapshots for web emulation (same process as TUI, so `get_all_lines` is cheap - cached by generation).
+        // Live terminal raw output for web emulation (same process as TUI, raw ANSI bytes).
         let mut snaps = self
             .ipc_state
             .terminal_snapshots
             .lock()
             .expect("mutex poisoned");
-        snaps.clear();
         for item in &self.items {
-            // Skip shell tabs? Keep all - web can attach to any service.
-            let lines = item.get_all_lines();
-            snaps.insert(item.name.clone(), lines);
+            let chunks = item.drain_raw_output();
+            if chunks.is_empty() {
+                continue;
+            }
+            let entry = snaps.entry(item.name.clone()).or_default();
+            for chunk in chunks {
+                let b64 = base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    &chunk,
+                );
+                entry.push(b64);
+                if entry.len() > 500 {
+                    entry.remove(0);
+                }
+            }
         }
     }
 

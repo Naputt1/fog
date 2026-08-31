@@ -163,28 +163,13 @@ pub(crate) fn handle_connection(mut stream: UnixStream, state: Arc<IpcState>) {
                 serde_json::to_string(&resp).unwrap_or_default()
             );
         }
-        Request::TerminalSnapshot { service, rows, offset } => {
-            let snaps = state
-                .terminal_snapshots
-                .lock()
-                .expect("mutex poisoned")
-                .get(&service)
-                .cloned()
-                .unwrap_or_default();
-            // Return last `rows` lines from `offset` perspective (simple tail).
-            let total = snaps.len();
-            let start = total.saturating_sub(offset + rows);
-            let end = total.saturating_sub(offset);
-            let slice = if start < end {
-                &snaps[start..end]
-            } else {
-                &[][..]
-            };
+        Request::TerminalSnapshot { service, .. } => {
+            let mut snaps = state.terminal_snapshots.lock().expect("mutex poisoned");
+            let chunks = snaps.remove(&service).unwrap_or_default();
             let resp = serde_json::json!({
                 "ok": true,
                 "service": service,
-                "total": total,
-                "lines": slice,
+                "data": chunks,
             });
             let _ = writeln!(stream, "{}", serde_json::to_string(&resp).unwrap_or_default());
         }
@@ -584,19 +569,18 @@ pub(crate) fn send_service_action_with_timeout(
     serde_json::from_str(line.trim()).map_err(|e| io::Error::other(e.to_string()))
 }
 
-/// Queries a service's live terminal snapshot (plain lines) via IPC.
+/// Queries a service's live terminal raw output (base64 chunks) via IPC.
+/// Drains the pending queue on the daemon side, so each poll gets only new bytes.
 pub fn query_terminal_snapshot(
     path: &Path,
     service: &str,
-    rows: usize,
-    offset: usize,
-) -> io::Result<(Vec<String>, usize)> {
+    _rows: usize,
+    _offset: usize,
+) -> io::Result<Vec<Vec<u8>>> {
     let mut stream = UnixStream::connect(path)?;
     stream.set_read_timeout(Some(Duration::from_secs(super::READ_TIMEOUT_SECS)))?;
     let svc = serde_json::to_string(service).unwrap_or_else(|_| "\"\"".to_string());
-    let line = format!(
-        r#"{{"type":"terminal_snapshot","service":{svc},"rows":{rows},"offset":{offset}}}"#
-    );
+    let line = format!(r#"{{"type":"terminal_snapshot","service":{svc}}}"#);
     stream.write_all(line.as_bytes())?;
     stream.write_all(b"\n")?;
     stream.flush()?;
@@ -605,15 +589,23 @@ pub fn query_terminal_snapshot(
     reader.read_line(&mut resp)?;
     let v: serde_json::Value =
         serde_json::from_str(resp.trim()).map_err(|e| io::Error::other(e.to_string()))?;
-    let lines = v
-        .get("lines")
+    let b64_chunks = v
+        .get("data")
         .and_then(|l| l.as_array())
         .map(|arr| {
             arr.iter()
                 .filter_map(|x| x.as_str().map(|s| s.to_string()))
-                .collect()
+                .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let total = v.get("total").and_then(|t| t.as_u64()).unwrap_or(0) as usize;
-    Ok((lines, total))
+    let mut out = Vec::new();
+    for b64 in b64_chunks {
+        if let Ok(bytes) = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            &b64,
+        ) {
+            out.push(bytes);
+        }
+    }
+    Ok(out)
 }
