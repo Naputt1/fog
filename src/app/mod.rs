@@ -1256,6 +1256,18 @@ impl App {
         let content_area = main[0];
         let sidebar_area = main[1];
 
+        // Clamp scroll_offset before rendering so a resize or new output that
+        // shrinks visible height can never leave offset stranded past the top
+        // or make bottom (0) unreachable via clamping drift.
+        {
+            let max = self
+                .current_total_lines()
+                .saturating_sub(content_area.height.saturating_sub(2) as usize);
+            if self.scroll_offset > max {
+                self.scroll_offset = max;
+            }
+        }
+
         self.check_pending();
 
         let proxy_offset = usize::from(self.proxy_tab_index.is_some());

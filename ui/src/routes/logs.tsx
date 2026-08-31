@@ -529,7 +529,7 @@ function LogsPage() {
     const vp = viewportRef.current;
     if (!vp) return;
     const onScroll = () => {
-      const nearBottom = vp.scrollHeight - vp.scrollTop - vp.clientHeight < 8;
+      const nearBottom = vp.scrollHeight - vp.scrollTop - vp.clientHeight < 40;
       setFollow(nearBottom);
     };
     vp.addEventListener("scroll", onScroll, { passive: true });
@@ -544,7 +544,14 @@ function LogsPage() {
   }, [entries.length, follow]);
 
   const onToggleFollow = useCallback(() => {
-    setFollow((f) => !f);
+    setFollow((f) => {
+      const next = !f;
+      if (next) {
+        const vp = viewportRef.current;
+        if (vp) vp.scrollTop = vp.scrollHeight;
+      }
+      return next;
+    });
   }, []);
 
   const onCopy = useCallback(async () => {

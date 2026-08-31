@@ -184,8 +184,14 @@ pub(crate) fn draw_terminal_content(
         item.resize(text_area.width, visible_height);
     }
 
+    // Clamp offset to the logical max so bottom (0) is always reachable even
+    // after a narrow-width wrap that would otherwise keep offset stranded.
+    let visible_usize = visible_height as usize;
+    let max_logical = current_total_lines.saturating_sub(visible_usize);
+    let scroll_offset = scroll_offset.min(max_logical);
+
     let (lines, _total) = match items.get_mut(tab_index) {
-        Some(item) => item.get_screen(visible_height as usize, scroll_offset),
+        Some(item) => item.get_screen(visible_usize, scroll_offset),
         None => (vec![Line::from("no tab")], 0),
     };
     // Wrap each logical line into physical rows of at most text_area.width, so
@@ -194,13 +200,15 @@ pub(crate) fn draw_terminal_content(
     // selection to reuse.
     let window_start = current_total_lines
         .saturating_sub(scroll_offset)
-        .saturating_sub(visible_height as usize);
+        .saturating_sub(visible_usize);
     let (mut rows, mut layout) =
         selection::build_layout(&lines, window_start, text_area.width as usize);
 
     // Anchor to the bottom: when wrapped rows overflow the viewport the oldest
-    // ones clip from the top so the newest output is always visible.
-    let inner_h = visible_height as usize;
+    // ones clip from the top so the newest output is always visible. This
+    // keeps offset=0 firmly glued to the last physical row even when wrapping
+    // makes rows.len() > visible.
+    let inner_h = visible_usize;
     let over = rows.len().saturating_sub(inner_h);
     if over > 0 {
         rows.drain(0..over);

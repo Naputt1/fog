@@ -254,7 +254,7 @@ export function TerminalView({
   }, [clearTimers]);
 
   return (
-    <div className={cn("overflow-hidden rounded-lg border", className)}>
+    <div className={cn("flex flex-col overflow-hidden rounded-lg border", className)}>
       <div className="border-border bg-card/60 flex h-10 shrink-0 items-center gap-2 border-b px-3">
         <span className="flex items-center gap-2 font-mono text-xs">
           <span
@@ -282,7 +282,9 @@ export function TerminalView({
           </Button>
         </div>
       </div>
-      <div ref={containerRef} className="h-[70vh] w-full bg-[#0d1117] p-2" />
+      <div className="bg-[#0d1117] flex min-h-0 flex-1 p-2">
+        <div ref={containerRef} className="h-full min-h-[280px] w-full" />
+      </div>
     </div>
   );
 }
