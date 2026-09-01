@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useLayoutEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
@@ -68,6 +68,7 @@ export function TerminalView({
   const fitTimerRef = useRef<number | null>(null);
 
   const [connState, setConnState] = useState<ConnState>("connecting");
+  const [fitted, setFitted] = useState(false);
   // Bumped to force a fresh terminal + socket mount (auto or manual reconnect).
   const [attempt, setAttempt] = useState(0);
 
@@ -82,21 +83,26 @@ export function TerminalView({
     }
   }, []);
 
+  const fitImmediate = useCallback(() => {
+    try {
+      fitAddonRef.current?.fit();
+      setFitted(true);
+    } catch {
+      /* container not measurable yet; fall back to PTY default size */
+    }
+  }, []);
+
   // Debounced fit so rapid window/container resizes do not spam the layout
-  // engine and the PTY resize path.
+  // engine and the PTY resize path. First paint uses fitImmediate for instant layout.
   const fit = useCallback(() => {
     if (fitTimerRef.current !== null) {
       window.clearTimeout(fitTimerRef.current);
     }
     fitTimerRef.current = window.setTimeout(() => {
       fitTimerRef.current = null;
-      try {
-        fitAddonRef.current?.fit();
-      } catch {
-        /* container not measurable yet; fall back to PTY default size */
-      }
+      fitImmediate();
     }, FIT_DEBOUNCE_MS);
-  }, []);
+  }, [fitImmediate]);
 
   // Single owner of teardown: closes the socket, disposes the terminal,
   // drops listeners/timers, and clears the DOM node so a fresh instance can
@@ -112,6 +118,7 @@ export function TerminalView({
       termRef.current = null;
     }
     fitAddonRef.current = null;
+    setFitted(false);
     clearTimers();
     if (containerRef.current) {
       containerRef.current.innerHTML = "";
@@ -120,7 +127,8 @@ export function TerminalView({
 
   // Mount a fresh terminal + socket for each attempt; schedule auto-retry on
   // non-permanent close. Returns the unmount cleanup for this attempt.
-  useEffect(() => {
+  // useLayoutEffect ensures first paint already fits, avoiding slow width shrink on mobile.
+  useLayoutEffect(() => {
     const el = containerRef.current;
     if (!el) return;
 
@@ -144,7 +152,17 @@ export function TerminalView({
       }
       return true;
     });
+    // Hide until first fit to avoid flashing default 80-col width then shrinking.
+    el.style.visibility = "hidden";
     term.open(el);
+    // Instantly fit to container size before browser paints default 80-col width.
+    try {
+      fitAddon.fit();
+      el.style.visibility = "";
+      setFitted(true);
+    } catch {
+      el.style.visibility = "";
+    }
     term.focus();
 
     termRef.current = term;
@@ -168,7 +186,7 @@ export function TerminalView({
       setConnState("connected");
       // Reconnect budget resets on successful open
       reconnectAttemptRef.current = 0;
-      fit();
+      fitImmediate();
       const { cols, rows } = term;
       ws.send(JSON.stringify({ type: "resize", cols, rows }));
     };
@@ -254,8 +272,8 @@ export function TerminalView({
   }, [clearTimers]);
 
   return (
-    <div className={cn("flex flex-col overflow-hidden rounded-lg border", className)}>
-      <div className="border-border bg-card/60 flex h-10 shrink-0 items-center gap-2 border-b px-3">
+    <div className={cn("flex flex-col overflow-hidden rounded-lg border transition-none", className)}>
+      <div className="border-border bg-card/60 flex h-10 shrink-0 items-center gap-2 border-b px-3 transition-none">
         <span className="flex items-center gap-2 font-mono text-xs">
           <span
             className={cn(
@@ -282,8 +300,11 @@ export function TerminalView({
           </Button>
         </div>
       </div>
-      <div className="bg-[#0d1117] flex min-h-0 flex-1 p-2">
-        <div ref={containerRef} className="h-full min-h-[280px] w-full" />
+      <div className="bg-[#0d1117] flex min-h-0 flex-1 p-2 transition-none">
+        <div
+          ref={containerRef}
+          className={cn("h-full min-h-[280px] w-full transition-none", !fitted && "opacity-0")}
+        />
       </div>
     </div>
   );

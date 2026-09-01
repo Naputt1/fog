@@ -4,6 +4,7 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import type { Service } from "@/lib/api";
 import { useServices } from "@/lib/hooks";
 import { TerminalView } from "@/components/terminal/TerminalView";
+import { LogView } from "@/components/terminal/LogView";
 import { ServiceSidebar } from "@/components/terminal/ServiceSidebar";
 
 export const Route = createFileRoute("/logs")({
@@ -89,7 +90,8 @@ function writeStored(project: string, service: string) {
 function LogsPage() {
   const navigate = useNavigate();
   const search = Route.useSearch();
-  const { data: services, isLoading, isError } = useServices();
+  // Logs picker needs non-Traefik services too (e.g. postgres) so opt-in
+  const { data: services, isLoading, isError } = useServices({ withInternal: true });
   const [live, setLive] = useState(true);
 
   const groups = useMemo(() => groupServices(services ?? []), [services]);
@@ -190,28 +192,48 @@ function LogsPage() {
     });
   };
 
+  // Docker containers have no PTY — typing into them is not supported, so fall back to read-only docker logs SSE.
+  const isDocker = active?.pid == null;
+
   return (
     <div className="flex min-w-0 flex-col gap-3 lg:h-[calc(100dvh-8rem)] lg:flex-row lg:gap-6">
-      {/* Main terminal */}
+      {/* Main terminal / logs */}
       <div className="flex min-w-0 flex-1 flex-col gap-3 lg:min-h-0">
-        <label className="flex items-center gap-2 text-sm">
-          <input
-            type="checkbox"
-            checked={live}
-            onChange={(e) => setLive(e.target.checked)}
-            disabled={!active}
-            className="rounded"
+        {isDocker ? (
+          <div className="text-muted-foreground flex items-center gap-2 font-mono text-xs">
+            <span className="bg-amber-500/20 text-amber-600 rounded-full px-2 py-0.5">docker logs — read-only</span>
+            <span>PTY not available for container — streaming `docker logs`</span>
+          </div>
+        ) : (
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={live}
+              onChange={(e) => setLive(e.target.checked)}
+              disabled={!active}
+              className="rounded"
+            />
+            <span className={active ? "" : "text-muted-foreground"}>
+              Live — same PTY as TUI (mirror service, bidirectional). Unchecked = fresh shell in service workdir.
+            </span>
+          </label>
+        )}
+        {isDocker ? (
+          <LogView
+            key={`${active?.container ?? "__none__"}`}
+            container={active?.container ?? null}
+            pid={active?.pid ?? null}
+            service={active?.service ?? null}
+            className="flex min-h-[320px] flex-1"
           />
-          <span className={active ? "" : "text-muted-foreground"}>
-            Live — same PTY as TUI (mirror service, bidirectional). Unchecked = fresh shell in service workdir.
-          </span>
-        </label>
-        <TerminalView
-          key={`${active?.service ?? "__shell__"}:${live ? "live" : "cwd"}`}
-          service={active?.service}
-          live={live && !!active}
-          className="flex min-h-[320px] flex-1"
-        />
+        ) : (
+          <TerminalView
+            key={`${active?.service ?? "__shell__"}:${live ? "live" : "cwd"}`}
+            service={active?.service}
+            live={live && !!active}
+            className="flex min-h-[320px] flex-1"
+          />
+        )}
       </div>
 
       {/* Right sidebar */}
