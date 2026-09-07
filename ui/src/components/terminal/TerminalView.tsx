@@ -1,11 +1,20 @@
-import { useCallback, useLayoutEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useImperativeHandle,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type Ref,
+} from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
+import { ChevronDown, ChevronUp } from "lucide-react";
 import "@xterm/xterm/css/xterm.css";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import type { TerminalHandle } from "@/components/terminal/terminal-handle";
 
 const WS_PATH = "/ws/terminal";
 
@@ -53,10 +62,12 @@ export function TerminalView({
   className,
   service,
   live = false,
+  ref,
 }: {
   className?: string;
   service?: string;
   live?: boolean;
+  ref?: Ref<TerminalHandle>;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -66,6 +77,12 @@ export function TerminalView({
   const reconnectAttemptRef = useRef(0);
   const reconnectTimerRef = useRef<number | null>(null);
   const fitTimerRef = useRef<number | null>(null);
+  // Touch-scroll bookkeeping: last touch Y, accumulated fractional scroll,
+  // and whether the gesture started on xterm's scrollbar (see handleTouchStart).
+  const touchLastYRef = useRef<number | null>(null);
+  const touchAccumRef = useRef(0);
+  const touchActiveRef = useRef(false);
+  const touchOnScrollbarRef = useRef(false);
 
   const [connState, setConnState] = useState<ConnState>("connecting");
   const [fitted, setFitted] = useState(false);
@@ -104,6 +121,68 @@ export function TerminalView({
     }, FIT_DEBOUNCE_MS);
   }, [fitImmediate]);
 
+  // Finger-swiping on the terminal scrolls its internal scrollback. xterm has
+  // no touch support, so we translate vertical drag distance into scroll lines
+  // ourselves and grab the gesture with preventDefault so the page does not
+  // scroll instead. Fractional pixel deltas accumulate across events so a
+  // continuous drag scrolls as far as it should (no per-event rounding stall).
+  //
+  // When the touch starts on xterm's own scrollbar overlay (`.scrollbar`), we
+  // stand aside and let xterm's mouse-emulation drag scroll the buffer — that
+  // is the case where a thumb drag previously got stuck at a few lines per
+  // grab because we were swallowing the gesture.
+  const handleTouchStart = useCallback((e: TouchEvent) => {
+    const term = termRef.current;
+    if (!term || e.touches.length !== 1) return;
+    touchActiveRef.current = true;
+    touchLastYRef.current = e.touches[0].clientY;
+    touchAccumRef.current = 0;
+    const target = e.target as Element | null;
+    touchOnScrollbarRef.current = !!target?.closest?.(
+      ".xterm-scrollable-element .scrollbar"
+    );
+  }, []);
+
+  const handleTouchMove = useCallback((e: TouchEvent) => {
+    const term = termRef.current;
+    if (
+      !touchActiveRef.current ||
+      touchOnScrollbarRef.current ||
+      e.touches.length !== 1
+    ) {
+      return;
+    }
+    if (!term) return;
+    const container = containerRef.current;
+    if (!container) return;
+    const last = touchLastYRef.current;
+    if (last == null) {
+      touchLastYRef.current = e.touches[0].clientY;
+      return;
+    }
+    const deltaY = e.touches[0].clientY - last;
+    touchLastYRef.current = e.touches[0].clientY;
+    e.preventDefault();
+    // Accumulate fractional rows so slow/small movement still scrolls.
+    const rowHeight = Math.max(
+      1,
+      container.clientHeight / Math.max(1, term.rows)
+    );
+    touchAccumRef.current += deltaY / rowHeight;
+    const lines = Math.round(touchAccumRef.current);
+    if (lines !== 0) {
+      touchAccumRef.current -= lines;
+      term.scrollLines(lines);
+    }
+  }, []);
+
+  const handleTouchEnd = useCallback(() => {
+    touchActiveRef.current = false;
+    touchLastYRef.current = null;
+    touchAccumRef.current = 0;
+    touchOnScrollbarRef.current = false;
+  }, []);
+
   // Single owner of teardown: closes the socket, disposes the terminal,
   // drops listeners/timers, and clears the DOM node so a fresh instance can
   // mount. Does NOT reset `connState` — the parent reconnect loop drives state.
@@ -113,6 +192,15 @@ export function TerminalView({
     wsRef.current = null;
     resizeObserverRef.current?.disconnect();
     resizeObserverRef.current = null;
+    if (containerRef.current) {
+      containerRef.current.removeEventListener("touchstart", handleTouchStart, {
+        passive: true,
+      } as EventListenerOptions);
+      containerRef.current.removeEventListener("touchmove", handleTouchMove, {
+        passive: false,
+      } as EventListenerOptions);
+      containerRef.current.removeEventListener("touchend", handleTouchEnd);
+    }
     if (termRef.current) {
       termRef.current.dispose();
       termRef.current = null;
@@ -123,7 +211,7 @@ export function TerminalView({
     if (containerRef.current) {
       containerRef.current.innerHTML = "";
     }
-  }, [fit, clearTimers]);
+  }, [fit, clearTimers, handleTouchStart, handleTouchMove, handleTouchEnd]);
 
   // Mount a fresh terminal + socket for each attempt; schedule auto-retry on
   // non-permanent close. Returns the unmount cleanup for this attempt.
@@ -144,14 +232,6 @@ export function TerminalView({
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
     term.loadAddon(new WebLinksAddon());
-    // Allow Ctrl+C to be sent to PTY as \x03 (0x03) instead of browser copy.
-    term.attachCustomKeyEventHandler((e) => {
-      if (e.ctrlKey && e.key.toLowerCase() === "c" && e.type === "keydown") {
-        // Let xterm handle it via onData -> \x03
-        return false;
-      }
-      return true;
-    });
     // Hide until first fit to avoid flashing default 80-col width then shrinking.
     el.style.visibility = "hidden";
     term.open(el);
@@ -256,12 +336,23 @@ export function TerminalView({
     const resizeObserver = new ResizeObserver(fit);
     resizeObserver.observe(el);
     resizeObserverRef.current = resizeObserver;
+    el.addEventListener("touchstart", handleTouchStart, { passive: true });
+    el.addEventListener("touchmove", handleTouchMove, { passive: false });
+    el.addEventListener("touchend", handleTouchEnd);
 
     return () => {
       unmounted = true;
       teardown();
     };
-  }, [attempt, fit, teardown, service]);
+  }, [
+    attempt,
+    fit,
+    teardown,
+    service,
+    handleTouchStart,
+    handleTouchMove,
+    handleTouchEnd,
+  ]);
 
   // Manual reconnect: reset the backoff budget and force a fresh mount.
   const handleReconnect = useCallback(() => {
@@ -271,15 +362,106 @@ export function TerminalView({
     setAttempt((a) => a + 1);
   }, [clearTimers]);
 
+  // Route synthetic key events through xterm's own keymap by dispatching real
+  // KeyboardEvents on its hidden textarea. This is how the mobile keypad can
+  // compose Ctrl+letter / Shift+Tab etc. exactly like a desktop keyboard.
+  // xterm's keymap switches on `keyCode`, but synthetic events always report
+  // keyCode 0 — so we shadow it onto the constructed event.
+  const buildKeyEvent = useCallback(
+    (
+      type: "keydown" | "keyup",
+      init: KeyboardEventInit & { key: string },
+      keyCode: number
+    ) => {
+      const base: KeyboardEventInit = {
+        bubbles: true,
+        cancelable: true,
+        ctrlKey: false,
+        altKey: false,
+        shiftKey: false,
+        metaKey: false,
+        repeat: false,
+        ...init,
+      };
+      const ev = new KeyboardEvent(type, base);
+      Object.defineProperty(ev, "keyCode", {
+        value: keyCode,
+        configurable: true,
+      });
+      return ev;
+    },
+    []
+  );
+
+  const sendKey = useCallback(
+    (init: KeyboardEventInit & { key: string }, keyCode: number) => {
+      const term = termRef.current;
+      const el = term?.textarea;
+      if (!el) return;
+      el.dispatchEvent(buildKeyEvent("keydown", init, keyCode));
+      el.dispatchEvent(buildKeyEvent("keyup", init, keyCode));
+      term?.focus();
+    },
+    [buildKeyEvent]
+  );
+
+  const scrollByLines = useCallback((amount: number) => {
+    termRef.current?.scrollLines(amount);
+  }, []);
+
+  const copyText = useCallback(() => {
+    const term = termRef.current;
+    if (!term) return "";
+    const buf = term.buffer.active;
+    const lines: string[] = [];
+    for (let i = 0; i < buf.length; i++) {
+      const line = buf.getLine(i);
+      if (!line) continue;
+      lines.push(line.translateToString(true));
+    }
+    return lines.join("\n");
+  }, []);
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      dispatchKey: sendKey,
+      sendRaw: (data) => {
+        const term = termRef.current;
+        if (term) term.input(data, true);
+        else if (wsRef.current?.readyState === WebSocket.OPEN) {
+          wsRef.current.send(new TextEncoder().encode(data));
+        }
+      },
+      scroll: scrollByLines,
+      scrollToTop: () => termRef.current?.scrollToTop(),
+      scrollToBottom: () => termRef.current?.scrollToBottom(),
+      copyText,
+      focus: () => termRef.current?.focus(),
+    }),
+    [ref, sendKey, scrollByLines, copyText]
+  );
+
+  const handleScrollTop = useCallback(() => termRef.current?.scrollToTop(), []);
+  const handleScrollBottom = useCallback(
+    () => termRef.current?.scrollToBottom(),
+    []
+  );
+
   return (
-    <div className={cn("flex flex-col overflow-hidden rounded-lg border transition-none", className)}>
+    <div
+      className={cn(
+        "flex flex-col overflow-hidden rounded-lg border transition-none",
+        className
+      )}
+    >
       <div className="border-border bg-card/60 flex h-10 shrink-0 items-center gap-2 border-b px-3 transition-none">
         <span className="flex items-center gap-2 font-mono text-xs">
           <span
             className={cn(
               "size-2 rounded-full",
               connState === "connected" && "bg-emerald-500",
-              connState === "connecting" && "bg-amber-400 animate-pulse",
+              connState === "connecting" && "animate-pulse bg-amber-400",
               connState === "disconnected" && "bg-destructive"
             )}
           />
@@ -289,7 +471,25 @@ export function TerminalView({
             {connState === "disconnected" && "disconnected"}
           </span>
         </span>
-        <div className="ml-auto">
+        <div className="ml-auto flex items-center gap-1">
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            className="lg:hidden"
+            onClick={handleScrollTop}
+            aria-label="Scroll to top"
+          >
+            <ChevronUp className="size-4" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            className="lg:hidden"
+            onClick={handleScrollBottom}
+            aria-label="Scroll to bottom"
+          >
+            <ChevronDown className="size-4" />
+          </Button>
           <Button
             variant="ghost"
             size="sm"
@@ -300,10 +500,13 @@ export function TerminalView({
           </Button>
         </div>
       </div>
-      <div className="bg-[#0d1117] flex min-h-0 flex-1 p-2 transition-none">
+      <div className="flex min-h-0 flex-1 bg-[#0d1117] p-2 transition-none">
         <div
           ref={containerRef}
-          className={cn("h-full min-h-[280px] w-full transition-none", !fitted && "opacity-0")}
+          className={cn(
+            "h-full min-h-[280px] w-full transition-none",
+            !fitted && "opacity-0"
+          )}
         />
       </div>
     </div>

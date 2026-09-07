@@ -1,11 +1,13 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 
 import type { Service } from "@/lib/api";
 import { useServices } from "@/lib/hooks";
 import { TerminalView } from "@/components/terminal/TerminalView";
 import { LogView } from "@/components/terminal/LogView";
+import { TerminalKeypad } from "@/components/terminal/TerminalKeypad";
 import { ServiceSidebar } from "@/components/terminal/ServiceSidebar";
+import type { TerminalHandle } from "@/components/terminal/terminal-handle";
 
 export const Route = createFileRoute("/logs")({
   validateSearch: (search: Record<string, unknown>) => ({
@@ -90,18 +92,45 @@ function writeStored(project: string, service: string) {
 function LogsPage() {
   const navigate = useNavigate();
   const search = Route.useSearch();
+  const termApiRef = useRef<TerminalHandle | null>(null);
   // Logs picker needs non-Traefik services too (e.g. postgres) so opt-in
-  const { data: services, isLoading, isError } = useServices({ withInternal: true });
+  const {
+    data: services,
+    isLoading,
+    isError,
+  } = useServices({ withInternal: true });
   const [live, setLive] = useState(true);
+
+  const handleCopy = () => {
+    const text = termApiRef.current?.copyText() ?? "";
+    if (!text) return;
+    if (navigator.clipboard?.writeText) {
+      return navigator.clipboard.writeText(text);
+    }
+    // Fallback for contexts without the async clipboard API.
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    try {
+      document.execCommand("copy");
+    } finally {
+      document.body.removeChild(ta);
+    }
+  };
 
   const groups = useMemo(() => groupServices(services ?? []), [services]);
   const projectNames = useMemo(() => groups.map((g) => g.project), [groups]);
 
   // Effective project: URL > localStorage > first project
   const effectiveProject = useMemo(() => {
-    if (search.project && projectNames.includes(search.project)) return search.project;
+    if (search.project && projectNames.includes(search.project))
+      return search.project;
     const stored = readStored();
-    if (stored.project && projectNames.includes(stored.project)) return stored.project;
+    if (stored.project && projectNames.includes(stored.project))
+      return stored.project;
     return projectNames[0];
   }, [search.project, projectNames]);
 
@@ -114,11 +143,14 @@ function LogsPage() {
   // All services in the effective project (flattened)
   const projectServices = useMemo(() => {
     if (!filteredGroups.length) return [];
-    return filteredGroups.flatMap((g) => g.worktrees.flatMap((w) => w.services));
+    return filteredGroups.flatMap((g) =>
+      g.worktrees.flatMap((w) => w.services)
+    );
   }, [filteredGroups]);
 
   const active = useMemo(() => {
-    const list = projectServices.length > 0 ? projectServices : (services ?? []);
+    const list =
+      projectServices.length > 0 ? projectServices : (services ?? []);
     if (list.length === 0) return null;
     const byContainer = new Map(list.map((s) => [s.container, s]));
     const byService = new Map(list.map((s) => [s.service, s]));
@@ -131,19 +163,22 @@ function LogsPage() {
     });
     // Prefer URL service if it belongs to this project
     if (search.service) {
-      const svc = byContainer.get(search.service) ?? byService.get(search.service);
+      const svc =
+        byContainer.get(search.service) ?? byService.get(search.service);
       if (svc) return toActive(svc);
       // If service not in this project, try global list (maybe project param stale)
       const global = services ?? [];
       const gByContainer = new Map(global.map((s) => [s.container, s]));
       const gByService = new Map(global.map((s) => [s.service, s]));
-      const gs = gByContainer.get(search.service) ?? gByService.get(search.service);
+      const gs =
+        gByContainer.get(search.service) ?? gByService.get(search.service);
       if (gs) return toActive(gs as (typeof list)[number]);
     }
     // Try stored service if it belongs to effective project
     const stored = readStored();
     if (stored.service) {
-      const svc = byContainer.get(stored.service) ?? byService.get(stored.service);
+      const svc =
+        byContainer.get(stored.service) ?? byService.get(stored.service);
       if (svc) return toActive(svc);
     }
     return toActive(list[0]);
@@ -201,8 +236,12 @@ function LogsPage() {
       <div className="flex min-w-0 flex-1 flex-col gap-3 lg:min-h-0">
         {isDocker ? (
           <div className="text-muted-foreground flex items-center gap-2 font-mono text-xs">
-            <span className="bg-amber-500/20 text-amber-600 rounded-full px-2 py-0.5">docker logs — read-only</span>
-            <span>PTY not available for container — streaming `docker logs`</span>
+            <span className="rounded-full bg-amber-500/20 px-2 py-0.5 text-amber-600">
+              docker logs — read-only
+            </span>
+            <span>
+              PTY not available for container — streaming `docker logs`
+            </span>
           </div>
         ) : (
           <label className="flex items-center gap-2 text-sm">
@@ -214,13 +253,15 @@ function LogsPage() {
               className="rounded"
             />
             <span className={active ? "" : "text-muted-foreground"}>
-              Live — same PTY as TUI (mirror service, bidirectional). Unchecked = fresh shell in service workdir.
+              Live — same PTY as TUI (mirror service, bidirectional). Unchecked
+              = fresh shell in service workdir.
             </span>
           </label>
         )}
         {isDocker ? (
           <LogView
             key={`${active?.container ?? "__none__"}`}
+            ref={termApiRef}
             container={active?.container ?? null}
             pid={active?.pid ?? null}
             service={active?.service ?? null}
@@ -229,11 +270,23 @@ function LogsPage() {
         ) : (
           <TerminalView
             key={`${active?.service ?? "__shell__"}:${live ? "live" : "cwd"}`}
+            ref={termApiRef}
             service={active?.service}
             live={live && !!active}
             className="flex min-h-[320px] flex-1"
           />
         )}
+        <TerminalKeypad
+          input={!isDocker}
+          enabled={!!active}
+          onDispatch={(init, keyCode) =>
+            termApiRef.current?.dispatchKey(init, keyCode)
+          }
+          onRaw={(data) => termApiRef.current?.sendRaw(data)}
+          onScroll={(amount) => termApiRef.current?.scroll(amount)}
+          onCopy={handleCopy}
+          className="lg:hidden"
+        />
       </div>
 
       {/* Right sidebar */}
