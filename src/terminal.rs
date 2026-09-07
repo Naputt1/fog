@@ -118,6 +118,7 @@ pub struct Terminal {
     screen_generation: Arc<AtomicUsize>,
     #[allow(clippy::type_complexity)]
     line_cache: RefCell<Option<(usize, usize, usize, Vec<Line<'static>>)>>,
+    raw_output: Arc<Mutex<std::collections::VecDeque<Vec<u8>>>>,
     handler: Option<JoinHandle<()>>,
     writer: Option<Box<dyn Write + Send>>,
     child: Option<Box<dyn Child + Send + Sync>>,
@@ -202,10 +203,11 @@ fn check_docker_target(config: &HealthCheckConfig, branch: Option<&str>) -> bool
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
     if let Some(branch) = branch {
-        let slug = crate::ports::branch_slug(branch).unwrap_or_else(|_| branch.replace('/', "-"));
-        cmd.env("FOG_BRANCH", slug.clone());
+        if let Ok(slug) = crate::ports::branch_slug(branch) {
+            cmd.env("FOG_BRANCH", slug.clone());
+            cmd.env("FOG_BRANCH_SLUG", slug);
+        }
         cmd.env("FOG_BRANCH_RAW", branch);
-        cmd.env("FOG_BRANCH_SLUG", slug);
     }
 
     let mut child = match cmd.spawn() {
@@ -357,6 +359,7 @@ fn make_stop_pipe() -> io::Result<(RawFd, RawFd)> {
 fn spawn_reader(
     parser: Arc<Mutex<vt100::Parser>>,
     generation: Arc<AtomicUsize>,
+    raw_output: Arc<Mutex<std::collections::VecDeque<Vec<u8>>>>,
     fd: RawFd,
     stop: RawFd,
     mut tee: Option<fs::File>,
@@ -394,6 +397,13 @@ fn spawn_reader(
                     p.process(&buf[..n as usize]);
                 }
                 generation.fetch_add(1, Ordering::Relaxed);
+                {
+                    let mut q = raw_output.lock().expect("mutex poisoned");
+                    if q.len() >= 500 {
+                        q.pop_front();
+                    }
+                    q.push_back(buf[..n as usize].to_vec());
+                }
                 if let Some(file) = tee.as_mut() {
                     let _ = file.write_all(&buf[..n as usize]);
                 }
@@ -509,9 +519,11 @@ impl Terminal {
 
         let parser = Arc::new(Mutex::new(vt100::Parser::new(24, 80, scrollback)));
         let screen_generation = Arc::new(AtomicUsize::new(0));
+        let raw_output = Arc::new(Mutex::new(std::collections::VecDeque::new()));
         let handler = spawn_reader(
             parser.clone(),
             screen_generation.clone(),
+            raw_output.clone(),
             reader_fd,
             stop_r,
             None,
@@ -546,6 +558,7 @@ impl Terminal {
             health_stop: Arc::new(AtomicBool::new(false)),
             screen_generation: Arc::new(AtomicUsize::new(0)),
             line_cache: RefCell::new(None),
+            raw_output,
             handler: Some(handler),
             writer: Some(writer),
             child: Some(child),
@@ -609,6 +622,7 @@ impl Terminal {
             health_stop: Arc::new(AtomicBool::new(false)),
             screen_generation: Arc::new(AtomicUsize::new(0)),
             line_cache: RefCell::new(None),
+            raw_output: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             handler: None,
             writer: None,
             child: None,
@@ -663,6 +677,7 @@ impl Terminal {
             health_stop: Arc::new(AtomicBool::new(false)),
             screen_generation: Arc::new(AtomicUsize::new(0)),
             line_cache: RefCell::new(None),
+            raw_output: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             handler: None,
             writer: None,
             child: None,
@@ -718,6 +733,7 @@ impl Terminal {
             health_stop: Arc::new(AtomicBool::new(false)),
             screen_generation: Arc::new(AtomicUsize::new(0)),
             line_cache: RefCell::new(None),
+            raw_output: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             handler: None,
             writer: None,
             child: None,
@@ -774,6 +790,7 @@ impl Terminal {
             health_stop: Arc::new(AtomicBool::new(false)),
             screen_generation: Arc::new(AtomicUsize::new(0)),
             line_cache: RefCell::new(None),
+            raw_output: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             handler: None,
             writer: None,
             child: None,
@@ -817,6 +834,7 @@ impl Terminal {
             );
         }
         let screen_generation = Arc::new(AtomicUsize::new(0));
+        let raw_output = Arc::new(Mutex::new(std::collections::VecDeque::new()));
         let (stop_r, stop_w) = make_stop_pipe().unwrap_or((-1, -1));
         // SAFETY: dup creates an independent descriptor for the reader thread.
         let reader_fd = unsafe { libc::dup(fd) };
@@ -824,6 +842,7 @@ impl Terminal {
             Some(spawn_reader(
                 parser.clone(),
                 screen_generation.clone(),
+                raw_output.clone(),
                 reader_fd,
                 stop_r,
                 tee,
@@ -876,6 +895,7 @@ impl Terminal {
             health_stop: Arc::new(AtomicBool::new(false)),
             screen_generation,
             line_cache: RefCell::new(None),
+            raw_output,
             handler,
             writer,
             child: None,
@@ -981,10 +1001,11 @@ impl Terminal {
         let mut cmd_builder = CommandBuilder::new(&shell);
         cmd_builder.cwd(path);
         if let Some(branch) = &self.branch {
-            let slug = crate::ports::branch_slug(branch).unwrap_or_else(|_| branch.replace('/', "-"));
-            cmd_builder.env("FOG_BRANCH", slug.clone());
+            if let Ok(slug) = crate::ports::branch_slug(branch) {
+                cmd_builder.env("FOG_BRANCH", slug.clone());
+                cmd_builder.env("FOG_BRANCH_SLUG", slug);
+            }
             cmd_builder.env("FOG_BRANCH_RAW", branch);
-            cmd_builder.env("FOG_BRANCH_SLUG", slug);
         }
         for (k, v) in &self.injected_env {
             cmd_builder.env(k.clone(), v.clone());
@@ -1025,9 +1046,12 @@ impl Terminal {
         )));
         *self.line_cache.borrow_mut() = None;
         self.screen_generation.store(0, Ordering::Relaxed);
+        let raw_output = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+        self.raw_output = raw_output.clone();
         self.handler = Some(spawn_reader(
             self.parser.clone(),
             self.screen_generation.clone(),
+            raw_output,
             reader_fd,
             stop_r,
             tee,
@@ -1192,6 +1216,11 @@ impl Terminal {
         result.extend(screen.rows(0, cols));
 
         result
+    }
+
+    pub fn drain_raw_output(&self) -> Vec<Vec<u8>> {
+        let mut q = self.raw_output.lock().expect("mutex poisoned");
+        q.drain(..).collect()
     }
 
     /// Returns the cursor position `(row, col)` if the cursor is visible.
@@ -1623,10 +1652,11 @@ impl Terminal {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
         if let Some(branch) = &self.branch {
-            let slug = crate::ports::branch_slug(branch).unwrap_or_else(|_| branch.replace('/', "-"));
-            cmd.env("FOG_BRANCH", slug.clone());
+            if let Ok(slug) = crate::ports::branch_slug(branch) {
+                cmd.env("FOG_BRANCH", slug.clone());
+                cmd.env("FOG_BRANCH_SLUG", slug);
+            }
             cmd.env("FOG_BRANCH_RAW", branch);
-            cmd.env("FOG_BRANCH_SLUG", slug);
         }
         if let Some(dir) = cwd {
             cmd.current_dir(dir);
@@ -1686,6 +1716,7 @@ impl Drop for Terminal {
 mod tests {
     use super::*;
     use ratatui::style::{Color, Modifier};
+    static DOCKER_STUB_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn test_spawn_reused_is_ready_without_health_checks() {
@@ -1820,6 +1851,7 @@ mod tests {
 
     #[test]
     fn test_check_docker_target_exports_fog_branch() {
+        let _lock = DOCKER_STUB_LOCK.lock().unwrap();
         // A stub `docker` on PATH that only reports the api healthy when the
         // probe exports `FOG_BRANCH` — regression test for branch-suffixed
         // compose projects (e.g. `redfox-${FOG_BRANCH:-main}`) resolving to
@@ -1864,6 +1896,54 @@ mod tests {
         );
 
         // SAFETY: restores the original PATH for any later test.
+        unsafe { std::env::set_var("PATH", &prev_path) };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_check_docker_target_exports_slug_for_slashed_branch() {
+        let _lock = DOCKER_STUB_LOCK.lock().unwrap();
+        // Regression for `feat/barber` style branches: `spawn_into` exports
+        // FOG_BRANCH as the slug (`feat-barber`) so compose project
+        // `red-fox-infra-${FOG_BRANCH:-main}` matches. The health probe must
+        // do the same – raw `feat/barber` would resolve to a non-existent
+        // `red-fox-infra-feat/barber` project and incorrectly report unhealthy.
+        let dir = std::env::temp_dir().join(format!("fog-stub-docker-slash-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let stub = dir.join("docker");
+        std::fs::write(
+            &stub,
+            "#!/bin/sh\n\
+             [ \"$FOG_BRANCH\" = \"feat-barber\" ] || { echo '[]'; exit 0; }\n\
+             [ \"$FOG_BRANCH_RAW\" = \"feat/barber\" ] || { echo '[]'; exit 0; }\n\
+             [ \"$FOG_BRANCH_SLUG\" = \"feat-barber\" ] || { echo '[]'; exit 0; }\n\
+             echo '[{\"Service\":\"api\",\"State\":\"running\",\"Health\":\"healthy\"}]'\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let prev_path = std::env::var("PATH").unwrap_or_default();
+        let stub_path = format!("{}:{}", dir.display(), prev_path);
+        // SAFETY: stub only shadows `docker`, no other test spawns `docker` concurrently.
+        unsafe { std::env::set_var("PATH", &stub_path) };
+
+        let config = HealthCheckConfig {
+            kind: crate::config::HealthCheckKind::Docker,
+            target: "api".into(),
+            compose_file: Some("compose.yml".into()),
+            interval_ms: None,
+            timeout_ms: Some(2000),
+        };
+        assert!(
+            check_docker_target(&config, Some("feat/barber")),
+            "slashed branch must be slugified for FOG_BRANCH (feat/barber -> feat-barber)"
+        );
+
+        // SAFETY: restores original PATH.
         unsafe { std::env::set_var("PATH", &prev_path) };
         let _ = std::fs::remove_dir_all(&dir);
     }

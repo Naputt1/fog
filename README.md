@@ -59,6 +59,39 @@ For wildcard hostnames like `main.acme` and Traefik routing on `:80`, see [DNS a
 
 Web UI and API run on `127.0.0.1:18080` by default when enabled. See [configuration](https://naputt1.github.io/fog/configuration#index) for the index server, SPA build, and API.
 
+## Web terminal
+
+The web UI includes a live terminal at `/ws/terminal` that bridges your browser
+to a PTY shell (via the built-in reverse proxy). Open the service's terminal
+tab in the UI for a full ANSI-color shell.
+
+The gateway is served before route matching and can be hardened per script with
+a `terminal` config block:
+
+```json
+{
+  "scripts": {
+    "dev": {
+      "service": [ { "name": "web", "path": "/path", "cmd": "npm run dev" } ],
+      "proxy": { "port": 8080, "routes": [] },
+      "terminal": {
+        "auth_token": "s3cret",
+        "max_sessions_per_ip": 8,
+        "max_message_bytes": 65536,
+        "idle_timeout_secs": 900
+      }
+    }
+  }
+}
+```
+
+When `auth_token` is set, the client must connect with
+`/ws/terminal?auth_token=<token>`; missing or wrong tokens are rejected with
+`401`. Sessions are capped per client IP (`429`), oversized frames close with
+code `1009`, and PTY output is buffered in a bounded 64-frame drop-oldest
+queue. See the [terminal protocol](https://naputt1.github.io/fog/terminal-protocol)
+for full details.
+
 ## Usage
 
 ```bash

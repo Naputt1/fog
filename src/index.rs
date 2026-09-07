@@ -37,6 +37,7 @@ type RespBody = BoxBody<Bytes, Infallible>;
 
 /// One reachable service discovered from docker (Traefik labels or
 /// `fog.expose` custom labels).
+#[derive(Clone)]
 struct IndexEntry {
     /// Display project name (e.g. `gems`, `red-fox`), derived from the repo
     /// root of the compose project's working dir.
@@ -230,14 +231,11 @@ fn derive_group(
             .split_once('-')
             .map(|(_, w)| w.to_string())
             .unwrap_or_else(|| "main".to_string());
-        // Stale containers may carry `feat/book` in the compose project
-        // (`redfox-feat/book`); sanitize so grouping and URLs stay
-        // `feat-book`.
-        let worktree = crate::ports::sanitize_hostname(&raw_worktree);
-        // `sanitize_hostname` treats the worktree as a single label; a
-        // single-label host like `feat/book` becomes `feat-book`. For
-        // multi-label edge cases, keep only the first label's slug.
-        let worktree = worktree.split('.').next().unwrap_or(&worktree).to_string();
+        let worktree = crate::ports::sanitize_hostname(&raw_worktree)
+            .split('.')
+            .next()
+            .unwrap_or("main")
+            .to_string();
         (project, worktree, false)
     }
 }
@@ -309,9 +307,26 @@ fn docker_ports(name: &str) -> Vec<String> {
     ports
 }
 
+/// Derives the first host port from already-fetched `docker port` output
+/// (`published` from [`docker_ports`]) to avoid a second `docker port` subprocess.
+fn raw_port_from_published(published: &[String]) -> Option<String> {
+    for entry in published {
+        // `published` entries are `host->container` e.g. `0.0.0.0:53012->5173/tcp`
+        let host_part = entry.split("->").next().unwrap_or(entry);
+        if let Some(port) = host_part.rsplit(':').next()
+            && port.chars().all(|c| c.is_ascii_digit())
+            && !port.is_empty()
+        {
+            return Some(port.to_string());
+        }
+    }
+    None
+}
+
 /// Returns the first host port docker published for a container, if any (the
 /// number after the host `:` in `docker port` output, e.g. `53012` from
 /// `5173/tcp -> 0.0.0.0:53012`).
+#[allow(dead_code)]
 fn docker_host_port(name: &str) -> Option<String> {
     let out = Command::new("docker").args(["port", name]).output().ok()?;
     for line in String::from_utf8_lossy(&out.stdout).lines() {
@@ -753,16 +768,32 @@ fn serve_blocking(port: u16, network: String) -> io::Result<()> {
         let listener = tokio::net::TcpListener::bind(&addr)
             .await
             .map_err(|e| io::Error::other(format!("bind {addr}: {e}")))?;
+        // The embedded index server is where the web UI (and, via the vite dev
+        // proxy, the dev UI) is actually reached, so it must serve the built-in
+        // terminal gateway too — otherwise `/ws/terminal` would fall through to
+        // the SPA fallback and the browser upgrade would fail. The standalone
+        // server uses the gateway's default hardening limits (it has no
+        // per-script `TerminalConfig`).
+        let terminal = std::sync::Arc::new(crate::config::TerminalConfig::default());
+        let terminal_sessions = std::sync::Arc::new(crate::terminal_ws::SessionsRegistry::default());
         loop {
-            let Ok((stream, _)) = listener.accept().await else {
+            let Ok((stream, peer)) = listener.accept().await else {
                 continue;
             };
+            let peer_ip = peer.ip().to_string();
             let io = TokioIo::new(stream);
             let network = network.clone();
+            let terminal = terminal.clone();
+            let terminal_sessions = terminal_sessions.clone();
             tokio::spawn(async move {
                 let svc = service_fn(move |req: Request<hyper::body::Incoming>| {
                     let network = network.clone();
-                    async move { serve_index(&network, req).await }
+                    let terminal = terminal.clone();
+                    let terminal_sessions = terminal_sessions.clone();
+                    let peer_ip = peer_ip.clone();
+                    async move {
+                        serve_index(&network, req, terminal, terminal_sessions, peer_ip).await
+                    }
                 });
                 let _ = http1::Builder::new()
                     .serve_connection(io, svc)
@@ -776,6 +807,7 @@ fn serve_blocking(port: u16, network: String) -> io::Result<()> {
 }
 
 /// Routes embedded-server requests:
+///   - `/ws/terminal` → the built-in terminal WebSocket gateway (live PTY)
 ///   - `/logs/stream` → SSE stream of a container's `docker logs -f`
 ///   - `/api/...`     → JSON API endpoints consumed by the SPA
 ///   - `/api/instances/{pid}/services/{name}/action` → `POST` a service action
@@ -787,9 +819,71 @@ fn serve_blocking(port: u16, network: String) -> io::Result<()> {
 async fn serve_index(
     network: &str,
     req: Request<Incoming>,
+    terminal: std::sync::Arc<crate::config::TerminalConfig>,
+    terminal_sessions: std::sync::Arc<crate::terminal_ws::SessionsRegistry>,
+    peer_ip: String,
 ) -> Result<Response<RespBody>, Infallible> {
     let method = req.method().clone();
     let path = req.uri().path().to_string();
+
+    // The terminal gateway is a built-in WebSocket endpoint, so it must be
+    // served before any static/API routing. Without this the browser's
+    // `/ws/terminal` upgrade would be answered with the SPA fallback and the
+    // connection would fail immediately.
+    if crate::terminal_ws::is_terminal_upgrade(&req) {
+        // Optional `?service=<name>` attach target, resolved against running
+        // fog instances + the matching fog config. `?live=1` requests live
+        // emulation of the same PTY the TUI is showing (bidirectional, same
+        // process), not a fresh shell in the service's workdir.
+        let service = query_param(req.uri().query(), "service");
+        let live = query_param(req.uri().query(), "live")
+            .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+        if live && service.is_some() {
+            let svc = service.clone().unwrap();
+            // Live attach must be a known running service, else 404.
+            let running = discover_fog_instances().iter().any(|i| {
+                i.services.iter().any(|s| s.name == svc && s.running)
+            });
+            if !running {
+                return Ok(api_error(StatusCode::NOT_FOUND, "unknown or not running service"));
+            }
+            let resp = crate::terminal_ws::handle_live_terminal_upgrade(
+                req, terminal, terminal_sessions, peer_ip, svc,
+            )
+            .await
+            .expect("live terminal upgrade handler is infallible");
+            let (parts, body) = resp.into_parts();
+            let bytes = match body.collect().await {
+                Ok(collected) => collected.to_bytes(),
+                Err(_) => Bytes::new(),
+            };
+            return Ok(Response::from_parts(parts, Full::new(bytes).boxed()));
+        }
+        let target = service.as_ref().and_then(|s| resolve_service_target(s));
+        // An explicitly requested service that could not be resolved (not a
+        // running service, or its workdir is unknown) is a 404, not a shell.
+        if service.is_some() && target.is_none() {
+            return Ok(api_error(StatusCode::NOT_FOUND, "unknown or not running service"));
+        }
+        let resp = crate::terminal_ws::handle_terminal_upgrade(
+            req,
+            terminal,
+            terminal_sessions,
+            peer_ip,
+            target,
+        )
+        .await
+        .expect("terminal upgrade handler is infallible");
+        // Rebuild the response with this server's body type. The gateway's
+        // responses are fully buffered (empty body on 101, short text on
+        // 401/429), so collecting is cheap and lossless.
+        let (parts, body) = resp.into_parts();
+        let bytes = match body.collect().await {
+            Ok(collected) => collected.to_bytes(),
+            Err(_) => Bytes::new(),
+        };
+        return Ok(Response::from_parts(parts, Full::new(bytes).boxed()));
+    }
 
     // The action route consumes the request body (and forwards to a blocking
     // IPC call), so handle it before the path-only dispatch below.
@@ -831,9 +925,22 @@ async fn serve_index(
         return Ok(handle_instance_restart_request(&method, pid).await);
     }
 
+    // `/api/services` supports `?withInternal=1` to include non-Traefik compose services
+    // (e.g. postgres) for the logs picker. Default is Traefik-only. Blocking docker
+    // calls are offloaded so the current_thread runtime is not stalled.
+    if path == "/api/services" {
+        let query = req.uri().query().map(|s| s.to_string());
+        let net = network.to_string();
+        let resp = tokio::task::spawn_blocking(move || {
+            api_services_with_query(&net, query.as_deref())
+        })
+        .await
+        .unwrap_or_else(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()));
+        return Ok(resp);
+    }
+
     match path.as_str() {
         "/logs/stream" => Ok(serve_logs_stream(&req).await),
-        "/api/services" => Ok(api_services(network)),
         "/api/status" => Ok(api_status()),
         "/api/config" => Ok(api_config()),
         "/api/health" => Ok(api_health()),
@@ -1273,10 +1380,65 @@ fn api_service_from(e: IndexEntry) -> ApiService {
 /// so the logs picker can stream from *any* service (e.g. `api`, `minio`) even
 /// when it exposes no router route and sits off the router network.
 ///
-/// Enumerates *all* running containers and keeps only those carrying a
-/// `com.docker.compose.service` label (this also excludes the router itself and
-/// unrelated docker containers like a stray `mongodb`).
+/// Enumerates running compose containers. By default only Traefik-exposed
+/// containers (via `fog.expose` or `traefik.http.routers.*`) are returned so
+/// unrelated `docker ps` entries (e.g. a stray `mongodb`) do not pollute
+/// `/api/services`. Pass `with_internal=true` to also include non-routed
+/// compose services (useful for the logs picker to see `postgres` etc).
+#[allow(dead_code)]
 fn discover_compose_containers() -> Vec<IndexEntry> {
+    discover_compose_containers_filtered(false)
+}
+
+fn is_running_fog_project(working_dir: &str, allowed: &std::collections::HashSet<PathBuf>) -> bool {
+    if working_dir.is_empty() || allowed.is_empty() {
+        return false;
+    }
+    // Canonicalize wd when possible; fall back to raw path comparison.
+    let wd_path = PathBuf::from(working_dir);
+    let wd_canon = wd_path.canonicalize().unwrap_or(wd_path.clone());
+    // Direct match or allowed is prefix of wd (worktree subdir) or vice versa.
+    for root in allowed {
+        if wd_canon == *root {
+            return true;
+        }
+        // Worktree subdir: wd inside allowed root
+        if wd_canon.starts_with(root) {
+            return true;
+        }
+        // Config dir may be subdir of wd (e.g. wd=/repo, config_dir=/repo/app with fog.json)
+        // Check via try_canonical; cheap.
+        if root.starts_with(&wd_canon) {
+            return true;
+        }
+    }
+    // Also allow when wd's fog.json lives under an allowed root via git common dir
+    // grouping: check parent chain.
+    false
+}
+
+fn discover_compose_containers_filtered(with_internal: bool) -> Vec<IndexEntry> {
+    // Default entrypoint without running-instance scoping (used by tests). Delegates
+    // to the scoped variant with an allowlist derived from live instances when called
+    // via api_services_with_query.
+    let allowed = {
+        let instances = discover_fog_instances();
+        let mut set = std::collections::HashSet::new();
+        for inst in instances {
+            if let Some(dir) = inst.config_dir {
+                let p = PathBuf::from(dir);
+                set.insert(p.canonicalize().unwrap_or(p));
+            }
+        }
+        set
+    };
+    discover_compose_containers_filtered_scoped(with_internal, &allowed)
+}
+
+fn discover_compose_containers_filtered_scoped(
+    with_internal: bool,
+    allowed_roots: &std::collections::HashSet<PathBuf>,
+) -> Vec<IndexEntry> {
     let mut names: Vec<String> = Vec::new();
     let out = match Command::new("docker")
         .args(["ps", "--format", "{{.Names}}"])
@@ -1307,6 +1469,19 @@ fn discover_compose_containers() -> Vec<IndexEntry> {
             // unrelated docker container): not a selectable service.
             continue;
         };
+        // Only containers whose compose working_dir belongs to a currently
+        // running fog project are considered. This hides stray compose projects
+        // like `neo-backend` when no fog instance is running for that dir,
+        // even with ?withInternal=1 (which otherwise would include all non-Traefik
+        // containers such as postgres).
+        if let Some(wd) = labels.get("com.docker.compose.project.working_dir") {
+            if !is_running_fog_project(wd, allowed_roots) {
+                continue;
+            }
+        } else if !allowed_roots.is_empty() {
+            // No working_dir label but we have running fog projects: treat as unrelated.
+            continue;
+        }
         let git_project = labels
             .get("com.docker.compose.project.working_dir")
             .and_then(|wd| {
@@ -1317,7 +1492,7 @@ fn discover_compose_containers() -> Vec<IndexEntry> {
             });
         let (project, worktree, shared) = derive_group(&labels, &name, git_project.as_deref());
         let published = docker_ports(&name);
-        let raw_port = docker_host_port(&name);
+        let raw_port = raw_port_from_published(&published);
         let reachable = reachable_entries_from(
             &labels,
             &name,
@@ -1329,9 +1504,12 @@ fn discover_compose_containers() -> Vec<IndexEntry> {
             raw_port.clone(),
         );
         if reachable.is_empty() {
-            // No traefik route → no real router hostname; fall back to the
-            // compose service name so the entry still has a meaningful
-            // `url`/label and the logs picker can still select it.
+            if !with_internal {
+                // Traefik-only by default: skip containers with no router/fog.expose
+                // (e.g. unrelated mongo). Logs picker can opt-in via ?withInternal=1.
+                continue;
+            }
+            // withInternal: keep non-routed services so logs picker can see postgres etc.
             let hostname = labels
                 .get("fog.hostname")
                 .cloned()
@@ -1359,13 +1537,37 @@ fn discover_compose_containers() -> Vec<IndexEntry> {
 /// picker can stream logs from any container. Native (non-docker) services
 /// started via `ports` + `native_routes` are synthesized from fog instances so
 /// they appear alongside docker services in the Services UI.
-fn api_services(_network: &str) -> Response<RespBody> {
-    let mut list: Vec<ApiService> = discover_compose_containers()
-        .into_iter()
+///
+/// Query `?withInternal=1` (or `?internal=1`) opts into non-Traefik compose
+/// services (e.g. `postgres`) so the logs picker can still see them. Default
+/// is Traefik-only (`fog.expose` or `traefik.http.routers.*`) to avoid
+/// unrelated `docker ps` entries like a stray `mongodb`.
+fn api_services_with_query(_network: &str, query: Option<&str>) -> Response<RespBody> {
+    let with_internal = query
+        .map(|q| parse_query(q))
+        .map(|m| {
+            m.get("withInternal")
+                .or_else(|| m.get("with_internal"))
+                .or_else(|| m.get("internal"))
+                .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        })
+        .unwrap_or(false);
+    // Collect running fog roots once and reuse for docker filtering and native synthesis
+    let instances = discover_fog_instances();
+    let allowed_roots: std::collections::HashSet<PathBuf> = instances
+        .iter()
+        .filter_map(|i| i.config_dir.as_deref().map(PathBuf::from))
+        .map(|p| p.canonicalize().unwrap_or(p))
+        .collect();
+    let docker_entries =
+        discover_compose_containers_filtered_scoped(with_internal, &allowed_roots);
+    let mut list: Vec<ApiService> = docker_entries
+        .iter()
+        .cloned()
         .map(api_service_from)
         .collect();
-    // Add native services from fog instances.
-    for inst in discover_fog_instances() {
+    // Add native services from fog instances (reuse already-fetched `instances`).
+    for inst in &instances {
         let project = inst
             .project
             .as_deref()
@@ -1455,7 +1657,8 @@ fn api_services(_network: &str) -> Response<RespBody> {
                 continue;
             }
             // Check if this service is known to be docker by checking if any docker entry already has it
-            let is_docker = discover_compose_containers()
+            // Reuse the already-fetched docker_entries to avoid re-scanning docker per native service.
+            let is_docker = docker_entries
                 .iter()
                 .any(|e| e.service == svc.name && e.worktree == worktree);
             if is_docker {
@@ -1476,6 +1679,11 @@ fn api_services(_network: &str) -> Response<RespBody> {
         }
     }
     json_response(&list)
+}
+
+#[allow(dead_code)]
+fn api_services(_network: &str) -> Response<RespBody> {
+    api_services_with_query(_network, None)
 }
 
 /// One running fog instance as reported by `GET /api/status`.
@@ -1659,6 +1867,74 @@ fn discover_fog_instances() -> Vec<FogInstance> {
         }
     }
     out
+}
+
+/// Extracts a query parameter value by name from a URI query string.
+fn query_param(query: Option<&str>, name: &str) -> Option<String> {
+    query?.split('&').find_map(|pair| {
+        let mut it = pair.splitn(2, '=');
+        let key = it.next()?;
+        if key == name {
+            Some(it.next().unwrap_or("").to_string())
+        } else {
+            None
+        }
+    })
+}
+
+/// Resolves a `?service=<name>` attach target to a working-directory shell.
+///
+/// This is a *working-directory* attach (pattern B), not a live PTY attach:
+/// the managed service's PTY lives in its own fog daemon process and is only
+/// reachable over IPC, so the web terminal cannot share that exact master.
+/// Instead the shell opens in the service's working directory (its `path`,
+/// resolved against the instance's config dir) with the service's env, which
+/// gives the user a terminal that behaves as if it is inside the running
+/// service. The service process itself is never touched and keeps running
+/// regardless of the terminal session.
+///
+/// Returns `None` when no running instance reports a running service of that
+/// name, or when the instance's config dir is unknown.
+pub fn resolve_service_target(service: &str) -> Option<crate::terminal_ws::ServiceTarget> {
+    use std::path::Path;
+    let inst = discover_fog_instances().into_iter().find(|i| {
+        i.services
+            .iter()
+            .any(|s| s.name == service && s.running)
+    })?;
+    let config_dir = std::path::PathBuf::from(inst.config_dir.clone()?);
+    let mut cwd = config_dir.clone();
+    let mut env: Vec<(String, String)> = Vec::new();
+    // Best-effort: load the instance's fog.json to refine the service's
+    // working directory (its `path`) and surface its declared env vars. If the
+    // config cannot be read or the entry not found, fall back to the instance
+    // config dir, which is still a sensible shell root for the project.
+    if let Ok(cfg) = crate::config::load(&config_dir.join("fog.json")) {
+        for script in cfg.scripts.values() {
+            if let Some(entries) = &script.service {
+                for e in entries {
+                    let name = e.name.clone().unwrap_or_else(|| {
+                        Path::new(&e.path)
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into_owned()
+                    });
+                    if name == service {
+                        cwd = config_dir.join(&e.path);
+                        if let Some(env_map) = &e.env {
+                            env = env_map
+                                .iter()
+                                .map(|(k, v)| (k.clone(), v.clone()))
+                                .collect();
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    Some(crate::terminal_ws::ServiceTarget { cwd, env })
 }
 
 /// A launchable worktree (or the single non-git fallback) reported by
@@ -2420,6 +2696,21 @@ fn command_exists(name: &str) -> bool {
 mod tests {
     use super::*;
     use std::thread;
+
+    #[test]
+    fn test_query_param_extracts_value() {
+        assert_eq!(
+            query_param(Some("service=api&auth_token=abc"), "service"),
+            Some("api".into())
+        );
+        assert_eq!(
+            query_param(Some("service=api&auth_token=abc"), "auth_token"),
+            Some("abc".into())
+        );
+        assert_eq!(query_param(Some("service="), "service"), Some("".into()));
+        assert_eq!(query_param(Some("x=1"), "service"), None);
+        assert_eq!(query_param(None, "service"), None);
+    }
 
     #[test]
     fn test_extract_hosts_simple() {

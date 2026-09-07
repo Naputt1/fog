@@ -24,10 +24,10 @@ import {
 const POLL_MS = 5_000;
 
 /** Live services list + status. */
-export function useServices() {
+export function useServices(opts?: { withInternal?: boolean }) {
   return useQuery({
-    queryKey: ["services"],
-    queryFn: fetchServices,
+    queryKey: ["services", opts?.withInternal ? "withInternal" : "traefikOnly"],
+    queryFn: () => fetchServices(opts),
     refetchInterval: POLL_MS,
   });
 }

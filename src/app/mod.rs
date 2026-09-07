@@ -1312,6 +1312,18 @@ impl App {
         let content_area = main[0];
         let sidebar_area = main[1];
 
+        // Clamp scroll_offset before rendering so a resize or new output that
+        // shrinks visible height can never leave offset stranded past the top
+        // or make bottom (0) unreachable via clamping drift.
+        {
+            let max = self
+                .current_total_lines()
+                .saturating_sub(content_area.height.saturating_sub(2) as usize);
+            if self.scroll_offset > max {
+                self.scroll_offset = max;
+            }
+        }
+
         self.check_pending();
 
         let proxy_offset = usize::from(self.proxy_tab_index.is_some());
@@ -1573,6 +1585,29 @@ impl App {
             running: p.is_running(),
             port: p.port,
         });
+        // Live terminal raw output for web emulation (same process as TUI, raw ANSI bytes).
+        let mut snaps = self
+            .ipc_state
+            .terminal_snapshots
+            .lock()
+            .expect("mutex poisoned");
+        for item in &self.items {
+            let chunks = item.drain_raw_output();
+            if chunks.is_empty() {
+                continue;
+            }
+            let entry = snaps.entry(item.name.clone()).or_default();
+            for chunk in chunks {
+                let b64 = base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    &chunk,
+                );
+                entry.push(b64);
+                if entry.len() > 500 {
+                    entry.remove(0);
+                }
+            }
+        }
     }
 
     /// Executes one per-service control request published by the IPC thread
@@ -1615,6 +1650,32 @@ impl App {
             };
         };
         match req.action {
+            ipc::ServiceAction::TerminalInput { ref data } => {
+                let bytes = match base64::Engine::decode(
+                    &base64::engine::general_purpose::STANDARD,
+                    data,
+                ) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        return ipc::ControlResponse {
+                            ok: false,
+                            reason: format!("invalid base64: {e}"),
+                        }
+                    }
+                };
+                self.items[idx].write(&bytes);
+                ipc::ControlResponse {
+                    ok: true,
+                    reason: String::new(),
+                }
+            }
+            ipc::ServiceAction::TerminalResize { cols, rows } => {
+                self.items[idx].resize(cols, rows);
+                ipc::ControlResponse {
+                    ok: true,
+                    reason: String::new(),
+                }
+            }
             ipc::ServiceAction::Stop => match self.items[idx].stop() {
                 Ok(()) => ipc::ControlResponse {
                     ok: true,

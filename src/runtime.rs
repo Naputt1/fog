@@ -725,6 +725,7 @@ pub fn build_with_opts(opts: BuildOpts) -> Result<Runtime, String> {
                 })
                 .collect();
             let max_log_entries = pc.max_log_entries.unwrap_or(1000);
+            let terminal_cfg = script.terminal.clone().unwrap_or_default();
             let mut p = ProxyInstance::new(
                 pc.port,
                 pc.host,
@@ -732,7 +733,8 @@ pub fn build_with_opts(opts: BuildOpts) -> Result<Runtime, String> {
                 max_log_entries,
                 pc.tls_cert,
                 pc.tls_key,
-            );
+            )
+            .with_terminal_config(terminal_cfg);
             p.start();
             Some(p)
         }
@@ -840,6 +842,7 @@ mod tests {
         ScriptConfig {
             service: Some(entries),
             proxy: None,
+            terminal: None,
             concurrent: false,
         }
     }
@@ -848,6 +851,7 @@ mod tests {
         ScriptConfig {
             service: Some(entries),
             proxy: None,
+            terminal: None,
             concurrent: true,
         }
     }

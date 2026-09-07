@@ -69,6 +69,7 @@ A script bundles a set of services and an optional proxy under a name. Run it wi
 |-------|----------|------|---------|-------------|
 | `service` | No | `array` | — | List of service entries to manage |
 | `proxy` | No | `object` | — | Reverse proxy configuration (see below) |
+| `terminal` | No | `object` | — | Terminal WebSocket gateway hardening (auth, per-IP/size limits; see [Terminal protocol](/terminal-protocol)) |
 | `concurrent` | No | `boolean` | `true` | Allow multiple concurrent instances of this script in the same project+branch (see [Concurrent mode](#concurrent-mode--sharing-services)) |
 
 `fog` requires a script name; running `fog` with no arguments lists the available scripts.
