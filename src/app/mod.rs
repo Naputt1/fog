@@ -1598,10 +1598,8 @@ impl App {
             }
             let entry = snaps.entry(item.name.clone()).or_default();
             for chunk in chunks {
-                let b64 = base64::Engine::encode(
-                    &base64::engine::general_purpose::STANDARD,
-                    &chunk,
-                );
+                let b64 =
+                    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &chunk);
                 entry.push(b64);
                 if entry.len() > 500 {
                     entry.remove(0);
@@ -1660,7 +1658,7 @@ impl App {
                         return ipc::ControlResponse {
                             ok: false,
                             reason: format!("invalid base64: {e}"),
-                        }
+                        };
                     }
                 };
                 self.items[idx].write(&bytes);

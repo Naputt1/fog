@@ -220,7 +220,9 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
 }
 
 /** List of running services and their status. */
-export function fetchServices(opts?: { withInternal?: boolean }): Promise<Service[]> {
+export function fetchServices(opts?: {
+  withInternal?: boolean;
+}): Promise<Service[]> {
   const qs = opts?.withInternal ? "?withInternal=1" : "";
   return fetchJson<Service[]>(`/api/services${qs}`);
 }

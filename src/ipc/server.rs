@@ -192,7 +192,11 @@ pub(crate) fn handle_connection(mut stream: UnixStream, state: Arc<IpcState>) {
                 "total": total,
                 "data": slice,
             });
-            let _ = writeln!(stream, "{}", serde_json::to_string(&resp).unwrap_or_default());
+            let _ = writeln!(
+                stream,
+                "{}",
+                serde_json::to_string(&resp).unwrap_or_default()
+            );
         }
     };
 }
@@ -623,10 +627,8 @@ pub fn query_terminal_snapshot(
     let total = v.get("total").and_then(|t| t.as_u64()).unwrap_or(0) as usize;
     let mut out = Vec::new();
     for b64 in b64_chunks {
-        if let Ok(bytes) = base64::Engine::decode(
-            &base64::engine::general_purpose::STANDARD,
-            &b64,
-        ) {
+        if let Ok(bytes) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &b64)
+        {
             out.push(bytes);
         }
     }

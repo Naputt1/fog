@@ -1908,7 +1908,8 @@ mod tests {
         // `red-fox-infra-${FOG_BRANCH:-main}` matches. The health probe must
         // do the same – raw `feat/barber` would resolve to a non-existent
         // `red-fox-infra-feat/barber` project and incorrectly report unhealthy.
-        let dir = std::env::temp_dir().join(format!("fog-stub-docker-slash-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("fog-stub-docker-slash-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let stub = dir.join("docker");
         std::fs::write(

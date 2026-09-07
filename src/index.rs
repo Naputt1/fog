@@ -276,7 +276,7 @@ fn extract_hosts(rule: &str) -> Vec<String> {
         .map(str::trim)
         .filter(|p| !p.is_empty())
         .filter(|p| p.contains('.') || p.starts_with('{'))
-        .map(|h| crate::ports::sanitize_hostname(h))
+        .map(crate::ports::sanitize_hostname)
         .collect()
 }
 
@@ -763,45 +763,47 @@ fn serve_blocking(port: u16, network: String) -> io::Result<()> {
         .enable_all()
         .build()
         .map_err(|e| io::Error::other(e.to_string()))?;
-    let result = rt.block_on(async move {
-        let addr = format!("127.0.0.1:{port}");
-        let listener = tokio::net::TcpListener::bind(&addr)
-            .await
-            .map_err(|e| io::Error::other(format!("bind {addr}: {e}")))?;
-        // The embedded index server is where the web UI (and, via the vite dev
-        // proxy, the dev UI) is actually reached, so it must serve the built-in
-        // terminal gateway too — otherwise `/ws/terminal` would fall through to
-        // the SPA fallback and the browser upgrade would fail. The standalone
-        // server uses the gateway's default hardening limits (it has no
-        // per-script `TerminalConfig`).
-        let terminal = std::sync::Arc::new(crate::config::TerminalConfig::default());
-        let terminal_sessions = std::sync::Arc::new(crate::terminal_ws::SessionsRegistry::default());
-        loop {
-            let Ok((stream, peer)) = listener.accept().await else {
-                continue;
-            };
-            let peer_ip = peer.ip().to_string();
-            let io = TokioIo::new(stream);
-            let network = network.clone();
-            let terminal = terminal.clone();
-            let terminal_sessions = terminal_sessions.clone();
-            tokio::spawn(async move {
-                let svc = service_fn(move |req: Request<hyper::body::Incoming>| {
-                    let network = network.clone();
-                    let terminal = terminal.clone();
-                    let terminal_sessions = terminal_sessions.clone();
-                    let peer_ip = peer_ip.clone();
-                    async move {
-                        serve_index(&network, req, terminal, terminal_sessions, peer_ip).await
-                    }
+    let result =
+        rt.block_on(async move {
+            let addr = format!("127.0.0.1:{port}");
+            let listener = tokio::net::TcpListener::bind(&addr)
+                .await
+                .map_err(|e| io::Error::other(format!("bind {addr}: {e}")))?;
+            // The embedded index server is where the web UI (and, via the vite dev
+            // proxy, the dev UI) is actually reached, so it must serve the built-in
+            // terminal gateway too — otherwise `/ws/terminal` would fall through to
+            // the SPA fallback and the browser upgrade would fail. The standalone
+            // server uses the gateway's default hardening limits (it has no
+            // per-script `TerminalConfig`).
+            let terminal = std::sync::Arc::new(crate::config::TerminalConfig::default());
+            let terminal_sessions =
+                std::sync::Arc::new(crate::terminal_ws::SessionsRegistry::default());
+            loop {
+                let Ok((stream, peer)) = listener.accept().await else {
+                    continue;
+                };
+                let peer_ip = peer.ip().to_string();
+                let io = TokioIo::new(stream);
+                let network = network.clone();
+                let terminal = terminal.clone();
+                let terminal_sessions = terminal_sessions.clone();
+                tokio::spawn(async move {
+                    let svc = service_fn(move |req: Request<hyper::body::Incoming>| {
+                        let network = network.clone();
+                        let terminal = terminal.clone();
+                        let terminal_sessions = terminal_sessions.clone();
+                        let peer_ip = peer_ip.clone();
+                        async move {
+                            serve_index(&network, req, terminal, terminal_sessions, peer_ip).await
+                        }
+                    });
+                    let _ = http1::Builder::new()
+                        .serve_connection(io, svc)
+                        .with_upgrades()
+                        .await;
                 });
-                let _ = http1::Builder::new()
-                    .serve_connection(io, svc)
-                    .with_upgrades()
-                    .await;
-            });
-        }
-    });
+            }
+        });
     let _ = std::fs::remove_file(index_pid_path(port));
     result
 }
@@ -841,14 +843,21 @@ async fn serve_index(
         if live && service.is_some() {
             let svc = service.clone().unwrap();
             // Live attach must be a known running service, else 404.
-            let running = discover_fog_instances().iter().any(|i| {
-                i.services.iter().any(|s| s.name == svc && s.running)
-            });
+            let running = discover_fog_instances()
+                .iter()
+                .any(|i| i.services.iter().any(|s| s.name == svc && s.running));
             if !running {
-                return Ok(api_error(StatusCode::NOT_FOUND, "unknown or not running service"));
+                return Ok(api_error(
+                    StatusCode::NOT_FOUND,
+                    "unknown or not running service",
+                ));
             }
             let resp = crate::terminal_ws::handle_live_terminal_upgrade(
-                req, terminal, terminal_sessions, peer_ip, svc,
+                req,
+                terminal,
+                terminal_sessions,
+                peer_ip,
+                svc,
             )
             .await
             .expect("live terminal upgrade handler is infallible");
@@ -863,7 +872,10 @@ async fn serve_index(
         // An explicitly requested service that could not be resolved (not a
         // running service, or its workdir is unknown) is a 404, not a shell.
         if service.is_some() && target.is_none() {
-            return Ok(api_error(StatusCode::NOT_FOUND, "unknown or not running service"));
+            return Ok(api_error(
+                StatusCode::NOT_FOUND,
+                "unknown or not running service",
+            ));
         }
         let resp = crate::terminal_ws::handle_terminal_upgrade(
             req,
@@ -931,11 +943,10 @@ async fn serve_index(
     if path == "/api/services" {
         let query = req.uri().query().map(|s| s.to_string());
         let net = network.to_string();
-        let resp = tokio::task::spawn_blocking(move || {
-            api_services_with_query(&net, query.as_deref())
-        })
-        .await
-        .unwrap_or_else(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()));
+        let resp =
+            tokio::task::spawn_blocking(move || api_services_with_query(&net, query.as_deref()))
+                .await
+                .unwrap_or_else(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()));
         return Ok(resp);
     }
 
@@ -1544,7 +1555,7 @@ fn discover_compose_containers_filtered_scoped(
 /// unrelated `docker ps` entries like a stray `mongodb`.
 fn api_services_with_query(_network: &str, query: Option<&str>) -> Response<RespBody> {
     let with_internal = query
-        .map(|q| parse_query(q))
+        .map(parse_query)
         .map(|m| {
             m.get("withInternal")
                 .or_else(|| m.get("with_internal"))
@@ -1559,8 +1570,7 @@ fn api_services_with_query(_network: &str, query: Option<&str>) -> Response<Resp
         .filter_map(|i| i.config_dir.as_deref().map(PathBuf::from))
         .map(|p| p.canonicalize().unwrap_or(p))
         .collect();
-    let docker_entries =
-        discover_compose_containers_filtered_scoped(with_internal, &allowed_roots);
+    let docker_entries = discover_compose_containers_filtered_scoped(with_internal, &allowed_roots);
     let mut list: Vec<ApiService> = docker_entries
         .iter()
         .cloned()
@@ -1897,11 +1907,9 @@ fn query_param(query: Option<&str>, name: &str) -> Option<String> {
 /// name, or when the instance's config dir is unknown.
 pub fn resolve_service_target(service: &str) -> Option<crate::terminal_ws::ServiceTarget> {
     use std::path::Path;
-    let inst = discover_fog_instances().into_iter().find(|i| {
-        i.services
-            .iter()
-            .any(|s| s.name == service && s.running)
-    })?;
+    let inst = discover_fog_instances()
+        .into_iter()
+        .find(|i| i.services.iter().any(|s| s.name == service && s.running))?;
     let config_dir = std::path::PathBuf::from(inst.config_dir.clone()?);
     let mut cwd = config_dir.clone();
     let mut env: Vec<(String, String)> = Vec::new();

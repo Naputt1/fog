@@ -1078,7 +1078,10 @@ mod tests {
     fn test_build_no_share_ignores_reuse_even_when_healthy() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
-        let script = script_with(vec![reuse_entry("infra", Some(tcp_health(&addr.to_string())))]);
+        let script = script_with(vec![reuse_entry(
+            "infra",
+            Some(tcp_health(&addr.to_string())),
+        )]);
         let mut adopted = HashMap::new();
         let rt = build_with_ports_no_share(
             &script,

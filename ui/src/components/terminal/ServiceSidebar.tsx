@@ -1,7 +1,12 @@
 import { Fragment, useEffect } from "react";
 import type { Service } from "@/lib/api";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import {
+  Sheet,
+  SheetContent,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
 import { cn } from "@/lib/utils";
 import { useRightSidebar } from "@/lib/right-sidebar-context";
 
@@ -59,15 +64,33 @@ function ServiceButton({
   );
 }
 
-function SidebarContent({ groups, activeContainer, onSelect, isLoading, isError }: ServiceSidebarProps) {
+function SidebarContent({
+  groups,
+  activeContainer,
+  onSelect,
+  isLoading,
+  isError,
+}: ServiceSidebarProps) {
   if (isError) {
-    return <div className="text-destructive p-3 font-mono text-xs">Could not load services.</div>;
+    return (
+      <div className="text-destructive p-3 font-mono text-xs">
+        Could not load services.
+      </div>
+    );
   }
   if (isLoading) {
-    return <div className="text-muted-foreground p-3 font-mono text-xs">loading…</div>;
+    return (
+      <div className="text-muted-foreground p-3 font-mono text-xs">
+        loading…
+      </div>
+    );
   }
   if (groups.length === 0) {
-    return <div className="text-muted-foreground p-3 font-mono text-xs">no services running</div>;
+    return (
+      <div className="text-muted-foreground p-3 font-mono text-xs">
+        no services running
+      </div>
+    );
   }
   return (
     <div className="space-y-4 p-2">
@@ -102,13 +125,25 @@ function SidebarContent({ groups, activeContainer, onSelect, isLoading, isError 
 }
 
 export function ServiceSidebar(props: ServiceSidebarProps) {
-  const { groups, allGroups, selectedProject, onSelectProject, activeContainer, onSelect, isLoading, isError } = props;
+  const {
+    groups,
+    allGroups,
+    selectedProject,
+    onSelectProject,
+    activeContainer,
+    onSelect,
+    isLoading,
+    isError,
+  } = props;
   const displayGroups = groups;
   const projectOptions = (allGroups ?? groups).map((g) => ({
     name: g.project,
     count: g.worktrees.reduce((a, w) => a + w.services.length, 0),
   }));
-  const count = displayGroups.reduce((acc, p) => acc + p.worktrees.reduce((a, w) => a + w.services.length, 0), 0);
+  const count = displayGroups.reduce(
+    (acc, p) => acc + p.worktrees.reduce((a, w) => a + w.services.length, 0),
+    0
+  );
   const ctx = useRightSidebar();
 
   useEffect(() => {
@@ -121,38 +156,24 @@ export function ServiceSidebar(props: ServiceSidebarProps) {
     ctx?.setOpen(false);
   };
 
-  const ProjectDropdown = () => {
-    if (!projectOptions.length || !onSelectProject) return null;
-    return (
-      <div className="border-b px-2 py-2">
-        <label className="text-muted-foreground mb-1 block font-mono text-[10px] tracking-wider uppercase">Project</label>
-        <select
-          value={selectedProject ?? ""}
-          onChange={(e) => onSelectProject(e.target.value)}
-          className="bg-background border-input focus:ring-ring w-full rounded-md border px-2 py-1.5 font-mono text-xs focus:ring-1 focus:outline-none"
-        >
-          {projectOptions.map((p) => (
-            <option key={p.name} value={p.name}>
-              {p.name} ({p.count})
-            </option>
-          ))}
-        </select>
-      </div>
-    );
-  };
-
   return (
     <>
       {/* Desktop: always visible right sidebar */}
       <aside className="hidden w-72 shrink-0 flex-col border-l pl-0 lg:flex">
         <div className="flex h-10 shrink-0 items-center gap-2 border-b px-3">
-          <span className="text-muted-foreground font-mono text-xs tracking-wider uppercase">Services</span>
+          <span className="text-muted-foreground font-mono text-xs tracking-wider uppercase">
+            Services
+          </span>
           <span className="bg-muted text-muted-foreground ml-auto rounded-full px-1.5 py-0.5 font-mono text-[10px]">
             {isLoading ? "…" : count}
           </span>
         </div>
-        <ProjectDropdown />
-        <ScrollArea className="flex-1 min-h-0">
+        <ProjectDropdown
+          projectOptions={projectOptions}
+          selectedProject={selectedProject}
+          onSelectProject={onSelectProject}
+        />
+        <ScrollArea className="min-h-0 flex-1">
           <SidebarContent
             groups={displayGroups}
             activeContainer={activeContainer}
@@ -167,9 +188,15 @@ export function ServiceSidebar(props: ServiceSidebarProps) {
       <Sheet open={ctx?.open ?? false} onOpenChange={(o) => ctx?.setOpen(o)}>
         <SheetContent side="right" className="w-72 p-0">
           <SheetHeader className="border-b px-4 py-3">
-            <SheetTitle className="font-mono text-xs tracking-wider uppercase">Services</SheetTitle>
+            <SheetTitle className="font-mono text-xs tracking-wider uppercase">
+              Services
+            </SheetTitle>
           </SheetHeader>
-          <ProjectDropdown />
+          <ProjectDropdown
+            projectOptions={projectOptions}
+            selectedProject={selectedProject}
+            onSelectProject={onSelectProject}
+          />
           <ScrollArea className="h-[calc(100dvh-96px)]">
             <SidebarContent
               groups={displayGroups}
@@ -182,6 +209,36 @@ export function ServiceSidebar(props: ServiceSidebarProps) {
         </SheetContent>
       </Sheet>
     </>
+  );
+}
+
+function ProjectDropdown({
+  projectOptions,
+  selectedProject,
+  onSelectProject,
+}: {
+  projectOptions: { name: string; count: number }[];
+  selectedProject?: string;
+  onSelectProject?: (project: string) => void;
+}) {
+  if (!projectOptions.length || !onSelectProject) return null;
+  return (
+    <div className="border-b px-2 py-2">
+      <label className="text-muted-foreground mb-1 block font-mono text-[10px] tracking-wider uppercase">
+        Project
+      </label>
+      <select
+        value={selectedProject ?? ""}
+        onChange={(e) => onSelectProject(e.target.value)}
+        className="bg-background border-input focus:ring-ring w-full rounded-md border px-2 py-1.5 font-mono text-xs focus:ring-1 focus:outline-none"
+      >
+        {projectOptions.map((p) => (
+          <option key={p.name} value={p.name}>
+            {p.name} ({p.count})
+          </option>
+        ))}
+      </select>
+    </div>
   );
 }
 

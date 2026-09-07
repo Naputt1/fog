@@ -7,7 +7,8 @@ interface RightSidebarContextValue {
   setEnabled: (enabled: boolean) => void;
 }
 
-export const RightSidebarContext = createContext<RightSidebarContextValue | null>(null);
+export const RightSidebarContext =
+  createContext<RightSidebarContextValue | null>(null);
 
 export function useRightSidebar() {
   return useContext(RightSidebarContext);

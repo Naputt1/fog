@@ -282,22 +282,27 @@ pub async fn handle_live_terminal_upgrade(
         .expect("response builder failed"))
 }
 
-async fn run_live_terminal_session(io: TokioIo<Upgraded>, service: String, config: Arc<TerminalConfig>) {
+async fn run_live_terminal_session(
+    io: TokioIo<Upgraded>,
+    service: String,
+    config: Arc<TerminalConfig>,
+) {
     let ws = WebSocketStream::from_raw_socket(io, Role::Server, None).await;
     let (mut ws_sink, mut ws_stream) = ws.split();
     // Find daemon socket that owns this service (first instance where service running).
-    let daemon_path = crate::ipc::find_instances()
-        .ok()
-        .and_then(|instances| {
-            for (_, path) in instances {
-                if let Ok(status) = crate::ipc::query_status(&path) {
-                    if status.services.iter().any(|s| s.name == service && s.running) {
-                        return Some(path);
-                    }
-                }
+    let daemon_path = crate::ipc::find_instances().ok().and_then(|instances| {
+        for (_, path) in instances {
+            if let Ok(status) = crate::ipc::query_status(&path)
+                && status
+                    .services
+                    .iter()
+                    .any(|s| s.name == service && s.running)
+            {
+                return Some(path);
             }
-            None
-        });
+        }
+        None
+    });
     let Some(daemon_path) = daemon_path else {
         let _ = ws_sink
             .send(Message::Close(Some(CloseFrame {
@@ -314,7 +319,8 @@ async fn run_live_terminal_session(io: TokioIo<Upgraded>, service: String, confi
     let max_bytes = config.max_message_bytes;
     let mut last_activity = Instant::now();
     let mut seen_total = 0;
-    if let Ok((chunks, total)) = crate::ipc::query_terminal_snapshot(&daemon_path, &service, 500, 0) {
+    if let Ok((chunks, total)) = crate::ipc::query_terminal_snapshot(&daemon_path, &service, 500, 0)
+    {
         for bytes in &chunks {
             let _ = ws_sink.send(Message::binary(bytes.clone())).await;
         }
@@ -354,16 +360,16 @@ async fn run_live_terminal_session(io: TokioIo<Upgraded>, service: String, confi
                 }
             }
             _ = tokio::time::sleep(Duration::from_millis(100)) => {
-                if let Ok((chunks, total)) = crate::ipc::query_terminal_snapshot(&daemon_path, &service, 500, 0) {
-                    if total > seen_total {
-                        let new_count = (total - seen_total).min(chunks.len());
-                        let start = chunks.len().saturating_sub(new_count);
-                        for bytes in &chunks[start..] {
-                            let _ = ws_sink.send(Message::binary(bytes.clone())).await;
-                            last_activity = Instant::now();
-                        }
-                        seen_total = total;
+                if let Ok((chunks, total)) = crate::ipc::query_terminal_snapshot(&daemon_path, &service, 500, 0)
+                    && total > seen_total
+                {
+                    let new_count = (total - seen_total).min(chunks.len());
+                    let start = chunks.len().saturating_sub(new_count);
+                    for bytes in &chunks[start..] {
+                        let _ = ws_sink.send(Message::binary(bytes.clone())).await;
+                        last_activity = Instant::now();
                     }
+                    seen_total = total;
                 }
             }
             _ = ping.tick() => {
@@ -378,11 +384,25 @@ async fn run_live_terminal_session(io: TokioIo<Upgraded>, service: String, confi
 }
 
 fn is_live_resize(text: &str, daemon_path: &std::path::Path, service: &str) -> bool {
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(text) else { return false };
-    if v.get("type").and_then(|t| t.as_str()) != Some("resize") { return false; }
-    let cols = v.get("cols").and_then(|c| c.as_u64()).unwrap_or(DEFAULT_COLS as u64) as u16;
-    let rows = v.get("rows").and_then(|r| r.as_u64()).unwrap_or(DEFAULT_ROWS as u64) as u16;
-    let _ = crate::ipc::send_service_action(daemon_path, service, crate::ipc::ServiceAction::TerminalResize{ cols, rows });
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(text) else {
+        return false;
+    };
+    if v.get("type").and_then(|t| t.as_str()) != Some("resize") {
+        return false;
+    }
+    let cols = v
+        .get("cols")
+        .and_then(|c| c.as_u64())
+        .unwrap_or(DEFAULT_COLS as u64) as u16;
+    let rows = v
+        .get("rows")
+        .and_then(|r| r.as_u64())
+        .unwrap_or(DEFAULT_ROWS as u64) as u16;
+    let _ = crate::ipc::send_service_action(
+        daemon_path,
+        service,
+        crate::ipc::ServiceAction::TerminalResize { cols, rows },
+    );
     true
 }
 

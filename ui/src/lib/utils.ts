@@ -37,7 +37,10 @@ export function getRequestHostname(): string {
 
 export function getRequestHost(): string {
   if (typeof window === "undefined") return "127.0.0.1:18080";
-  return window.location.host || `${window.location.hostname}:${window.location.port}`;
+  return (
+    window.location.host ||
+    `${window.location.hostname}:${window.location.port}`
+  );
 }
 
 /**

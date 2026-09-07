@@ -114,7 +114,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     ) ?? NAV_ITEMS[0];
 
   return (
-    <RightSidebarContext.Provider value={{ open: rightOpen, setOpen: setRightOpen, enabled: rightEnabled, setEnabled: setRightEnabled }}>
+    <RightSidebarContext.Provider
+      value={{
+        open: rightOpen,
+        setOpen: setRightOpen,
+        enabled: rightEnabled,
+        setEnabled: setRightEnabled,
+      }}
+    >
       <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
         <div className="bg-background text-foreground flex h-dvh w-full overflow-hidden">
           {/* Desktop sidebar */}
@@ -126,7 +133,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             {/* Topbar */}
             <header className="border-border bg-card/60 flex h-14 shrink-0 items-center gap-3 border-b px-4 backdrop-blur">
               <SheetTrigger asChild className="md:hidden">
-                <Button variant="ghost" size="icon" aria-label="Open navigation">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  aria-label="Open navigation"
+                >
                   <PanelLeft className="size-5" />
                 </Button>
               </SheetTrigger>
@@ -159,7 +170,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               </div>
             </header>
 
-            <ScrollArea className="flex-1 min-h-0">
+            <ScrollArea className="min-h-0 flex-1">
               <main className="mx-auto w-full max-w-6xl min-w-0 p-4 md:p-6">
                 {children}
               </main>
