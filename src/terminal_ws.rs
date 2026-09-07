@@ -45,7 +45,6 @@ use tokio_tungstenite::tungstenite::protocol::Role;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 
 use crate::config::TerminalConfig;
-use base64::Engine as _;
 
 /// How often a keep-alive `ping` frame is sent to the client.
 const PING_INTERVAL: Duration = Duration::from_secs(30);
