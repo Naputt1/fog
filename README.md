@@ -4,19 +4,35 @@
 [![Crates.io](https://img.shields.io/crates/v/fog-tui.svg)](https://crates.io/crates/fog-tui)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-**Terminal service orchestrator and reverse proxy dashboard.**
+**The dev-environment orchestrator for humans and coding agents.**
 
-fog runs named scripts from `fog.json`. Each script starts local services in PTYs with full ANSI color and scrollback, plus an optional reverse proxy. All in one `ratatui` terminal UI — and a responsive web UI you can open from your phone on the tailnet.
+You and your agent run the same `fog dev` on the same branch — concurrently, without killing each other. Shared DBs get borrowed instead of duplicated, your agent runs headless while you watch the TUI, and you check both from your phone on the tailnet. Each service runs in its own PTY with full ANSI color and scrollback, behind an optional built-in reverse proxy — all in one `ratatui` terminal UI.
+
+```bash
+# Terminal A — you, the TUI
+fog dev
+
+# Terminal B — your agent, headless, same branch
+fog dev -d
+# → shares the DB, streams logs you can watch live
+```
+
+![fog demo](assets/demo.gif)
+
+## Why fog
+
+AI agents changed how we develop, but dev tooling still assumes one human per environment. fog is worktree-aware and **concurrent by default**: run `main` and `feature-x` side-by-side, or the *same* branch twice — human in the TUI, agent headless — and fog shares healthy services (the DB) while isolating the rest with per-instance ports and `${branch}` templating.
 
 ## Features
 
-- **Branches side-by-side.** Run `fog dev` on `main` and `feature-x` at once; `s` to switch in the TUI. Same branch can run twice — you and an agent share the DB without killing each other.
+- **Humans + agents on one environment.** `fog dev` and `fog dev -d` on the same branch coexist: shared DBs are borrowed (`share: true`), ports are randomized per instance, logs stream to the web UI. See the [agentic guide](https://naputt1.github.io/fog/agentic).
+- **Branches side-by-side.** Run `fog dev` on `main` and `feature-x` at once; `s` switches worktrees in-place in the TUI. Same branch can run twice — you and an agent share the DB without killing each other.
 - **Phone overview.** Check status and live logs at `http://<tailnet IP>` from your phone — no DNS setup.
-- **One command per service.** Each service in its own PTY with color and scrollback.
-- **Built-in proxy.** Reverse proxy with request log and WebSocket support.
-- **Simple config.** One `fog.json` with named scripts (`fog dev`).
+- **One command per service.** Each service in its own PTY with color and scrollback. `health_check`, `depends_on`, restart with `R`.
+- **Built-in proxy.** Reverse proxy with request log, filter, and WebSocket support.
+- **Simple config.** One `fog.json` with named scripts (`fog dev`). Ports templating, native_routes, worktree-aware sharing.
 
-See [agentic guide](https://naputt1.github.io/fog/agentic) for worktree switching and human+agent sharing, and [configuration](https://naputt1.github.io/fog/configuration) for full details.
+Full docs: [configuration](https://naputt1.github.io/fog/configuration), [agentic guide](https://naputt1.github.io/fog/agentic), [index server](https://naputt1.github.io/fog/index-server).
 
 ## Installation
 
