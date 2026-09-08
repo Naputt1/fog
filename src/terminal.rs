@@ -1341,10 +1341,14 @@ impl Terminal {
         // adopted PID is not a child, so probe liveness with `kill(pid, 0)`.
         if let Some(pid) = self.owned_pid {
             if process::is_pid_alive(pid) {
-                process::try_kill_process_group(pid, SIGTERM);
+                // Snapshot the tree before signaling the leader: backgrounded
+                // grandchildren in their own pgid (shell job control) survive
+                // kill(-pgid), and orphans reparent once the leader exits, so
+                // a post-mortem scan finds nothing.
+                process::signal_tree(pid, SIGTERM);
                 thread::sleep(Duration::from_millis(500));
                 if process::is_pid_alive(pid) {
-                    process::try_kill_process_group(pid, SIGKILL);
+                    process::signal_tree(pid, SIGKILL);
                 }
                 process::kill_descendants(pid);
             }
@@ -1357,11 +1361,11 @@ impl Terminal {
             && let Some(ref child) = self.child
             && let Some(pid) = child.process_id()
         {
-            process::try_kill_process_group(pid, SIGTERM);
+            process::signal_tree(pid, SIGTERM);
             thread::sleep(Duration::from_millis(500));
             match process::waitpid_nohang(pid) {
                 Ok(Some(_)) => self.child_reaped = true,
-                Ok(None) => process::try_kill_process_group(pid, SIGKILL),
+                Ok(None) => process::signal_tree(pid, SIGKILL),
                 Err(_) => self.child_reaped = true,
             }
             process::kill_descendants(pid);
@@ -1379,7 +1383,7 @@ impl Terminal {
             if let Some(pid) = pid
                 && !wait_reaped(pid, Duration::from_secs(2))
             {
-                process::try_kill_process_group(pid, SIGKILL);
+                process::signal_tree(pid, SIGKILL);
             }
         }
 
@@ -1773,11 +1777,11 @@ mod tests {
         // Wait for the background child to appear (up to ~5s).
         let mut bg = 0;
         for _ in 0..50 {
-            if let Ok(text) = std::fs::read_to_string(&pidfile) {
-                if let Ok(pid) = text.trim().parse::<u32>() {
-                    bg = pid;
-                    break;
-                }
+            if let Ok(text) = std::fs::read_to_string(&pidfile)
+                && let Ok(pid) = text.trim().parse::<u32>()
+            {
+                bg = pid;
+                break;
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }

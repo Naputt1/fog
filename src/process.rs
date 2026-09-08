@@ -139,21 +139,12 @@ pub fn has_child_processes(_pid: u32) -> bool {
     false
 }
 
-/// Kills all descendant processes of the given PID recursively.
-///
-/// On macOS this uses `proc_listchildpids` to discover and kill the process tree.
-///
-/// # Arguments
-/// * `pid` - The parent process ID whose descendants should be killed.
+/// Collects all descendant PIDs of the given PID (BFS, excludes `pid` itself).
 #[cfg(target_os = "macos")]
-pub fn kill_descendants(pid: u32) {
-    debug_assert!(
-        pid > 0,
-        "kill_descendants: pid must be positive, got {}",
-        pid
-    );
+pub fn descendant_pids(pid: u32) -> Vec<u32> {
     use std::collections::VecDeque;
 
+    let mut result = Vec::new();
     let mut queue = VecDeque::new();
     queue.push_back(pid as libc::pid_t);
 
@@ -161,7 +152,6 @@ pub fn kill_descendants(pid: u32) {
         // SAFETY:
         // First call queries the buffer size needed (null pointer, 0 length).
         // Second call fills the pre-allocated buffer with child PIDs.
-        // Each returned PID > 0 is a valid child process to kill.
         unsafe {
             let byte_count = libc::proc_listchildpids(current_pid, std::ptr::null_mut(), 0);
             if byte_count > 0 {
@@ -174,28 +164,23 @@ pub fn kill_descendants(pid: u32) {
                 );
                 for &child_pid in &children {
                     if child_pid > 0 {
-                        libc::kill(child_pid, libc::SIGKILL);
+                        result.push(child_pid as u32);
                         queue.push_back(child_pid);
                     }
                 }
             }
         }
     }
+    result
 }
 
-/// Kills all descendant processes of the given PID recursively.
+/// Collects all descendant PIDs of the given PID via `/proc` PPid mapping.
 ///
-/// On Linux this uses `/proc` filesystem enumeration to discover and kill the process tree.
-///
-/// # Arguments
-/// * `pid` - The parent process ID whose descendants should be killed.
+/// Snapshot the tree BEFORE signaling the leader: once the leader exits,
+/// its children are reparented (usually to pid 1) and a post-mortem scan
+/// finds nothing.
 #[cfg(target_os = "linux")]
-pub fn kill_descendants(pid: u32) {
-    debug_assert!(
-        pid > 0,
-        "kill_descendants: pid must be positive, got {}",
-        pid
-    );
+pub fn descendant_pids(pid: u32) -> Vec<u32> {
     use std::collections::VecDeque;
     use std::fs;
     fn get_ppid(pid: u32) -> Option<u32> {
@@ -209,57 +194,88 @@ pub fn kill_descendants(pid: u32) {
         None
     }
 
-    fn collect_descendants(root_pid: u32) -> Vec<u32> {
-        let mut result = Vec::new();
-        let entries = match fs::read_dir("/proc") {
-            Ok(e) => e,
-            Err(_) => return result,
+    let mut result = Vec::new();
+    let entries = match fs::read_dir("/proc") {
+        Ok(e) => e,
+        Err(_) => return result,
+    };
+
+    let mut children_map: std::collections::HashMap<u32, Vec<u32>> =
+        std::collections::HashMap::new();
+
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        let child_pid: u32 = match name_str.parse() {
+            Ok(pid) => pid,
+            Err(_) => continue,
         };
-
-        let mut children_map: std::collections::HashMap<u32, Vec<u32>> =
-            std::collections::HashMap::new();
-
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name_str = name.to_string_lossy();
-            let child_pid: u32 = match name_str.parse() {
-                Ok(pid) => pid,
-                Err(_) => continue,
-            };
-            if let Some(ppid) = get_ppid(child_pid) {
-                children_map.entry(ppid).or_default().push(child_pid);
-            }
+        if let Some(ppid) = get_ppid(child_pid) {
+            children_map.entry(ppid).or_default().push(child_pid);
         }
-
-        let mut queue = VecDeque::new();
-        queue.push_back(root_pid);
-
-        while let Some(current) = queue.pop_front() {
-            if let Some(children) = children_map.get(&current) {
-                for &child in children {
-                    result.push(child);
-                    queue.push_back(child);
-                }
-            }
-        }
-
-        result
     }
 
-    let descendants = collect_descendants(pid);
-    for &child_pid in &descendants {
-        let _ = unsafe { libc::kill(child_pid as libc::pid_t, libc::SIGKILL) };
+    let mut queue = VecDeque::new();
+    queue.push_back(pid);
+
+    while let Some(current) = queue.pop_front() {
+        if let Some(children) = children_map.get(&current) {
+            for &child in children {
+                result.push(child);
+                queue.push_back(child);
+            }
+        }
     }
+
+    result
 }
 
-/// Kills all descendant processes of the given PID recursively.
+/// Collects all descendant PIDs of the given PID.
 ///
-/// This is a no-op on platforms other than macOS and Linux.
+/// This is a no-op returning an empty vec on platforms other than macOS and Linux.
 ///
 /// # Arguments
 /// * `pid` - The parent process ID (ignored on non-macOS, non-Linux).
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-pub fn kill_descendants(_pid: u32) {}
+pub fn descendant_pids(_pid: u32) -> Vec<u32> {
+    vec![]
+}
+
+/// Kills all descendant processes of the given PID recursively with `SIGKILL`.
+///
+/// # Arguments
+/// * `pid` - The parent process ID whose descendants should be killed.
+pub fn kill_descendants(pid: u32) {
+    debug_assert!(
+        pid > 0,
+        "kill_descendants: pid must be positive, got {}",
+        pid
+    );
+    for child_pid in descendant_pids(pid) {
+        // SAFETY: child_pid was just observed in the process table.
+        let _ = unsafe { libc::kill(child_pid as libc::pid_t, libc::SIGKILL) };
+    }
+}
+
+/// Sends a signal to a whole process tree: descendants first, then the group.
+///
+/// The descendant list is snapshotted BEFORE signaling the leader. A
+/// backgrounded grandchild in its own process group (shell job control)
+/// survives `kill(-leader, sig)`; and once the leader exits, orphans are
+/// reparented so a post-mortem scan finds nothing. Signaling the snapshot
+/// first closes that race.
+///
+/// # Arguments
+/// * `pid` - The process ID (group leader / tree root).
+/// * `signal` - The signal number to send (e.g. `SIGTERM`, `SIGKILL`).
+pub fn signal_tree(pid: u32, signal: i32) {
+    debug_assert!(pid > 0, "signal_tree: pid must be positive, got {}", pid);
+    for child_pid in descendant_pids(pid) {
+        // SAFETY: child_pid was just observed in the process table.
+        let _ = unsafe { libc::kill(child_pid as libc::pid_t, signal) };
+    }
+    try_kill_process_group(pid, signal);
+}
 
 #[cfg(test)]
 mod tests {
