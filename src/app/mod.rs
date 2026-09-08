@@ -1583,7 +1583,7 @@ impl App {
         let mut proxy = self.ipc_state.proxy.lock().expect("mutex poisoned");
         *proxy = self.proxy.as_ref().map(|p| ipc::ProxyStatus {
             running: p.is_running(),
-            port: p.port,
+            port: p.bound_port(),
         });
         // Live terminal raw output for web emulation (same process as TUI, raw ANSI bytes).
         let mut snaps = self

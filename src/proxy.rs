@@ -12,7 +12,7 @@ use rustls::ServerConfig;
 use rustls_pemfile::{certs, private_key};
 use std::collections::VecDeque;
 use std::fs;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
@@ -142,6 +142,9 @@ pub struct ProxyInstance {
     logs: Arc<Mutex<VecDeque<LogEntry>>>,
     running: Arc<AtomicBool>,
     shutdown: Arc<AtomicBool>,
+    /// Actual bound port, captured after listen. Equals the configured `port`
+    /// except when `port` is 0 (OS-assigned random port). 0 = not yet bound.
+    bound_port: Arc<AtomicU16>,
     handle: Option<thread::JoinHandle<()>>,
     pub max_log_entries: usize,
     tls_cert: Option<String>,
@@ -168,6 +171,7 @@ impl ProxyInstance {
             logs: Arc::new(Mutex::new(VecDeque::with_capacity(max_log_entries))),
             running: Arc::new(AtomicBool::new(false)),
             shutdown: Arc::new(AtomicBool::new(false)),
+            bound_port: Arc::new(AtomicU16::new(0)),
             handle: None,
             max_log_entries,
             tls_cert,
@@ -195,6 +199,7 @@ impl ProxyInstance {
         let max_entries = self.max_log_entries;
         let running = self.running.clone();
         let shutdown = self.shutdown.clone();
+        let bound_port = self.bound_port.clone();
         let terminal = self.terminal.clone();
         let terminal_sessions = self.terminal_sessions.clone();
 
@@ -255,6 +260,13 @@ impl ProxyInstance {
                         return;
                     }
                 };
+
+                // Record the actual bound port so status displays (TUI, `fog ls`)
+                // show the real listener even when configured with port 0
+                // (OS-assigned random port).
+                if let Ok(bound) = listener.local_addr() {
+                    bound_port.store(bound.port(), Ordering::SeqCst);
+                }
 
                 // Configure the upstream client with a connect timeout and a
                 // pool idle timeout so hung upstreams cannot leak connections.
@@ -366,6 +378,14 @@ impl ProxyInstance {
 
     pub fn is_running(&self) -> bool {
         self.running.load(Ordering::SeqCst)
+    }
+
+    /// Port the proxy is actually listening on. Equals the configured `port`
+    /// except when `port` is 0 (OS-assigned random port), in which case this
+    /// returns the bound port once listening, or 0 if not yet bound.
+    pub fn bound_port(&self) -> u16 {
+        let bound = self.bound_port.load(Ordering::SeqCst);
+        if bound != 0 { bound } else { self.port }
     }
 
     pub fn get_logs(&self) -> Vec<LogEntry> {
@@ -1100,6 +1120,37 @@ mod tests {
     use http_body_util::Full;
     use hyper::Request;
     use hyper::body::Bytes;
+
+    // --- bound_port ---
+
+    #[test]
+    fn test_bound_port_reports_actual_port_when_configured_zero() {
+        let mut p = ProxyInstance::new(0, Some("127.0.0.1".into()), vec![], 100, None, None);
+        assert_eq!(p.bound_port(), 0);
+        p.start();
+        // Poll for the listener thread to bind (up to ~2s).
+        let mut bound = 0;
+        for _ in 0..40 {
+            bound = p.bound_port();
+            if bound != 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(bound != 0, "expected OS-assigned port, got 0");
+        assert!(p.is_running());
+        p.stop();
+        // Configured port is preserved for restart; bound port stays visible.
+        assert_eq!(p.port, 0);
+        assert_eq!(p.bound_port(), bound);
+    }
+
+    #[test]
+    fn test_bound_port_falls_back_to_configured_port_before_bind() {
+        let p = ProxyInstance::new(18080, Some("127.0.0.1".into()), vec![], 100, None, None);
+        assert!(!p.is_running());
+        assert_eq!(p.bound_port(), 18080);
+    }
 
     // --- wildcard_match ---
 
