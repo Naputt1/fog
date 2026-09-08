@@ -168,14 +168,16 @@ fn check_target(config: &HealthCheckConfig, branch: Option<&str>) -> bool {
                 .trim_start_matches("https://");
             addr.to_socket_addrs()
                 .ok()
-                .and_then(|mut addrs| addrs.next())
-                .is_some_and(|sa| {
-                    std::net::TcpStream::connect_timeout(
-                        &sa,
-                        std::time::Duration::from_millis(timeout),
-                    )
-                    .is_ok()
+                .map(|addrs| {
+                    addrs.into_iter().any(|sa| {
+                        std::net::TcpStream::connect_timeout(
+                            &sa,
+                            std::time::Duration::from_millis(timeout),
+                        )
+                        .is_ok()
+                    })
                 })
+                .unwrap_or(false)
         }
     }
 }
@@ -969,7 +971,14 @@ impl Terminal {
     /// Returns an error if the PTY could not be opened or the shell could not be spawned.
     pub fn start(&mut self, path: &str, cmd: &str) -> io::Result<()> {
         *self.health_status.lock().expect("mutex poisoned") = HealthStatus::Unknown;
-        self.spawn_into(path, cmd)
+        self.spawn_into(path, cmd)?;
+        // A fresh spawn means running: clear any stopped flag so
+        // refresh_status resumes deriving liveness. This matters for reused
+        // terminals revived by maybe_auto_start after the grace period —
+        // without it they report "stopped" forever despite a live process.
+        self.stopped = false;
+        self.process_running = true;
+        Ok(())
     }
 
     /// Returns `true` if the service is running and (if health checks are configured) healthy.
