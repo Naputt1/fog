@@ -339,6 +339,12 @@ fn open_log_file(log_dir: &std::path::Path, name: &str) -> io::Result<fs::File> 
     fs::File::create(log_dir.join(format!("{safe_name}.log")))
 }
 
+/// Notice shown for a borrowed (shared/reused) service, both in its tab and
+/// in its log file.
+fn borrow_notice(name: &str) -> String {
+    format!("♻ reusing already-running '{name}'; start skipped (press R to take over)")
+}
+
 /// Creates a pipe used to signal a reader thread to stop. Returns
 /// `(read_end, write_end)`.
 fn make_stop_pipe() -> io::Result<(RawFd, RawFd)> {
@@ -754,8 +760,7 @@ impl Terminal {
     /// * `cmd` - The command that would start the service.
     /// * `scrollback` - Number of scrollback lines.
     pub fn spawn_reused(name: String, path: String, cmd: String, scrollback: usize) -> Self {
-        let message =
-            format!("♻ reusing already-running '{name}'; start skipped (press R to take over)");
+        let message = borrow_notice(&name);
         let parser = Arc::new(Mutex::new(vt100::Parser::new(24, 80, scrollback)));
         {
             let mut p = parser.lock().expect("mutex poisoned");
@@ -797,6 +802,20 @@ impl Terminal {
             writer: None,
             child: None,
             master: None,
+        }
+    }
+
+    /// Persists the borrow notice into this terminal's log file so `fog logs`
+    /// shows borrowed services too. Borrowed terminals have no PTY reader
+    /// thread, so nothing would otherwise land in the file. No-op when this
+    /// terminal has no log dir (e.g. interactive TUI runs).
+    pub(crate) fn persist_borrow_notice(&self) {
+        let Some(dir) = self.log_dir.as_deref() else {
+            return;
+        };
+        if let Ok(mut f) = open_log_file(dir, &self.name) {
+            use std::io::Write;
+            let _ = writeln!(f, "{}", borrow_notice(&self.name));
         }
     }
 
@@ -1737,6 +1756,60 @@ mod tests {
         assert!(t.is_ready());
         t.refresh_status();
         assert!(!t.stopped);
+    }
+
+    #[test]
+    fn test_stop_kills_backgrounded_grandchildren() {
+        // Regression test for orphaned listeners: a service that backgrounds
+        // a long-lived child (its own pgid under shell job control, like an
+        // `exec socat` listener) must take it down on stop.
+        let dir = std::env::temp_dir().join(format!("fog-test-stop-tree-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pidfile = dir.join("bg.pid");
+        let cmd = format!("sleep 60 & echo $! > {}; sleep 60", pidfile.display());
+        let mut t =
+            Terminal::spawn_command(".", &cmd, "svc".into(), 100, None, None, Default::default())
+                .unwrap();
+        // Wait for the background child to appear (up to ~5s).
+        let mut bg = 0;
+        for _ in 0..50 {
+            if let Ok(text) = std::fs::read_to_string(&pidfile) {
+                if let Ok(pid) = text.trim().parse::<u32>() {
+                    bg = pid;
+                    break;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(bg != 0, "background child never started");
+        assert!(crate::process::is_pid_alive(bg));
+        t.stop().unwrap();
+        // The whole tree must be gone (up to ~5s for SIGTERM grace + KILL).
+        let mut dead = false;
+        for _ in 0..50 {
+            if !crate::process::is_pid_alive(bg) {
+                dead = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(dead, "background child {bg} survived stop()");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_persist_borrow_notice_writes_log_file() {
+        let dir = std::env::temp_dir().join(format!("fog-test-borrow-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut t = Terminal::spawn_reused("db".into(), ".".into(), "true".into(), 100);
+        // No log dir: no-op, no file created.
+        t.persist_borrow_notice();
+        assert!(!dir.join("db.log").exists());
+        t.log_dir = Some(dir.clone());
+        t.persist_borrow_notice();
+        let content = std::fs::read_to_string(dir.join("db.log")).unwrap();
+        assert!(content.contains("reusing already-running 'db'"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
