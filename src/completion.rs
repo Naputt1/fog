@@ -44,7 +44,7 @@ _fog() {{
         return 0
     fi
 
-    opts="--config --save-logs --branch --detach --service --completions -d -h --help -V --version"
+    opts="--config --save-logs --branch --detach --service --all --completions -d -h --help -V --version"
     if [[ "$prev" == "--service" || "$prev" == "-s" ]]; then
         return 0
     fi
@@ -74,6 +74,7 @@ _fog() {{
         '--branch=[Run in the worktree of a branch]:branch:->branches' \
         '(-d --detach)'{{-d,--detach}}'[Run in the background without the TUI]' \
         '(-s --service)'{{-s,--service}}'[Show logs for one service]:service:' \
+        '--all[Apply to every matching instance (kill/restart)]' \
         '--completions=[Generate a completion script]:shell:(bash zsh fish)' \
         '(-h --help)'{{-h,--help}}'[Print help]' \
         '(-V --version)'{{-V,--version}}'[Print version]' \
@@ -101,6 +102,7 @@ complete -c fog -l save-logs -d 'Save service output to temp/ on exit'
 complete -c fog -l branch -d 'Run in the worktree of a branch' -a '({branches})'
 complete -c fog -s d -l detach -d 'Run in the background without the TUI'
 complete -c fog -s s -l service -d 'Show logs for one service (fog logs)'
+complete -c fog -l all -d 'Apply to every matching instance (kill/restart)'
 complete -c fog -l completions -d 'Generate a completion script' -a 'bash zsh fish'
 complete -c fog -s h -l help -d 'Print help'
 complete -c fog -s V -l version -d 'Print version'

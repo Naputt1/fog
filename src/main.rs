@@ -41,7 +41,7 @@ const DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(60);
     name = "fog",
     version = env!("CARGO_PKG_VERSION"),
     about = "Terminal-based service orchestrator & reverse-proxy dashboard",
-    after_help = "Built-in commands:\n  fog ls [PID]                    list running instances and service status\n  fog kill [PID]                  gracefully shut down a running instance\n  fog restart [PID]               restart a running instance\n  fog logs [PID]                  list services and their status\n  fog logs [PID] --service NAME   print captured output of one service\n  fog index serve [--foreground] [--port N]  run the index server (detached by default)\n  fog index kill                  stop the index server\n  fog index restart               restart the index server\n\nRun a script from fog.json:\n  fog <script> [OPTIONS]  (e.g. fog dev)"
+    after_help = "Built-in commands:\n  fog ls [PID]                    list running instances and service status\n  fog kill [PID|--all]            gracefully shut down a running instance\n  fog restart [PID|--all]         restart a running instance\n  fog logs [PID]                  list services and their status\n  fog logs [PID] --service NAME   print captured output of one service\n  fog index serve [--foreground] [--port N]  run the index server (detached by default)\n  fog index kill                  stop the index server\n  fog index restart               restart the index server\n\nWith no PID, kill/restart/logs target the instance started from the local\nfog.json (same config directory, so the branch is implicit). When several\nlocal instances match, the command lists them: pass an explicit PID, or\n--all (kill/restart) to apply to every local match. Outside a directory\nwith fog.json, --all applies to every running instance.\n\nRun a script from fog.json:\n  fog <script> [OPTIONS]  (e.g. fog dev)"
 )]
 struct Cli {
     /// Script to run (e.g. `fog dev`), or a built-in command
@@ -49,7 +49,15 @@ struct Cli {
     script: Option<String>,
 
     /// PID of a running fog instance (used with `fog kill <pid>`, `fog restart <pid>`, `fog logs <pid>`).
+    /// Omit it in a directory with `fog.json` to target the instance started
+    /// from that config.
     pid: Option<u32>,
+
+    /// Apply to every matching instance: the local `fog.json` matches when
+    /// run in a directory with a config, otherwise every running instance.
+    /// Only used with `fog kill` and `fog restart`; conflicts with `PID`.
+    #[arg(long)]
+    all: bool,
 
     /// Only used with `fog logs`: print the captured output of this service
     /// instead of listing services. Without it, `fog logs` lists the
@@ -477,7 +485,7 @@ fn cmd_ls() -> io::Result<()> {
     Ok(())
 }
 
-fn cmd_kill(pid: Option<u32>) -> io::Result<()> {
+fn cmd_kill(pid: Option<u32>, all: bool, cli: &Cli) -> io::Result<()> {
     let instances = ipc::find_instances()?;
 
     if instances.is_empty() {
@@ -485,40 +493,41 @@ fn cmd_kill(pid: Option<u32>) -> io::Result<()> {
         std::process::exit(1);
     }
 
-    let (target_pid, path) = resolve_instance(&instances, pid, "kill");
-    ipc::send_kill(path)?;
-    println!("sent kill request to fog instance");
-
-    // Give the instance a moment to exit and clean up its socket, then
-    // tear down the index server if it was the last instance.
-    // This is best-effort: `fog kill` is fire-and-forget, so we don't
-    // block long enough to guarantee the instance is gone.
-    let is_last = instances.len() == 1 && instances[0].0 == target_pid;
-    if is_last {
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        // Spin a short wait for the target's socket to become unreachable
-        // (up to 2s) before deciding to kill the server.
-        for _ in 0..20 {
-            if ipc::query_status(path).is_err() && !path.exists() {
-                break;
-            }
-            if !fog::process::is_pid_alive(target_pid) {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
+    let targets = resolve_targets(&instances, pid, all, cli, "kill");
+    for (target_pid, path) in &targets {
+        match ipc::send_kill(path) {
+            Ok(()) => println!("sent kill request to fog instance {target_pid}"),
+            Err(e) => eprintln!("warning: could not kill instance {target_pid}: {e}"),
         }
-        fog::index::maybe_terminate_if_no_instances(None);
-    } else if instances.len() > 1 {
-        // Multiple instances were running; the killed one may have been the
-        // last one that made the server idle (e.g. stale sockets). Do a
-        // quick idle check after a short delay without blocking the CLI long.
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        fog::index::maybe_terminate_if_no_instances(None);
     }
+
+    // Give the instance(s) a moment to exit and clean up, then tear down the
+    // index server if nothing remains. Best-effort: fire-and-forget.
+    if targets.len() == 1 {
+        let (target_pid, path) = &targets[0];
+        let target_pid = *target_pid;
+        if instances.len() == 1 && instances[0].0 == target_pid {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            for _ in 0..20 {
+                if ipc::query_status(path).is_err() && !path.exists() {
+                    break;
+                }
+                if !fog::process::is_pid_alive(target_pid) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        } else {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+    } else {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    fog::index::maybe_terminate_if_no_instances(None);
     Ok(())
 }
 
-fn cmd_restart(pid: Option<u32>, cli: &Cli) -> io::Result<()> {
+fn cmd_restart(pid: Option<u32>, all: bool, cli: &Cli) -> io::Result<()> {
     let instances = ipc::find_instances()?;
 
     if instances.is_empty() {
@@ -526,54 +535,57 @@ fn cmd_restart(pid: Option<u32>, cli: &Cli) -> io::Result<()> {
         std::process::exit(1);
     }
 
-    let (target_pid, path) = resolve_instance(&instances, pid, "restart");
-    // Capture the target's status before killing so we can relaunch it.
-    let status = ipc::query_status(path).unwrap_or_else(|e| {
-        eprintln!("error: could not query instance {target_pid}: {e}");
-        std::process::exit(1);
-    });
-    let script = status.script.clone();
-    let config_dir = status.config_dir.clone();
-    let branch = status.branch.clone();
+    let targets = resolve_targets(&instances, pid, all, cli, "restart");
+    for (target_pid, path) in &targets {
+        let target_pid = *target_pid;
+        // Capture the target's status before killing so we can relaunch it.
+        let status = ipc::query_status(path).unwrap_or_else(|e| {
+            eprintln!("error: could not query instance {target_pid}: {e}");
+            std::process::exit(1);
+        });
+        let script = status.script.clone();
+        let config_dir = status.config_dir.clone();
+        let branch = status.branch.clone();
 
-    ipc::send_kill(path)?;
-    println!("sent kill request to fog instance {target_pid} (script '{script}')");
+        ipc::send_kill(path)?;
+        println!("sent kill request to fog instance {target_pid} (script '{script}')");
 
-    // Wait for the old instance to fully exit before relaunching to avoid
-    // port conflicts and owner-lock races.
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while std::time::Instant::now() < deadline {
-        if !fog::process::is_pid_alive(target_pid) && ipc::query_status(path).is_err() {
-            break;
+        // Wait for the old instance to fully exit before relaunching to avoid
+        // port conflicts and owner-lock races.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            if !fog::process::is_pid_alive(target_pid) && ipc::query_status(path).is_err() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
         }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    // Extra grace for socket file removal.
-    wait_for_socket_gone(path);
+        // Extra grace for socket file removal.
+        wait_for_socket_gone(path);
 
-    // Resolve config path for the relaunch. Prefer the killed instance's
-    // config_dir (worktree-accurate), fall back to cli --config.
-    let config_path = if let Some(dir) = config_dir {
-        let p = PathBuf::from(&dir).join("fog.json");
-        if p.exists() {
-            p
+        // Resolve config path for the relaunch. Prefer the killed instance's
+        // config_dir (worktree-accurate), fall back to cli --config.
+        let config_path = if let Some(dir) = config_dir {
+            let p = PathBuf::from(&dir).join("fog.json");
+            if p.exists() {
+                p
+            } else {
+                resolve_config_path(&resolve_run_config(cli))
+            }
         } else {
             resolve_config_path(&resolve_run_config(cli))
-        }
-    } else {
-        resolve_config_path(&resolve_run_config(cli))
-    };
+        };
 
-    // Spawn a detached instance with the same script. The config_path already
-    // points at the correct worktree's fog.json, so no --branch is needed
-    // (branch is inferred from the worktree containing config_dir).
-    let new_pid = spawn_instance_detached(&config_path, &script, None)?;
-    println!("restarted fog '{script}' (old pid {target_pid} → new pid {new_pid})");
-    if let Some(b) = branch {
-        println!("  branch: {b}");
+        // Spawn a detached instance with the same script. The config_path already
+        // points at the correct worktree's fog.json, so no --branch is needed
+        // (branch is inferred from the worktree containing config_dir).
+        let new_pid = spawn_instance_detached(&config_path, &script, None)?;
+        println!("restarted fog '{script}' (old pid {target_pid} → new pid {new_pid})");
+        if let Some(b) = branch {
+            println!("  branch: {b}");
+        }
+        println!("  status: fog ls {new_pid}");
+        println!("  logs:   fog logs {new_pid}");
     }
-    println!("  status: fog ls {new_pid}");
-    println!("  logs:   fog logs {new_pid}");
     Ok(())
 }
 
@@ -631,37 +643,202 @@ fn spawn_instance_detached(
     }
 }
 
-/// Resolves the instance `pid` refers to, returning its PID and socket path.
+/// Normalizes a directory for comparison: canonicalized when possible,
+/// otherwise an absolute path without symlink resolution.
+fn normalize_dir(dir: &Path) -> String {
+    if let Ok(c) = dir.canonicalize() {
+        return c.to_string_lossy().into_owned();
+    }
+    if dir.is_absolute() {
+        return dir.to_string_lossy().into_owned();
+    }
+    std::env::current_dir()
+        .map(|cwd| cwd.join(dir).to_string_lossy().into_owned())
+        .unwrap_or_else(|_| dir.to_string_lossy().into_owned())
+}
+
+/// Whether an instance's `config_dir` matches the local config directory.
+/// Both sides are normalized so symlinked checkouts compare equal.
+fn config_dir_matches(instance_dir: Option<&str>, local_dir: &Path) -> bool {
+    match instance_dir {
+        Some(d) => normalize_dir(Path::new(d)) == normalize_dir(local_dir),
+        None => false,
+    }
+}
+
+/// Resolves the local config directory for PID-less scoping, without the
+/// side effects of `resolve_run_config` (no stderr noise, no exit).
 ///
-/// With no `pid`, the single running instance is chosen; multiple instances
-/// produce an error listing each (`cmd` names the command in the hint, e.g.
-/// `fog kill <pid>`). Exits with an error when nothing matches.
-fn resolve_instance<'a>(
-    instances: &'a [(u32, PathBuf)],
-    pid: Option<u32>,
-    cmd: &str,
-) -> (u32, &'a PathBuf) {
-    match pid {
-        Some(pid) => match instances.iter().find(|(p, _)| *p == pid) {
-            Some((_, path)) => (pid, path),
-            None => {
-                eprintln!("error: no fog instance with pid {pid}");
-                std::process::exit(1);
-            }
-        },
-        None => {
-            if instances.len() == 1 {
-                (instances[0].0, &instances[0].1)
+/// Honors `--branch` (relative `--config` is resolved against that branch's
+/// worktree) and `--config` (file or directory). Returns `None` when no
+/// `fog.json` exists at the resolved location.
+fn local_config_dir(cli: &Cli) -> Option<PathBuf> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let base = match &cli.branch {
+        Some(branch) => {
+            let worktrees = fog::worktree::list(&cwd)?;
+            let wt = worktrees
+                .iter()
+                .find(|w| w.branch.as_deref() == Some(branch.as_str()))?;
+            if cli.config.is_absolute() {
+                cli.config.clone()
             } else {
-                eprintln!("error: multiple fog instances running, specify a pid:");
-                for (p, _) in instances {
-                    eprintln!("  fog {cmd} {p}");
+                wt.path.join(&cli.config)
+            }
+        }
+        None => cli.config.clone(),
+    };
+    let config_path = resolve_config_path(&base);
+    if !config_path.is_file() {
+        return None;
+    }
+    let absolute = if config_path.is_absolute() {
+        config_path
+    } else {
+        cwd.join(&config_path)
+    };
+    absolute.parent().map(Path::to_path_buf)
+}
+
+/// Best-effort status snapshot per instance PID; unreachable instances are
+/// skipped (stale sockets are left for `cmd_ls` to clean).
+fn query_statuses(instances: &[(u32, PathBuf)]) -> std::collections::HashMap<u32, ipc::StatusResponse> {
+    let mut out = std::collections::HashMap::new();
+    for (pid, path) in instances {
+        if let Ok(status) = ipc::query_status(path) {
+            out.insert(*pid, status);
+        }
+    }
+    out
+}
+
+/// Pure target selection shared by kill/restart/logs.
+///
+/// - Explicit `pid` always wins (errors when unknown; `--all` + PID is an error).
+/// - `--all` with a local config selects every local match (error when none);
+///   without a local config it selects everything globally.
+/// - No PID, no `--all`: with a local config, one local match is selected,
+///   several produce a scoped list error, and zero fall back to the legacy
+///   global rule (single instance selected, several listed). Without a local
+///   config the legacy global rule applies directly.
+///
+/// Returns owned `(pid, socket)` pairs so multi-target commands can iterate.
+fn select_targets(
+    instances: &[(u32, PathBuf)],
+    statuses: &std::collections::HashMap<u32, ipc::StatusResponse>,
+    pid: Option<u32>,
+    all: bool,
+    local_dir: Option<&Path>,
+    cmd: &str,
+) -> Result<Vec<(u32, PathBuf)>, String> {
+    if let Some(pid) = pid {
+        if all {
+            return Err(format!("error: --all cannot be used with a PID (got {pid})"));
+        }
+        return instances
+            .iter()
+            .find(|(p, _)| *p == pid)
+            .map(|(p, path)| vec![(*p, path.clone())])
+            .ok_or_else(|| format!("error: no fog instance with pid {pid}"));
+    }
+
+    if all {
+        match local_dir {
+            Some(dir) => {
+                let matched: Vec<(u32, PathBuf)> = instances
+                    .iter()
+                    .filter(|(p, _)| {
+                        statuses
+                            .get(p)
+                            .and_then(|s| s.config_dir.as_deref())
+                            .is_some_and(|d| config_dir_matches(Some(d), dir))
+                    })
+                    .map(|(p, path)| (*p, path.clone()))
+                    .collect();
+                if matched.is_empty() {
+                    return Err(format!(
+                        "error: no fog instances from this config ({}); nothing to apply --all to",
+                        dir.display()
+                    ));
                 }
-                std::process::exit(1);
+                return Ok(matched);
+            }
+            // Outside a directory with fog.json, --all is global.
+            None => {
+                return Ok(instances.to_vec());
             }
         }
     }
+
+    // No PID, no --all: prefer the local config scope when resolvable.
+    if let Some(dir) = local_dir {
+        let matched: Vec<(u32, PathBuf)> = instances
+            .iter()
+            .filter(|(p, _)| {
+                statuses
+                    .get(p)
+                    .and_then(|s| s.config_dir.as_deref())
+                    .is_some_and(|d| config_dir_matches(Some(d), dir))
+            })
+            .map(|(p, path)| (*p, path.clone()))
+            .collect();
+        match matched.len() {
+            1 => return Ok(matched),
+            0 => { /* fall through to the legacy global rule */ }
+            _ => {
+                let mut msg = format!(
+                    "error: multiple fog instances from this config ({}), specify a pid:",
+                    dir.display()
+                );
+                for (p, _) in &matched {
+                    msg.push_str(&format!("\n  fog {cmd} {p}"));
+                }
+                if matches!(cmd, "kill" | "restart") {
+                    msg.push_str(&format!("\n  fog {cmd} --all   (apply to all {n})", n = matched.len()));
+                }
+                return Err(msg);
+            }
+        }
+    }
+
+    if instances.len() == 1 {
+        Ok(vec![instances[0].clone()])
+    } else {
+        let mut msg = "error: multiple fog instances running, specify a pid:".to_string();
+        for (p, _) in instances {
+            msg.push_str(&format!("\n  fog {cmd} {p}"));
+        }
+        Err(msg)
+    }
 }
+
+/// Resolves targets and exits with the rendered error on failure.
+fn resolve_targets(
+    instances: &[(u32, PathBuf)],
+    pid: Option<u32>,
+    all: bool,
+    cli: &Cli,
+    cmd: &str,
+) -> Vec<(u32, PathBuf)> {
+    let local = local_config_dir(cli);
+    let statuses = query_statuses(instances);
+    match select_targets(
+        instances,
+        &statuses,
+        pid,
+        all,
+        local.as_deref(),
+        cmd,
+    ) {
+        Ok(targets) => targets,
+        Err(msg) => {
+            eprintln!("{msg}");
+            std::process::exit(1);
+        }
+    }
+}
+
+
 
 /// Strips ANSI escape sequences from `s`, producing plain text. Used to render
 /// the raw PTY output captured in detached log files.
@@ -797,7 +974,7 @@ fn print_available_services(target_pid: u32, script: &str, rows: &[(String, Stri
 /// With `service`, prints only that service's captured output (`daemon` reads
 /// `daemon.log`; `proxy` streams the live request log over IPC; anything else
 /// reads `<service>.log`).
-fn cmd_logs(pid: Option<u32>, service: Option<String>) -> io::Result<()> {
+fn cmd_logs(pid: Option<u32>, service: Option<String>, cli: &Cli) -> io::Result<()> {
     let instances = ipc::find_instances()?;
 
     if instances.is_empty() {
@@ -805,7 +982,8 @@ fn cmd_logs(pid: Option<u32>, service: Option<String>) -> io::Result<()> {
         std::process::exit(1);
     }
 
-    let (target_pid, path) = resolve_instance(&instances, pid, "logs");
+    let targets = resolve_targets(&instances, pid, false, cli, "logs");
+    let (target_pid, path) = (targets[0].0, &targets[0].1);
 
     let status = match ipc::query_status(path) {
         Ok(s) => s,
@@ -1402,6 +1580,26 @@ fn main() -> io::Result<()> {
         std::process::exit(1);
     }
 
+    // `--all` only applies to `fog kill` / `fog restart`, and conflicts with
+    // an explicit PID.
+    if cli.all {
+        match cli.script.as_deref() {
+            Some("kill") | Some("restart") => {}
+            Some("logs") => {
+                eprintln!("error: --all only applies to `fog kill` and `fog restart`; for logs, pass an explicit PID");
+                std::process::exit(1);
+            }
+            _ => {
+                eprintln!("error: --all only applies to `fog kill` and `fog restart`");
+                std::process::exit(1);
+            }
+        }
+        if cli.pid.is_some() {
+            eprintln!("error: --all cannot be used with a PID");
+            std::process::exit(1);
+        }
+    }
+
     // Detach: run the script in the background and return once it is serving.
     // The daemon child (re-executed with FOG_DAEMON_CHILD=1) takes the
     // headless path in run_script and must not re-daemonize.
@@ -1423,9 +1621,9 @@ fn main() -> io::Result<()> {
 
     match cli.script.as_deref() {
         Some("ls") => cmd_ls(),
-        Some("kill") => cmd_kill(cli.pid),
-        Some("restart") => cmd_restart(cli.pid, &cli),
-        Some("logs") => cmd_logs(cli.pid, cli.service.clone()),
+        Some("kill") => cmd_kill(cli.pid, cli.all, &cli),
+        Some("restart") => cmd_restart(cli.pid, cli.all, &cli),
+        Some("logs") => cmd_logs(cli.pid, cli.service.clone(), &cli),
         Some(name) => run_script(name, &cli),
         None => {
             let config_path = resolve_config_path(&resolve_run_config(&cli));
@@ -1598,5 +1796,193 @@ mod tests {
     fn test_strip_ansi_preserves_plain_text() {
         assert_eq!(strip_ansi("hello world"), "hello world");
         assert_eq!(strip_ansi(""), "");
+    }
+
+    fn status_with_dir(config_dir: Option<&str>) -> ipc::StatusResponse {
+        let mut s = test_status(vec![], None);
+        s.config_dir = config_dir.map(str::to_string);
+        s
+    }
+
+    fn target_fixtures() -> (Vec<(u32, PathBuf)>, std::collections::HashMap<u32, ipc::StatusResponse>) {
+        // Fixed pseudo-dirs (need not exist): normalize_dir falls back to the
+        // absolute string, so equal strings still match.
+        let dir_a = format!("/tmp/fog-test-scope-a-{}", std::process::id());
+        let dir_b = format!("/tmp/fog-test-scope-b-{}", std::process::id());
+        let instances = vec![
+            (101, PathBuf::from("/tmp/fog-101.sock")),
+            (102, PathBuf::from("/tmp/fog-102.sock")),
+            (103, PathBuf::from("/tmp/fog-103.sock")),
+        ];
+        let mut statuses = std::collections::HashMap::new();
+        statuses.insert(101, status_with_dir(Some(&dir_a)));
+        statuses.insert(102, status_with_dir(Some(&dir_a)));
+        statuses.insert(103, status_with_dir(Some(&dir_b)));
+        (instances, statuses)
+    }
+
+    #[test]
+    fn test_select_targets_explicit_pid_wins_over_local() {
+        let (instances, statuses) = target_fixtures();
+        let local = PathBuf::from("/elsewhere");
+        let got = select_targets(&instances, &statuses, Some(103), false, Some(&local), "kill").unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0, 103);
+    }
+
+    #[test]
+    fn test_select_targets_unknown_pid_errors() {
+        let (instances, statuses) = target_fixtures();
+        let err = select_targets(&instances, &statuses, Some(999), false, None, "kill").unwrap_err();
+        assert!(err.contains("no fog instance with pid 999"));
+    }
+
+    #[test]
+    fn test_select_targets_pid_and_all_conflict() {
+        let (instances, statuses) = target_fixtures();
+        let err = select_targets(&instances, &statuses, Some(101), true, None, "kill").unwrap_err();
+        assert!(err.contains("--all cannot be used with a PID"));
+    }
+
+    #[test]
+    fn test_select_targets_all_scoped_to_local() {
+        let dir_a = temp_dir();
+        let dir_b = temp_dir();
+        let instances = vec![
+            (11, PathBuf::from("/tmp/fog-11.sock")),
+            (12, PathBuf::from("/tmp/fog-12.sock")),
+            (13, PathBuf::from("/tmp/fog-13.sock")),
+        ];
+        let mut statuses = std::collections::HashMap::new();
+        statuses.insert(11, status_with_dir(Some(&dir_a.to_string_lossy())));
+        statuses.insert(12, status_with_dir(Some(&dir_a.to_string_lossy())));
+        statuses.insert(13, status_with_dir(Some(&dir_b.to_string_lossy())));
+        let got = select_targets(&instances, &statuses, None, true, Some(&dir_a), "kill").unwrap();
+        let mut pids: Vec<u32> = got.iter().map(|(p, _)| *p).collect();
+        pids.sort();
+        assert_eq!(pids, vec![11, 12]);
+        let _ = fs::remove_dir_all(&dir_a);
+        let _ = fs::remove_dir_all(&dir_b);
+    }
+
+    #[test]
+    fn test_select_targets_all_local_no_match_errors() {
+        let (instances, statuses) = target_fixtures();
+        let local = temp_dir();
+        let err = select_targets(&instances, &statuses, None, true, Some(&local), "kill").unwrap_err();
+        assert!(err.contains("no fog instances from this config"));
+        let _ = fs::remove_dir_all(&local);
+    }
+
+    #[test]
+    fn test_select_targets_all_global_without_local() {
+        let (instances, statuses) = target_fixtures();
+        let got = select_targets(&instances, &statuses, None, true, None, "kill").unwrap();
+        assert_eq!(got.len(), 3);
+    }
+
+    #[test]
+    fn test_select_targets_pidless_single_local_match() {
+        let dir_a = temp_dir();
+        let dir_b = temp_dir();
+        let instances = vec![
+            (21, PathBuf::from("/tmp/fog-21.sock")),
+            (22, PathBuf::from("/tmp/fog-22.sock")),
+        ];
+        let mut statuses = std::collections::HashMap::new();
+        statuses.insert(21, status_with_dir(Some(&dir_a.to_string_lossy())));
+        statuses.insert(22, status_with_dir(Some(&dir_b.to_string_lossy())));
+        let got = select_targets(&instances, &statuses, None, false, Some(&dir_b), "logs").unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0, 22);
+        let _ = fs::remove_dir_all(&dir_a);
+        let _ = fs::remove_dir_all(&dir_b);
+    }
+
+    #[test]
+    fn test_select_targets_pidless_multi_local_lists_scoped() {
+        let (instances, statuses) = target_fixtures();
+        // dir of pid 101/102: recover from statuses.
+        let local = PathBuf::from(statuses[&101].config_dir.as_deref().unwrap());
+        let err = select_targets(&instances, &statuses, None, false, Some(&local), "kill").unwrap_err();
+        assert!(err.contains("multiple fog instances from this config"));
+        assert!(err.contains("fog kill 101"));
+        assert!(err.contains("fog kill 102"));
+        assert!(!err.contains("103"), "scoped error must not list other configs");
+        assert!(err.contains("--all"));
+    }
+
+    #[test]
+    fn test_select_targets_pidless_multi_local_logs_has_no_all_hint() {
+        let (instances, statuses) = target_fixtures();
+        let local = PathBuf::from(statuses[&101].config_dir.as_deref().unwrap());
+        let err = select_targets(&instances, &statuses, None, false, Some(&local), "logs").unwrap_err();
+        assert!(err.contains("fog logs 101"));
+        assert!(!err.contains("--all"));
+    }
+
+    #[test]
+    fn test_select_targets_pidless_zero_local_falls_back_to_single() {
+        let dir_a = temp_dir();
+        let instances = vec![(31, PathBuf::from("/tmp/fog-31.sock"))];
+        let mut statuses = std::collections::HashMap::new();
+        statuses.insert(31, status_with_dir(Some(&dir_a.to_string_lossy())));
+        let elsewhere = temp_dir();
+        let got = select_targets(&instances, &statuses, None, false, Some(&elsewhere), "kill").unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0, 31);
+        let _ = fs::remove_dir_all(&dir_a);
+        let _ = fs::remove_dir_all(&elsewhere);
+    }
+
+    #[test]
+    fn test_select_targets_pidless_zero_local_multi_lists_global() {
+        let dir_a = temp_dir();
+        let dir_b = temp_dir();
+        let instances = vec![
+            (41, PathBuf::from("/tmp/fog-41.sock")),
+            (42, PathBuf::from("/tmp/fog-42.sock")),
+        ];
+        let mut statuses = std::collections::HashMap::new();
+        statuses.insert(41, status_with_dir(Some(&dir_a.to_string_lossy())));
+        statuses.insert(42, status_with_dir(Some(&dir_b.to_string_lossy())));
+        let elsewhere = temp_dir();
+        let err = select_targets(&instances, &statuses, None, false, Some(&elsewhere), "kill").unwrap_err();
+        assert!(err.contains("multiple fog instances running"));
+        assert!(err.contains("fog kill 41"));
+        assert!(err.contains("fog kill 42"));
+        let _ = fs::remove_dir_all(&dir_a);
+        let _ = fs::remove_dir_all(&dir_b);
+        let _ = fs::remove_dir_all(&elsewhere);
+    }
+
+    #[test]
+    fn test_select_targets_ignores_instances_without_config_dir() {
+        let dir_a = temp_dir();
+        let instances = vec![
+            (51, PathBuf::from("/tmp/fog-51.sock")),
+            (52, PathBuf::from("/tmp/fog-52.sock")),
+        ];
+        let mut statuses = std::collections::HashMap::new();
+        statuses.insert(51, status_with_dir(None));
+        statuses.insert(52, status_with_dir(Some(&dir_a.to_string_lossy())));
+        // Only pid 52 matches the local dir; pid 51 (unknown dir) is ignored
+        // rather than making the result ambiguous.
+        let got = select_targets(&instances, &statuses, None, false, Some(&dir_a), "logs").unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0, 52);
+        let _ = fs::remove_dir_all(&dir_a);
+    }
+
+    #[test]
+    fn test_config_dir_matches_normalizes() {
+        let dir = temp_dir();
+        assert!(config_dir_matches(
+            Some(&dir.to_string_lossy()),
+            &dir
+        ));
+        assert!(!config_dir_matches(Some("/definitely/not/here"), &dir));
+        assert!(!config_dir_matches(None, &dir));
+        let _ = fs::remove_dir_all(&dir);
     }
 }
