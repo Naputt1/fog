@@ -15,7 +15,7 @@ hero:
       link: https://github.com/Naputt1/fog
 features:
   - title: Humans + agents on one environment
-    details: fog dev and fog dev -d on the same branch coexist — shared DBs are borrowed (share: true), ports are randomized per instance, logs stream to the web UI. See the Agentic Worktrees guide.
+    details: "fog dev and fog dev -d on the same branch coexist — shared DBs are borrowed (share: true), ports are randomized per instance, logs stream to the web UI. See the Agentic Worktrees guide."
   - title: Branches side-by-side
     details: Run fog dev on main and feature-x at once; s switches worktrees in-place in the TUI. Same branch can run twice — you and an agent share the DB without killing each other.
   - title: Phone overview

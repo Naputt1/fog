@@ -702,7 +702,9 @@ fn local_config_dir(cli: &Cli) -> Option<PathBuf> {
 
 /// Best-effort status snapshot per instance PID; unreachable instances are
 /// skipped (stale sockets are left for `cmd_ls` to clean).
-fn query_statuses(instances: &[(u32, PathBuf)]) -> std::collections::HashMap<u32, ipc::StatusResponse> {
+fn query_statuses(
+    instances: &[(u32, PathBuf)],
+) -> std::collections::HashMap<u32, ipc::StatusResponse> {
     let mut out = std::collections::HashMap::new();
     for (pid, path) in instances {
         if let Ok(status) = ipc::query_status(path) {
@@ -733,7 +735,9 @@ fn select_targets(
 ) -> Result<Vec<(u32, PathBuf)>, String> {
     if let Some(pid) = pid {
         if all {
-            return Err(format!("error: --all cannot be used with a PID (got {pid})"));
+            return Err(format!(
+                "error: --all cannot be used with a PID (got {pid})"
+            ));
         }
         return instances
             .iter()
@@ -794,7 +798,10 @@ fn select_targets(
                     msg.push_str(&format!("\n  fog {cmd} {p}"));
                 }
                 if matches!(cmd, "kill" | "restart") {
-                    msg.push_str(&format!("\n  fog {cmd} --all   (apply to all {n})", n = matched.len()));
+                    msg.push_str(&format!(
+                        "\n  fog {cmd} --all   (apply to all {n})",
+                        n = matched.len()
+                    ));
                 }
                 return Err(msg);
             }
@@ -822,14 +829,7 @@ fn resolve_targets(
 ) -> Vec<(u32, PathBuf)> {
     let local = local_config_dir(cli);
     let statuses = query_statuses(instances);
-    match select_targets(
-        instances,
-        &statuses,
-        pid,
-        all,
-        local.as_deref(),
-        cmd,
-    ) {
+    match select_targets(instances, &statuses, pid, all, local.as_deref(), cmd) {
         Ok(targets) => targets,
         Err(msg) => {
             eprintln!("{msg}");
@@ -837,8 +837,6 @@ fn resolve_targets(
         }
     }
 }
-
-
 
 /// Strips ANSI escape sequences from `s`, producing plain text. Used to render
 /// the raw PTY output captured in detached log files.
@@ -1586,7 +1584,9 @@ fn main() -> io::Result<()> {
         match cli.script.as_deref() {
             Some("kill") | Some("restart") => {}
             Some("logs") => {
-                eprintln!("error: --all only applies to `fog kill` and `fog restart`; for logs, pass an explicit PID");
+                eprintln!(
+                    "error: --all only applies to `fog kill` and `fog restart`; for logs, pass an explicit PID"
+                );
                 std::process::exit(1);
             }
             _ => {
@@ -1804,7 +1804,10 @@ mod tests {
         s
     }
 
-    fn target_fixtures() -> (Vec<(u32, PathBuf)>, std::collections::HashMap<u32, ipc::StatusResponse>) {
+    fn target_fixtures() -> (
+        Vec<(u32, PathBuf)>,
+        std::collections::HashMap<u32, ipc::StatusResponse>,
+    ) {
         // Fixed pseudo-dirs (need not exist): normalize_dir falls back to the
         // absolute string, so equal strings still match.
         let dir_a = format!("/tmp/fog-test-scope-a-{}", std::process::id());
@@ -1825,7 +1828,15 @@ mod tests {
     fn test_select_targets_explicit_pid_wins_over_local() {
         let (instances, statuses) = target_fixtures();
         let local = PathBuf::from("/elsewhere");
-        let got = select_targets(&instances, &statuses, Some(103), false, Some(&local), "kill").unwrap();
+        let got = select_targets(
+            &instances,
+            &statuses,
+            Some(103),
+            false,
+            Some(&local),
+            "kill",
+        )
+        .unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].0, 103);
     }
@@ -1833,7 +1844,8 @@ mod tests {
     #[test]
     fn test_select_targets_unknown_pid_errors() {
         let (instances, statuses) = target_fixtures();
-        let err = select_targets(&instances, &statuses, Some(999), false, None, "kill").unwrap_err();
+        let err =
+            select_targets(&instances, &statuses, Some(999), false, None, "kill").unwrap_err();
         assert!(err.contains("no fog instance with pid 999"));
     }
 
@@ -1869,7 +1881,8 @@ mod tests {
     fn test_select_targets_all_local_no_match_errors() {
         let (instances, statuses) = target_fixtures();
         let local = temp_dir();
-        let err = select_targets(&instances, &statuses, None, true, Some(&local), "kill").unwrap_err();
+        let err =
+            select_targets(&instances, &statuses, None, true, Some(&local), "kill").unwrap_err();
         assert!(err.contains("no fog instances from this config"));
         let _ = fs::remove_dir_all(&local);
     }
@@ -1904,11 +1917,15 @@ mod tests {
         let (instances, statuses) = target_fixtures();
         // dir of pid 101/102: recover from statuses.
         let local = PathBuf::from(statuses[&101].config_dir.as_deref().unwrap());
-        let err = select_targets(&instances, &statuses, None, false, Some(&local), "kill").unwrap_err();
+        let err =
+            select_targets(&instances, &statuses, None, false, Some(&local), "kill").unwrap_err();
         assert!(err.contains("multiple fog instances from this config"));
         assert!(err.contains("fog kill 101"));
         assert!(err.contains("fog kill 102"));
-        assert!(!err.contains("103"), "scoped error must not list other configs");
+        assert!(
+            !err.contains("103"),
+            "scoped error must not list other configs"
+        );
         assert!(err.contains("--all"));
     }
 
@@ -1916,7 +1933,8 @@ mod tests {
     fn test_select_targets_pidless_multi_local_logs_has_no_all_hint() {
         let (instances, statuses) = target_fixtures();
         let local = PathBuf::from(statuses[&101].config_dir.as_deref().unwrap());
-        let err = select_targets(&instances, &statuses, None, false, Some(&local), "logs").unwrap_err();
+        let err =
+            select_targets(&instances, &statuses, None, false, Some(&local), "logs").unwrap_err();
         assert!(err.contains("fog logs 101"));
         assert!(!err.contains("--all"));
     }
@@ -1928,7 +1946,8 @@ mod tests {
         let mut statuses = std::collections::HashMap::new();
         statuses.insert(31, status_with_dir(Some(&dir_a.to_string_lossy())));
         let elsewhere = temp_dir();
-        let got = select_targets(&instances, &statuses, None, false, Some(&elsewhere), "kill").unwrap();
+        let got =
+            select_targets(&instances, &statuses, None, false, Some(&elsewhere), "kill").unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].0, 31);
         let _ = fs::remove_dir_all(&dir_a);
@@ -1947,7 +1966,8 @@ mod tests {
         statuses.insert(41, status_with_dir(Some(&dir_a.to_string_lossy())));
         statuses.insert(42, status_with_dir(Some(&dir_b.to_string_lossy())));
         let elsewhere = temp_dir();
-        let err = select_targets(&instances, &statuses, None, false, Some(&elsewhere), "kill").unwrap_err();
+        let err = select_targets(&instances, &statuses, None, false, Some(&elsewhere), "kill")
+            .unwrap_err();
         assert!(err.contains("multiple fog instances running"));
         assert!(err.contains("fog kill 41"));
         assert!(err.contains("fog kill 42"));
@@ -1977,10 +1997,7 @@ mod tests {
     #[test]
     fn test_config_dir_matches_normalizes() {
         let dir = temp_dir();
-        assert!(config_dir_matches(
-            Some(&dir.to_string_lossy()),
-            &dir
-        ));
+        assert!(config_dir_matches(Some(&dir.to_string_lossy()), &dir));
         assert!(!config_dir_matches(Some("/definitely/not/here"), &dir));
         assert!(!config_dir_matches(None, &dir));
         let _ = fs::remove_dir_all(&dir);
