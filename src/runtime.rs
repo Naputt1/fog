@@ -589,6 +589,8 @@ pub fn build_with_opts(opts: BuildOpts) -> Result<Runtime, String> {
                     reused.branch = branch.clone();
                     reused.project = project;
                     reused.script = script_name;
+                    reused.log_dir = log_dir.clone();
+                    reused.persist_borrow_notice();
                     // The probe just passed, so seed Healthy to avoid a short
                     // "stopped" flicker before the background thread's first check.
                     reused.set_health_status(crate::terminal::HealthStatus::Healthy);

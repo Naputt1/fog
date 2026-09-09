@@ -74,7 +74,7 @@ pub(crate) fn draw_proxy_content(
 
     let status_line = match proxy {
         Some(p) if p.is_running() => {
-            format!(" Proxy listening on port {} (running)", p.port)
+            format!(" Proxy listening on port {} (running)", p.bound_port())
         }
         Some(_) => " Proxy (stopped)".to_string(),
         None => " Proxy (not configured)".to_string(),

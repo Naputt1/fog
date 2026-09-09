@@ -1,11 +1,11 @@
 ---
 layout: home
 title: fog
-titleTemplate: Terminal service orchestrator & reverse-proxy dashboard
+titleTemplate: Dev-environment orchestrator for humans and coding agents
 hero:
   name: fog
-  text: Service orchestrator & reverse proxy
-  tagline: Named scripts in fog.json — each service in its own PTY with color and scrollback, plus an optional reverse proxy. Switch branches with s, share a DB with an agent, check logs from your phone.
+  text: The dev-environment orchestrator for humans and coding agents
+  tagline: You and your agent run the same fog dev on the same branch — concurrently, without killing each other. Shared DBs get borrowed, your agent runs headless, and you check everything from your phone. Named scripts in fog.json, each service in its own PTY, plus a built-in reverse proxy.
   actions:
     - theme: brand
       text: Get Started
@@ -14,8 +14,10 @@ hero:
       text: View on GitHub
       link: https://github.com/Naputt1/fog
 features:
+  - title: Humans + agents on one environment
+    details: fog dev and fog dev -d on the same branch coexist — shared DBs are borrowed (share: true), ports are randomized per instance, logs stream to the web UI. See the Agentic Worktrees guide.
   - title: Branches side-by-side
-    details: Run fog dev on main and feature-x at once; s to switch in the TUI. Same branch can run twice — you and an agent share the DB without killing each other.
+    details: Run fog dev on main and feature-x at once; s switches worktrees in-place in the TUI. Same branch can run twice — you and an agent share the DB without killing each other.
   - title: Phone overview
     details: Check status and live logs at http://<tailnet IP> from your phone — no DNS setup. Served by the host-global index server.
   - title: One command per service
@@ -24,6 +26,6 @@ features:
     details: Reverse proxy with request log and WebSocket support. Host-global Traefik router with wildcard *.acme DNS when you need it.
   - title: Simple config
     details: One fog.json with named scripts (fog dev). Ports templating, native_routes, worktree-aware sharing.
-  - title: Agentic-ready
-    details: Concurrent by default — human and agent run the same script on the same branch. See Agentic Worktrees.
 ---
+
+![fog demo](https://raw.githubusercontent.com/Naputt1/fog/main/assets/demo.gif)
