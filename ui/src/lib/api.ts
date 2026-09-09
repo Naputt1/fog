@@ -329,21 +329,31 @@ export interface LogStreamOptions {
   onLine: (line: LogLine, raw: MessageEvent) => void;
   onOpen?: () => void;
   onError?: (event: Event) => void;
+  /** Initial backfill size for the live stream (1..10000, default 500). */
+  tail?: number;
 }
 
 /**
  * Subscribe to the live log stream for a service via EventSource (SSE) at
- * `/logs/stream?service=NAME` (docker) or `?pid=PID&service=NAME` (native fog).
- * Returns an unsubscribe function. EventSource reconnects automatically and the
- * browser fires `error` while reconnecting — callers should treat errors as
- * transient and rely on `onOpen` / line events for true data.
+ * `/logs/stream?service=NAME[&tail=N]` (docker) or `?pid=PID&service=NAME`
+ * (native fog). Returns an unsubscribe function. EventSource reconnects
+ * automatically and the browser fires `error` while reconnecting — callers
+ * should treat errors as transient and rely on `onOpen` / line events for
+ * true data.
  */
 export function subscribeLogs(
   service: string,
-  { onLine, onOpen, onError, pid }: LogStreamOptions & { pid?: number | null }
+  {
+    onLine,
+    onOpen,
+    onError,
+    pid,
+    tail,
+  }: LogStreamOptions & { pid?: number | null }
 ): () => void {
   const params = new URLSearchParams({ service });
   if (pid != null) params.set("pid", String(pid));
+  if (tail != null) params.set("tail", String(tail));
   const es = new EventSource(`/logs/stream?${params.toString()}`);
 
   es.addEventListener("message", (ev: MessageEvent) => {
@@ -361,4 +371,26 @@ export function subscribeLogs(
   if (onError) es.onerror = onError;
 
   return () => es.close();
+}
+
+/** One window of older log lines from GET /api/logs/history. */
+export interface LogHistory {
+  lines: string[];
+  has_more: boolean;
+}
+
+/**
+ * Fetch one window of older log lines (no follow) for scroll-up backfill.
+ * `offset` skips that many newest lines (already shown); `tail` is how many
+ * before that to return. Mirrors the SSE stream's service/pid addressing.
+ */
+export async function fetchLogHistory(
+  service: string,
+  opts?: { pid?: number | null; tail?: number; offset?: number }
+): Promise<LogHistory> {
+  const params = new URLSearchParams({ service });
+  if (opts?.pid != null) params.set("pid", String(opts.pid));
+  if (opts?.tail != null) params.set("tail", String(opts.tail));
+  if (opts?.offset != null) params.set("offset", String(opts.offset));
+  return fetchJson<LogHistory>(`/api/logs/history?${params.toString()}`);
 }

@@ -3,16 +3,22 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 
 import type { Service } from "@/lib/api";
 import { useServices } from "@/lib/hooks";
+import { Button } from "@/components/ui/button";
 import { TerminalView } from "@/components/terminal/TerminalView";
 import { LogView } from "@/components/terminal/LogView";
 import { TerminalKeypad } from "@/components/terminal/TerminalKeypad";
 import { ServiceSidebar } from "@/components/terminal/ServiceSidebar";
 import type { TerminalHandle } from "@/components/terminal/terminal-handle";
+import { cn } from "@/lib/utils";
 
 export const Route = createFileRoute("/logs")({
   validateSearch: (search: Record<string, unknown>) => ({
     project: typeof search.project === "string" ? search.project : undefined,
     service: typeof search.service === "string" ? search.service : undefined,
+    view:
+      search.view === "terminal" || search.view === "logs"
+        ? (search.view as "terminal" | "logs")
+        : undefined,
   }),
   component: LogsPage,
 });
@@ -64,6 +70,29 @@ function groupServices(services: Service[]): ProjectBucket[] {
 }
 
 const LS_KEY = "fog:terminal:last";
+const LS_MODE_KEY = "fog:logs:mode";
+
+type ViewMode = "logs" | "terminal";
+
+function readMode(): ViewMode {
+  if (typeof window === "undefined") return "logs";
+  try {
+    return window.localStorage.getItem(LS_MODE_KEY) === "terminal"
+      ? "terminal"
+      : "logs";
+  } catch {
+    return "logs";
+  }
+}
+
+function writeMode(mode: ViewMode) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(LS_MODE_KEY, mode);
+  } catch {
+    // ignore
+  }
+}
 
 function readStored(): { project?: string; service?: string } {
   if (typeof window === "undefined") return {};
@@ -100,7 +129,6 @@ function LogsPage() {
     isError,
   } = useServices({ withInternal: true });
   const [live, setLive] = useState(true);
-
   const handleCopy = () => {
     const text = termApiRef.current?.copyText() ?? "";
     if (!text) return;
@@ -194,17 +222,21 @@ function LogsPage() {
     if (stored.project !== targetProject || stored.service !== targetService) {
       writeStored(targetProject, targetService);
     }
-    // Sync URL if missing or mismatched project/service
+    // Sync URL if missing or mismatched project/service (preserve view)
     if (search.project !== targetProject || search.service !== targetService) {
       // Avoid navigating if both are already matching after we just wrote
       // Use replace to not pollute history when restoring from storage
       void navigate({
         to: "/logs",
-        search: { project: targetProject, service: targetService },
+        search: {
+          project: targetProject,
+          service: targetService,
+          view: search.view,
+        },
         replace: true,
       });
     }
-  }, [groups, active, search.project, search.service, navigate]);
+  }, [groups, active, search.project, search.service, search.view, navigate]);
 
   const handleSelectService = (container: string) => {
     const svc = (services ?? []).find((s) => s.container === container);
@@ -212,7 +244,11 @@ function LogsPage() {
     if (project && container) writeStored(project, container);
     void navigate({
       to: "/logs",
-      search: { project: project ?? effectiveProject, service: container },
+      search: {
+        project: project ?? effectiveProject,
+        service: container,
+        view: search.view,
+      },
     });
   };
 
@@ -223,17 +259,69 @@ function LogsPage() {
     if (project && svcContainer) writeStored(project, svcContainer);
     void navigate({
       to: "/logs",
-      search: { project, service: svcContainer || undefined },
+      search: {
+        project,
+        service: svcContainer || undefined,
+        view: search.view,
+      },
     });
   };
 
-  // Docker containers have no PTY — typing into them is not supported, so fall back to read-only docker logs SSE.
+  // Logs (SSE) is the default: fast on slow networks, read-only. PTY is
+  // opt-in via the toggle (and unavailable for docker containers, which have
+  // no fog PTY — they always use `docker logs`).
+  const viewMode: ViewMode = search.view ?? readMode();
   const isDocker = active?.pid == null;
+  const showTerminal = viewMode === "terminal" && !isDocker;
+
+  const handleViewMode = (mode: ViewMode) => {
+    writeMode(mode);
+    void navigate({
+      to: "/logs",
+      search: {
+        project: search.project ?? effectiveProject,
+        service: search.service ?? active?.container,
+        // Keep shared URLs clean: the default (logs) omits the param.
+        view: mode === "terminal" ? "terminal" : undefined,
+      },
+    });
+  };
 
   return (
     <div className="flex min-w-0 flex-col gap-3 lg:h-[calc(100dvh-8rem)] lg:flex-row lg:gap-6">
       {/* Main terminal / logs */}
       <div className="flex min-w-0 flex-1 flex-col gap-3 lg:min-h-0">
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="inline-flex rounded-md border p-1">
+            <Button
+              variant={showTerminal ? "ghost" : "default"}
+              size="sm"
+              className="h-7 font-mono text-xs"
+              onClick={() => handleViewMode("logs")}
+            >
+              Logs (SSE)
+            </Button>
+            <Button
+              variant={showTerminal ? "default" : "ghost"}
+              size="sm"
+              className={cn("h-7 font-mono text-xs", isDocker && "opacity-50")}
+              onClick={() => handleViewMode("terminal")}
+              disabled={isDocker}
+              title={
+                isDocker
+                  ? "PTY not available for docker containers"
+                  : "Interactive PTY shell (bidirectional) via WebSocket"
+              }
+            >
+              Terminal (PTY)
+            </Button>
+          </div>
+          <span className="text-muted-foreground font-mono text-xs">
+            {showTerminal
+              ? `interactive shell${active ? ` — ${active.service} workdir` : " — ephemeral"}`
+              : "read-only stream from docker/fog"}
+          </span>
+        </div>
         {isDocker ? (
           <div className="text-muted-foreground flex items-center gap-2 font-mono text-xs">
             <span className="rounded-full bg-amber-500/20 px-2 py-0.5 text-amber-600">
@@ -244,21 +332,31 @@ function LogsPage() {
             </span>
           </div>
         ) : (
-          <label className="flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
-              checked={live}
-              onChange={(e) => setLive(e.target.checked)}
-              disabled={!active}
-              className="rounded"
-            />
-            <span className={active ? "" : "text-muted-foreground"}>
-              Live — same PTY as TUI (mirror service, bidirectional). Unchecked
-              = fresh shell in service workdir.
-            </span>
-          </label>
+          showTerminal && (
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={live}
+                onChange={(e) => setLive(e.target.checked)}
+                disabled={!active}
+                className="rounded"
+              />
+              <span className={active ? "" : "text-muted-foreground"}>
+                Live — same PTY as TUI (mirror service, bidirectional).
+                Unchecked = fresh shell in service workdir.
+              </span>
+            </label>
+          )
         )}
-        {isDocker ? (
+        {showTerminal ? (
+          <TerminalView
+            key={`${active?.service ?? "__shell__"}:${live ? "live" : "cwd"}`}
+            ref={termApiRef}
+            service={active?.service}
+            live={live && !!active}
+            className="flex min-h-[320px] flex-1"
+          />
+        ) : (
           <LogView
             key={`${active?.container ?? "__none__"}`}
             ref={termApiRef}
@@ -267,17 +365,9 @@ function LogsPage() {
             service={active?.service ?? null}
             className="flex min-h-[320px] flex-1"
           />
-        ) : (
-          <TerminalView
-            key={`${active?.service ?? "__shell__"}:${live ? "live" : "cwd"}`}
-            ref={termApiRef}
-            service={active?.service}
-            live={live && !!active}
-            className="flex min-h-[320px] flex-1"
-          />
         )}
         <TerminalKeypad
-          input={!isDocker}
+          input={showTerminal}
           enabled={!!active}
           onDispatch={(init, keyCode) =>
             termApiRef.current?.dispatchKey(init, keyCode)

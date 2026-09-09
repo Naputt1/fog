@@ -11,10 +11,17 @@ import { FitAddon } from "@xterm/addon-fit";
 import { ChevronDown, ChevronUp } from "lucide-react";
 import "@xterm/xterm/css/xterm.css";
 
-import { subscribeLogs } from "@/lib/api";
+import { subscribeLogs, fetchLogHistory } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import type { TerminalHandle } from "@/components/terminal/terminal-handle";
+
+/** Initial backfill for the live SSE stream (also the server default scale). */
+const INITIAL_TAIL = 500;
+/** Lines fetched per scroll-up history page. */
+const HISTORY_PAGE = 500;
+/** Hard in-memory cap: oldest lines are dropped past this (xterm trims too). */
+const HARD_MAX_LINES = 5000;
 
 const TERMINAL_THEME = {
   background: "#0d1117",
@@ -58,17 +65,92 @@ export function LogView({
   const fitRef = useRef<FitAddon | null>(null);
   const [connected, setConnected] = useState(false);
   const [fitted, setFitted] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMore, setHasMore] = useState(true);
+  const [lineCount, setLineCount] = useState(0);
   // Touch-scroll bookkeeping.
   const touchLastYRef = useRef<number | null>(null);
   const touchAccumRef = useRef(0);
   const touchActiveRef = useRef(false);
   const touchOnScrollbarRef = useRef(false);
+  // Buffered lines in order (history + live), capped at HARD_MAX_LINES.
+  const linesRef = useRef<string[]>([]);
+  const hasMoreRef = useRef(true);
+  const loadingMoreRef = useRef(false);
+  // Lines dropped by Clear / live overflow, so history offsets stay aligned
+  // with the server-side newest end.
+  const droppedRef = useRef(0);
+  // Whether the viewport is glued to the bottom (live lines auto-scroll).
+  const stickRef = useRef(true);
+  const countTsRef = useRef(0);
+  // Current stream identity for the scroll listener (avoids stale closures).
+  const queryRef = useRef<{ service: string; pid: number | null }>({
+    service: "",
+    pid: null,
+  });
+
+  const bumpCount = useCallback((n: number) => {
+    const now = Date.now();
+    if (now - countTsRef.current > 500) {
+      countTsRef.current = now;
+      setLineCount(n);
+    }
+  }, []);
 
   const fit = useCallback(() => {
     try {
       fitRef.current?.fit();
     } catch {
       /* not measurable yet */
+    }
+  }, []);
+
+  // Prepend one older window above the current buffer (scroll-up hot-load).
+  // xterm has no prepend API, so the buffer is rewritten from the merged
+  // line array and the viewport is restored to the previous boundary
+  // (best-effort: scrollLines clamps harmlessly when the sign disagrees).
+  const loadMore = useCallback(async () => {
+    const term = termRef.current;
+    if (!term || loadingMoreRef.current || !hasMoreRef.current) return;
+    const q = queryRef.current;
+    if (!q.service) return;
+    loadingMoreRef.current = true;
+    setLoadingMore(true);
+    try {
+      const offset = droppedRef.current + linesRef.current.length;
+      const res = await fetchLogHistory(q.service, {
+        pid: q.pid,
+        tail: HISTORY_PAGE,
+        offset,
+      });
+      if (res.lines.length === 0) {
+        hasMoreRef.current = false;
+        setHasMore(false);
+        return;
+      }
+      const merged = [...res.lines, ...linesRef.current];
+      let truncated = false;
+      let trimmed = merged;
+      if (merged.length > HARD_MAX_LINES) {
+        trimmed = merged.slice(merged.length - HARD_MAX_LINES);
+        truncated = true;
+      }
+      const prevLen = linesRef.current.length;
+      linesRef.current = trimmed;
+      hasMoreRef.current = truncated ? false : res.has_more;
+      setHasMore(hasMoreRef.current);
+      setLineCount(trimmed.length);
+      countTsRef.current = Date.now();
+      term.clear();
+      for (const line of trimmed) term.writeln(line);
+      term.scrollToTop();
+      const prepended = trimmed.length - prevLen;
+      if (prepended > 0) term.scrollLines(prepended);
+    } catch (e) {
+      term.writeln(`\x1b[33m[log] history load failed: ${String(e)}\x1b[0m`);
+    } finally {
+      loadingMoreRef.current = false;
+      setLoadingMore(false);
     }
   }, []);
 
@@ -185,17 +267,29 @@ export function LogView({
     el.addEventListener("touchmove", handleTouchMove, { passive: false });
     el.addEventListener("touchend", handleTouchEnd);
     window.addEventListener("resize", fit);
+    // Scroll-up hot-load + follow tracking on xterm's real viewport.
+    // Near the top an older window is prepended; near the bottom live lines
+    // keep the view glued, otherwise the user reads history undisturbed.
+    const viewport = el.querySelector(".xterm-viewport");
+    const onViewportScroll = () => {
+      if (!(viewport instanceof HTMLElement)) return;
+      const max = viewport.scrollHeight - viewport.clientHeight;
+      stickRef.current = max - viewport.scrollTop < 40;
+      if (viewport.scrollTop <= 60) void loadMore();
+    };
+    viewport?.addEventListener("scroll", onViewportScroll, { passive: true });
     return () => {
       window.removeEventListener("resize", fit);
       ro.disconnect();
       el.removeEventListener("touchstart", handleTouchStart);
       el.removeEventListener("touchmove", handleTouchMove);
       el.removeEventListener("touchend", handleTouchEnd);
+      viewport?.removeEventListener("scroll", onViewportScroll);
       term.dispose();
       termRef.current = null;
       fitRef.current = null;
     };
-  }, [fit, handleTouchStart, handleTouchMove, handleTouchEnd]);
+  }, [fit, loadMore, handleTouchStart, handleTouchMove, handleTouchEnd]);
 
   useEffect(() => {
     const term = termRef.current;
@@ -211,6 +305,16 @@ export function LogView({
       pid != null ? (service ?? container ?? "") : (container ?? service ?? "");
     if (!logService) return;
 
+    queryRef.current = { service: logService, pid };
+    linesRef.current = [];
+    droppedRef.current = 0;
+    hasMoreRef.current = true;
+    loadingMoreRef.current = false;
+    stickRef.current = true;
+    setHasMore(true);
+    setLoadingMore(false);
+    setLineCount(0);
+
     term.clear();
     term.writeln(
       `\x1b[90m[log] connecting ${logService}${pid != null ? ` (pid ${pid})` : ""} …\x1b[0m`
@@ -219,13 +323,28 @@ export function LogView({
 
     const unsub = subscribeLogs(logService, {
       pid,
+      tail: INITIAL_TAIL,
       onOpen: () => {
         setConnected(true);
         term.writeln("\x1b[32m[log] connected\x1b[0m");
       },
       onLine: (line) => {
         // strip trailing carriage returns, write line with newline
-        term.writeln(line.text ?? "");
+        const text = line.text ?? "";
+        linesRef.current.push(text);
+        if (linesRef.current.length > HARD_MAX_LINES) {
+          const excess = linesRef.current.length - HARD_MAX_LINES;
+          linesRef.current.splice(0, excess);
+          droppedRef.current += excess;
+          // Oldest lines were dropped locally: older history may exist.
+          if (!hasMoreRef.current) {
+            hasMoreRef.current = true;
+            setHasMore(true);
+          }
+        }
+        term.writeln(text);
+        bumpCount(linesRef.current.length);
+        if (stickRef.current) term.scrollToBottom();
       },
       onError: () => setConnected(false),
     });
@@ -233,10 +352,15 @@ export function LogView({
       unsub();
       setConnected(false);
     };
-  }, [container, pid, service]);
+  }, [container, pid, service, bumpCount]);
 
   const handleClear = useCallback(() => {
-    termRef.current?.clear();
+    const term = termRef.current;
+    if (!term) return;
+    droppedRef.current += linesRef.current.length;
+    linesRef.current = [];
+    setLineCount(0);
+    term.clear();
   }, []);
 
   return (
@@ -257,6 +381,16 @@ export function LogView({
           <span className="text-muted-foreground">
             {connected ? "streaming" : "connecting…"}
           </span>
+          <span className="text-muted-foreground/70 hidden sm:inline">
+            {lineCount} lines
+          </span>
+          <span className="text-muted-foreground/70 hidden md:inline">
+            {loadingMore
+              ? "loading older…"
+              : hasMore
+                ? "scroll up for older"
+                : "all loaded"}
+          </span>
         </span>
         <div className="ml-auto flex items-center gap-1">
           <Button
@@ -276,6 +410,15 @@ export function LogView({
             aria-label="Scroll to bottom"
           >
             <ChevronDown className="size-4" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => void loadMore()}
+            disabled={!hasMore || loadingMore}
+            title="Load older log lines"
+          >
+            {loadingMore ? "Loading…" : "Older"}
           </Button>
           <Button variant="ghost" size="sm" onClick={handleClear}>
             Clear

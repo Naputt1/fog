@@ -1013,6 +1013,8 @@ fn serve_blocking(port: u16, network: String) -> io::Result<()> {
 /// Routes embedded-server requests:
 ///   - `/ws/terminal` → the built-in terminal WebSocket gateway (live PTY)
 ///   - `/logs/stream` → SSE stream of a container's `docker logs -f`
+///   - `/api/logs/history` → one-shot JSON window of older log lines
+///     (`?service=&[pid=]&[tail=]&[offset=]`) for scroll-up backfill
 ///   - `/api/...`     → JSON API endpoints consumed by the SPA
 ///   - `/api/instances/{pid}/services/{name}/action` → `POST` a service action
 ///     to a running fog instance over its IPC socket
@@ -1154,6 +1156,7 @@ async fn serve_index(
 
     match path.as_str() {
         "/logs/stream" => Ok(serve_logs_stream(&req).await),
+        "/api/logs/history" => Ok(serve_logs_history(&req).await),
         "/api/status" => Ok(api_status()),
         "/api/config" => Ok(api_config()),
         "/api/health" => Ok(api_health()),
@@ -2671,6 +2674,132 @@ async fn serve_fog_logs_stream(pid: u32, service: &str, tail: usize) -> Response
         .expect("response builder failed")
 }
 
+/// One-shot JSON history window for scroll-up backfill:
+/// `GET /api/logs/history?service=<name>&[pid=<fog-pid>]&[tail=N]&[offset=M]`.
+///
+/// `offset` skips that many newest lines (already shown by the live stream);
+/// `tail` is how many lines before that to return. Responds
+/// `{"lines":[...],"has_more":bool}` where `has_more` tells the viewer an
+/// older window probably exists. Bodies match the SSE stream (docker
+/// timestamp prefixes stripped).
+async fn serve_logs_history(req: &Request<Incoming>) -> Response<RespBody> {
+    let params = parse_query(req.uri().query().unwrap_or(""));
+    let service = params.get("service").map(String::as_str).unwrap_or("");
+    let tail = params
+        .get("tail")
+        .and_then(|t| t.parse::<usize>().ok())
+        .unwrap_or(500)
+        .clamp(1, MAX_LOG_TAIL);
+    let offset = params
+        .get("offset")
+        .and_then(|o| o.parse::<usize>().ok())
+        .unwrap_or(0)
+        .clamp(0, MAX_LOG_TAIL);
+    // +1 over-fetch detects whether an older window exists without a second
+    // query (when the store returns exactly `need`, older lines remain).
+    let need = (tail.saturating_add(offset).saturating_add(1)).clamp(1, MAX_LOG_TAIL);
+
+    if let Some(pid) = params.get("pid").and_then(|p| p.parse::<u32>().ok()) {
+        if !is_valid_service_name(service) {
+            return api_error(StatusCode::BAD_REQUEST, "missing or invalid service name");
+        }
+        let sock = crate::ipc::socket_path(pid);
+        let svc = service.to_string();
+        let fetched =
+            tokio::task::spawn_blocking(move || crate::ipc::query_logs(&sock, &svc, need)).await;
+        match fetched {
+            Ok(Ok(lines)) => {
+                let (window, has_more) = slice_log_window(lines, tail, offset);
+                return json_response(&serde_json::json!({
+                    "lines": window,
+                    "has_more": has_more,
+                }));
+            }
+            Ok(Err(e)) => {
+                return api_error(StatusCode::NOT_FOUND, &format!("no such fog instance: {e}"));
+            }
+            Err(e) => {
+                return api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("history lookup failed: {e}"),
+                );
+            }
+        }
+    }
+
+    if !is_valid_container(service) {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "missing or invalid service (container) name",
+        );
+    }
+    if !docker_container_exists(service).await {
+        return api_error(
+            StatusCode::NOT_FOUND,
+            &format!("no such container '{service}'"),
+        );
+    }
+    match docker_log_history(service, need).await {
+        Ok(lines) => {
+            let (window, has_more) = slice_log_window(lines, tail, offset);
+            json_response(&serde_json::json!({
+                "lines": window,
+                "has_more": has_more,
+            }))
+        }
+        Err(e) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("could not read docker logs: {e}"),
+        ),
+    }
+}
+
+/// Runs `docker logs --timestamps --tail <need>` once (no follow) and returns
+/// the newest `need` message bodies in chronological order. Stdout and stderr
+/// are merged by timestamp so services logging to both (e.g. postgres) keep
+/// roughly the same order the SSE stream shows.
+async fn docker_log_history(container: &str, need: usize) -> io::Result<Vec<String>> {
+    let out = tokio::process::Command::new("docker")
+        .arg("logs")
+        .arg("--timestamps")
+        .arg("--tail")
+        .arg(need.to_string())
+        .arg(container)
+        .output()
+        .await?;
+    let mut merged: Vec<(Option<u64>, usize, String)> = Vec::new();
+    let mut order = 0usize;
+    let push = |bytes: &[u8], merged: &mut Vec<(Option<u64>, usize, String)>, order: &mut usize| {
+        for raw in String::from_utf8_lossy(bytes).lines() {
+            let line = raw.strip_suffix('\r').unwrap_or(raw);
+            let (secs, body) = match split_docker_log_line(line) {
+                Some((s, b)) => (Some(s), b.to_string()),
+                None => (None, line.to_string()),
+            };
+            merged.push((secs, *order, body));
+            *order += 1;
+        }
+    };
+    push(&out.stdout, &mut merged, &mut order);
+    push(&out.stderr, &mut merged, &mut order);
+    merged.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    Ok(merged.into_iter().map(|(_, _, b)| b).collect())
+}
+
+/// Slices a newest-first `need = tail + offset + 1` fetch into the requested
+/// window: skip the newest `offset` lines, return the previous `tail`.
+/// `has_more` is true when the fetch hit its cap, meaning older lines remain.
+fn slice_log_window(all: Vec<String>, tail: usize, offset: usize) -> (Vec<String>, bool) {
+    let total = all.len();
+    let need = tail.saturating_add(offset).saturating_add(1);
+    let has_more = total >= need && need < MAX_LOG_TAIL.saturating_add(1);
+    // When capped exactly at `need`, index 0 is the +1 detection probe.
+    let usable = if has_more { &all[1..] } else { &all[..] };
+    let end = usable.len().saturating_sub(offset);
+    let start = end.saturating_sub(tail);
+    (usable[start..end].to_vec(), has_more)
+}
+
 /// Response body backing a fog-instance log stream. When dropped (client
 /// disconnected), it signals the reader task to close the fog socket, which
 /// makes the instance's follow loop stop.
@@ -3299,6 +3428,26 @@ mod tests {
         assert_eq!(q.get("service").map(String::as_str), Some("abc"));
         assert_eq!(q.get("tail").map(String::as_str), Some("50"));
         assert_eq!(parse_query("").len(), 0);
+    }
+
+    #[test]
+    fn test_slice_log_window() {
+        // `all` is the capped fetch of newest `need = tail + offset + 1`
+        // lines; hitting the cap exactly means older lines remain.
+        let (w, more) = slice_log_window(vec!["l4".into(), "l5".into(), "l6".into()], 2, 0);
+        assert_eq!(w, vec!["l5", "l6"]);
+        assert!(more);
+        // Uncapped fetch: whole log present, no more.
+        let (w, more) = slice_log_window(vec!["l1".into(), "l2".into()], 2, 0);
+        assert_eq!(w, vec!["l1", "l2"]);
+        assert!(!more);
+        // Offset window: skip newest 1, take previous 2 (uncapped).
+        let (w, more) = slice_log_window(vec!["l1".into(), "l2".into(), "l3".into()], 2, 1);
+        assert_eq!(w, vec!["l1", "l2"]);
+        assert!(!more);
+        // Offset past the end yields nothing.
+        let (w, _) = slice_log_window(vec!["l1".into(), "l2".into()], 2, 10);
+        assert!(w.is_empty());
     }
 
     #[test]
