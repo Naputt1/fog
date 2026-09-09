@@ -48,7 +48,7 @@ _fog() {{
     if [[ "$cur" == -* ]]; then
         COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
     else
-        COMPREPLY=( $(compgen -W "ls kill logs" -- "$cur") )
+        COMPREPLY=( $(compgen -W "ls kill restart logs index" -- "$cur") )
     fi
     return 0
 }}
@@ -73,7 +73,7 @@ _fog() {{
         '--completions=[Generate a completion script]:shell:(bash zsh fish)' \
         '(-h --help)'{{-h,--help}}'[Print help]' \
         '(-V --version)'{{-V,--version}}'[Print version]' \
-        '1:command:(ls kill logs)' \
+        '1:command:(ls kill restart logs index)' \
         '*:pid:'
     case $state in
         branches)
@@ -99,7 +99,7 @@ complete -c fog -s d -l detach -d 'Run in the background without the TUI'
 complete -c fog -l completions -d 'Generate a completion script' -a 'bash zsh fish'
 complete -c fog -s h -l help -d 'Print help'
 complete -c fog -s V -l version -d 'Print version'
-complete -c fog -f -a 'ls kill logs'
+complete -c fog -f -a 'ls kill restart logs index'
 "##,
     )
 }

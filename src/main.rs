@@ -37,12 +37,18 @@ const DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Command-line interface arguments parsed via clap.
 #[derive(Parser)]
-#[command(name = "fog", version = env!("CARGO_PKG_VERSION"))]
+#[command(
+    name = "fog",
+    version = env!("CARGO_PKG_VERSION"),
+    about = "Terminal-based service orchestrator & reverse-proxy dashboard",
+    after_help = "Built-in commands:\n  fog ls [PID]          list running instances and service status\n  fog kill [PID]        gracefully shut down a running instance\n  fog restart [PID]     restart a running instance\n  fog logs [PID]        print captured output of a detached instance\n  fog index serve       run the index server in the foreground\n  fog index kill        stop the index server\n  fog index restart     restart the index server\n\nRun a script from fog.json:\n  fog <script> [OPTIONS]  (e.g. fog dev)"
+)]
 struct Cli {
-    /// Script to run (e.g. `fog dev`), or a built-in command (`ls`, `kill`, `logs`).
+    /// Script to run (e.g. `fog dev`), or a built-in command
+    /// (`ls`, `kill`, `restart`, `logs`, `index`).
     script: Option<String>,
 
-    /// PID of a running fog instance (used with `fog kill <pid>`, `fog logs <pid>`).
+    /// PID of a running fog instance (used with `fog kill <pid>`, `fog restart <pid>`, `fog logs <pid>`).
     pid: Option<u32>,
 
     /// Path to the configuration file (or a directory containing `fog.json`).
@@ -1219,7 +1225,7 @@ fn main() -> io::Result<()> {
     // headless path in run_script and must not re-daemonize.
     if cli.detach && std::env::var_os("FOG_DAEMON_CHILD").is_none() {
         match cli.script.as_deref() {
-            Some(name) if !matches!(name, "ls" | "kill" | "logs") => return daemonize(name),
+            Some(name) if !matches!(name, "ls" | "kill" | "restart" | "logs" | "index") => return daemonize(name),
             Some(_) => {
                 eprintln!("error: --detach only applies to running a script (e.g. `fog dev -d`)");
                 std::process::exit(1);
