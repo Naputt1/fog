@@ -468,7 +468,10 @@ pub(crate) fn read_tail_lines(file: &mut File, n: usize) -> (Vec<String>, u64) {
 /// Sanitizes a service name into a safe log filename stem: `/` (and anything
 /// else outside an allowlist) becomes `_`, so a hostile name can never escape
 /// the log directory or reference another file.
-pub(crate) fn sanitize_service_name(name: &str) -> String {
+///
+/// Shared with the `fog logs --service <name>` CLI so it resolves the same
+/// `<stem>.log` file the daemon tee wrote.
+pub fn sanitize_service_name(name: &str) -> String {
     name.chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || matches!(c, ' ' | '_' | '.' | '-') {
@@ -592,6 +595,39 @@ pub(crate) fn send_service_action_with_timeout(
     let mut line = String::new();
     reader.read_line(&mut line)?;
     serde_json::from_str(line.trim()).map_err(|e| io::Error::other(e.to_string()))
+}
+
+/// Queries a service's captured log (or the proxy's live request log) via IPC.
+///
+/// Sends a non-following `logs` request and collects the response lines until
+/// the server closes the connection. Each returned line excludes its trailing
+/// newline; a `[fog] ...` line marks a control message (e.g. no captured log).
+///
+/// # Errors
+/// Returns an error if the connection fails or the response cannot be read.
+pub fn query_logs(path: &Path, service: &str, tail: usize) -> io::Result<Vec<String>> {
+    let mut stream = UnixStream::connect(path)?;
+    stream.set_read_timeout(Some(Duration::from_secs(super::READ_TIMEOUT_SECS)))?;
+    // Serialize the service name through serde_json so a hostile name can
+    // never break out of the JSON request line.
+    let svc = serde_json::to_string(service).unwrap_or_else(|_| "\"\"".to_string());
+    let line = format!(r#"{{"type":"logs","service":{svc},"tail":{tail},"follow":false}}"#);
+    stream.write_all(line.as_bytes())?;
+    stream.write_all(b"\n")?;
+    stream.flush()?;
+
+    let mut reader = BufReader::new(stream);
+    let mut out = Vec::new();
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let n = reader.read_line(&mut line)?;
+        if n == 0 {
+            break;
+        }
+        out.push(line.trim_end_matches(['\r', '\n']).to_string());
+    }
+    Ok(out)
 }
 
 /// Queries a service's live terminal raw output (base64 chunks) via IPC.

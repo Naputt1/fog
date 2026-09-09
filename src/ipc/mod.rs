@@ -22,14 +22,14 @@ mod handoff;
 pub use handoff::*;
 mod server;
 pub use server::{
-    cleanup_socket, find_instances, query_status, query_terminal_snapshot, send_kill,
-    send_kill_with_reuse, send_service_action, spawn_server,
+    cleanup_socket, find_instances, query_logs, query_status, query_terminal_snapshot,
+    sanitize_service_name, send_kill, send_kill_with_reuse, send_service_action, spawn_server,
 };
 #[allow(unused_imports)]
 pub(crate) use server::{
     client_closed, handle_connection, handle_logs, proxy_running, read_tail_lines,
-    sanitize_service_name, send_service_action_with_timeout, service_running, stream_proxy_log,
-    stream_service_log, write_log_entry,
+    send_service_action_with_timeout, service_running, stream_proxy_log, stream_service_log,
+    write_log_entry,
 };
 
 /// Returns the socket path for a given PID: `$TMPDIR/fog-<pid>.sock`.
@@ -605,6 +605,58 @@ mod tests {
         server.join().unwrap();
 
         assert!(out.contains("[fog] no captured log"));
+        let _ = fs::remove_file(&sock);
+    }
+
+    #[test]
+    fn test_query_logs_proxy_roundtrip() {
+        let state = Arc::new(IpcState::new("dev".to_string(), None, None, false));
+        let q = Arc::new(Mutex::new(VecDeque::new()));
+        {
+            let mut lk = q.lock().unwrap();
+            lk.push_back(LogEntry {
+                method: "GET".into(),
+                path: "/api/bookings".into(),
+                upstream: "127.0.0.1:8000".into(),
+                status: 200,
+                latency_ms: 3,
+                ws: false,
+            });
+        }
+        *state.proxy_logs.lock().unwrap() = Some(q);
+
+        let sock = unique("querylogs.sock");
+        let _ = fs::remove_file(&sock);
+        let listener = UnixListener::bind(&sock).unwrap();
+        let server_state = state.clone();
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            handle_connection(stream, server_state);
+        });
+
+        let lines = super::server::query_logs(&sock, "proxy", 10).unwrap();
+        server.join().unwrap();
+
+        assert!(lines.iter().any(|l| l.contains("/api/bookings")));
+        let _ = fs::remove_file(&sock);
+    }
+
+    #[test]
+    fn test_query_logs_missing_service_roundtrip() {
+        let state = Arc::new(IpcState::new("dev".to_string(), None, None, false));
+        let sock = unique("querylogs-miss.sock");
+        let _ = fs::remove_file(&sock);
+        let listener = UnixListener::bind(&sock).unwrap();
+        let server_state = state.clone();
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            handle_connection(stream, server_state);
+        });
+
+        let lines = super::server::query_logs(&sock, "nonexistent", 10).unwrap();
+        server.join().unwrap();
+
+        assert!(lines.iter().any(|l| l.contains("[fog] no captured log")));
         let _ = fs::remove_file(&sock);
     }
 }

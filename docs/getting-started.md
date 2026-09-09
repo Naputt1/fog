@@ -69,7 +69,8 @@ fog dev
 fog <script> [OPTIONS]    # Run a script in the TUI (e.g. `fog dev`)
 fog ls [pid]              # List running instances and service status
 fog kill [pid]            # Gracefully shut down a running instance
-fog logs [pid]            # Print captured output of a detached instance
+fog logs [pid]                  # List services and their status
+fog logs [pid] --service <name> # Print captured output of one service
 ```
 
 | Option | Description |
@@ -104,13 +105,14 @@ The `branch` column shows the git branch (or `.` when not in a worktree).
 `fog <script> -d` runs a script in the background without the TUI — useful for CI pipelines and AI agents that cannot drive an interactive terminal. Services keep their PTYs, health checks, dependency ordering, and reverse proxy, so management works exactly as with the TUI:
 
 ```bash
-fog dev -d            # start in the background; prints the PID and returns
-fog ls 1234           # check the instance's service status
-fog logs 1234         # print the captured output of each service
-fog kill 1234         # gracefully shut it down
+fog dev -d                  # start in the background; prints the PID and returns
+fog ls 1234                 # check the instance's service status
+fog logs 1234               # list services and their status
+fog logs 1234 -s api        # print the captured output of one service
+fog kill 1234               # gracefully shut it down
 ```
 
-Each detached instance tees every service's raw PTY output into `$TMPDIR/fog-<pid>.logs/<name>.log` (the daemon's own diagnostics go to `daemon.log`), and `fog logs <pid>` prints them with ANSI escape sequences stripped. The log files persist after the instance exits. This is separate from `--save-logs`, which on any exit (TUI or detached) writes `temp/<name>.txt` in the project directory.
+Each detached instance tees every service's raw PTY output into `$TMPDIR/fog-<pid>.logs/<name>.log` (the daemon's own diagnostics go to `daemon.log`). `fog logs <pid>` lists the available services (`daemon` and `proxy` included) with their status; `fog logs <pid> --service <name>` (short `-s`) prints one service's output with ANSI escape sequences stripped. The log files persist after the instance exits. This is separate from `--save-logs`, which on any exit (TUI or detached) writes `temp/<name>.txt` in the project directory.
 
 ### Agentic concurrent recipe — human + agent on the same branch
 

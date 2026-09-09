@@ -41,7 +41,7 @@ const DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(60);
     name = "fog",
     version = env!("CARGO_PKG_VERSION"),
     about = "Terminal-based service orchestrator & reverse-proxy dashboard",
-    after_help = "Built-in commands:\n  fog ls [PID]          list running instances and service status\n  fog kill [PID]        gracefully shut down a running instance\n  fog restart [PID]     restart a running instance\n  fog logs [PID]        print captured output of a detached instance\n  fog index serve [--foreground] [--port N]  run the index server (detached by default)\n  fog index kill        stop the index server\n  fog index restart     restart the index server\n\nRun a script from fog.json:\n  fog <script> [OPTIONS]  (e.g. fog dev)"
+    after_help = "Built-in commands:\n  fog ls [PID]                    list running instances and service status\n  fog kill [PID]                  gracefully shut down a running instance\n  fog restart [PID]               restart a running instance\n  fog logs [PID]                  list services and their status\n  fog logs [PID] --service NAME   print captured output of one service\n  fog index serve [--foreground] [--port N]  run the index server (detached by default)\n  fog index kill                  stop the index server\n  fog index restart               restart the index server\n\nRun a script from fog.json:\n  fog <script> [OPTIONS]  (e.g. fog dev)"
 )]
 struct Cli {
     /// Script to run (e.g. `fog dev`), or a built-in command
@@ -50,6 +50,12 @@ struct Cli {
 
     /// PID of a running fog instance (used with `fog kill <pid>`, `fog restart <pid>`, `fog logs <pid>`).
     pid: Option<u32>,
+
+    /// Only used with `fog logs`: print the captured output of this service
+    /// instead of listing services. Without it, `fog logs` lists the
+    /// available service names and their status.
+    #[arg(short, long, value_name = "SERVICE")]
+    service: Option<String>,
 
     /// Path to the configuration file (or a directory containing `fog.json`).
     /// Defaults to `fog.json`.
@@ -711,8 +717,87 @@ fn strip_ansi(s: &str) -> String {
     out
 }
 
-/// Prints the captured logs of a running instance, one section per service.
-fn cmd_logs(pid: Option<u32>) -> io::Result<()> {
+/// Builds the `(service, status)` rows for `fog logs`: one per script service
+/// (`healthy`/`unhealthy`/… while running, `stopped` otherwise), plus `daemon`
+/// when its log file exists and `proxy` when one is configured.
+fn log_service_rows(status: &ipc::StatusResponse, daemon_exists: bool) -> Vec<(String, String)> {
+    let mut rows: Vec<(String, String)> = status
+        .services
+        .iter()
+        .map(|s| {
+            let state = if s.running {
+                s.health.clone()
+            } else {
+                "stopped".to_string()
+            };
+            (s.name.clone(), state)
+        })
+        .collect();
+    if daemon_exists {
+        rows.push(("daemon".to_string(), "running".to_string()));
+    }
+    if let Some(p) = &status.proxy {
+        let state = if p.running {
+            format!(":{}", p.port)
+        } else {
+            ":down".to_string()
+        };
+        rows.push(("proxy".to_string(), state));
+    }
+    rows
+}
+
+/// Prints one captured log file as a single `==== <script> (<name>) ====`
+/// section with ANSI escape sequences stripped.
+fn print_log_file(script: &str, name: &str, file: &Path) {
+    println!("==== {} ({}) ====", script, name);
+    match fs::read_to_string(file) {
+        Ok(content) => {
+            print!("{}", strip_ansi(&content));
+            if !content.ends_with('\n') {
+                println!();
+            }
+        }
+        Err(e) => eprintln!("error: could not read {}: {e}", file.display()),
+    }
+}
+
+/// Lists the instance's services and their status, with a hint pointing at
+/// `--service`. Used when `fog logs` runs without a service filter and when
+/// reporting an unknown `--service` name.
+fn print_available_services(target_pid: u32, script: &str, rows: &[(String, String)]) {
+    if rows.is_empty() {
+        println!("(no services for instance {target_pid})");
+        return;
+    }
+    println!("Services for instance {target_pid} (script '{script}'):");
+    let w_service = rows
+        .iter()
+        .map(|(name, _)| name.len())
+        .max()
+        .unwrap_or(0)
+        .max("service".len());
+    let w_status = rows
+        .iter()
+        .map(|(_, state)| state.len())
+        .max()
+        .unwrap_or(0)
+        .max("status".len());
+    println!("  {:<w_service$}  {:<w_status$}", "service", "status");
+    for (name, state) in rows {
+        println!("  {:<w_service$}  {:<w_status$}", name, state);
+    }
+    println!();
+    println!("Show one service: fog logs {target_pid} --service <name>");
+}
+
+/// Prints the captured logs of a running instance.
+///
+/// Without `service`, lists the available service names and their status.
+/// With `service`, prints only that service's captured output (`daemon` reads
+/// `daemon.log`; `proxy` streams the live request log over IPC; anything else
+/// reads `<service>.log`).
+fn cmd_logs(pid: Option<u32>, service: Option<String>) -> io::Result<()> {
     let instances = ipc::find_instances()?;
 
     if instances.is_empty() {
@@ -731,38 +816,59 @@ fn cmd_logs(pid: Option<u32>) -> io::Result<()> {
     };
 
     let dir = ipc::instance_log_dir(target_pid);
-    if !dir.is_dir() {
-        eprintln!("error: instance {target_pid} has no captured logs");
+    let rows = log_service_rows(&status, dir.join("daemon.log").is_file());
+
+    let Some(wanted) = service.as_deref() else {
+        print_available_services(target_pid, &status.script, &rows);
+        return Ok(());
+    };
+
+    // Exact match first, then a sanitized filename-stem match (so a service
+    // whose name contains `/` etc. is found by either form). A stale
+    // `<name>.log` left by a removed service is still printable by name even
+    // though it is not listed.
+    let canonical = rows
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .find(|name| *name == wanted)
+        .or_else(|| {
+            let safe = ipc::sanitize_service_name(wanted);
+            rows.iter()
+                .map(|(name, _)| name.as_str())
+                .find(|name| ipc::sanitize_service_name(name) == safe || *name == safe)
+        })
+        .map(str::to_string);
+    let Some(name) = canonical.or_else(|| {
+        let file = dir.join(format!("{}.log", ipc::sanitize_service_name(wanted)));
+        file.is_file().then(|| wanted.to_string())
+    }) else {
+        eprintln!("error: unknown service '{wanted}' for instance {target_pid}");
+        print_available_services(target_pid, &status.script, &rows);
         std::process::exit(1);
-    }
+    };
 
-    let mut files: Vec<PathBuf> = fs::read_dir(&dir)?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|ext| ext == "log"))
-        .collect();
-    files.sort();
-
-    if files.is_empty() {
-        println!("(no log files for instance {target_pid})");
+    if name == "proxy" {
+        match ipc::query_logs(path, "proxy", 10_000) {
+            Ok(lines) => {
+                println!("==== {} (proxy) ====", status.script);
+                for line in lines {
+                    println!("{line}");
+                }
+            }
+            Err(e) => {
+                eprintln!("error: could not query proxy log on instance {target_pid}: {e}");
+                std::process::exit(1);
+            }
+        }
         return Ok(());
     }
 
-    for file in files {
-        let name = file
-            .file_stem()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        println!("==== {} ({}) ====", status.script, name);
-        match fs::read_to_string(&file) {
-            Ok(content) => {
-                print!("{}", strip_ansi(&content));
-                if !content.ends_with('\n') {
-                    println!();
-                }
-            }
-            Err(e) => eprintln!("error: could not read {}: {e}", file.display()),
-        }
+    let file = dir.join(format!("{}.log", ipc::sanitize_service_name(&name)));
+    if !file.is_file() {
+        eprintln!("error: instance {target_pid} has no captured log for service '{name}'");
+        std::process::exit(1);
     }
+    print_log_file(&status.script, &name, &file);
     Ok(())
 }
 
@@ -1289,6 +1395,13 @@ fn main() -> io::Result<()> {
         return Ok(());
     }
 
+    // `--service` only applies to `fog logs`; reject it elsewhere before the
+    // detach path so it can never leak into a daemon child's arguments.
+    if cli.service.is_some() && cli.script.as_deref() != Some("logs") {
+        eprintln!("error: --service only applies to `fog logs` (e.g. `fog logs --service api`)");
+        std::process::exit(1);
+    }
+
     // Detach: run the script in the background and return once it is serving.
     // The daemon child (re-executed with FOG_DAEMON_CHILD=1) takes the
     // headless path in run_script and must not re-daemonize.
@@ -1312,7 +1425,7 @@ fn main() -> io::Result<()> {
         Some("ls") => cmd_ls(),
         Some("kill") => cmd_kill(cli.pid),
         Some("restart") => cmd_restart(cli.pid, &cli),
-        Some("logs") => cmd_logs(cli.pid),
+        Some("logs") => cmd_logs(cli.pid, cli.service.clone()),
         Some(name) => run_script(name, &cli),
         None => {
             let config_path = resolve_config_path(&resolve_run_config(&cli));
@@ -1382,6 +1495,88 @@ mod tests {
         // name is its basename. A bare/rootless path falls back to itself.
         assert_eq!(project_display_name("/tmp/my-project"), "my-project");
         assert_eq!(project_display_name("fog"), "fog");
+    }
+
+    fn test_status(
+        services: Vec<ipc::ServiceStatus>,
+        proxy: Option<ipc::ProxyStatus>,
+    ) -> ipc::StatusResponse {
+        ipc::StatusResponse {
+            pid: 1234,
+            script: "dev".to_string(),
+            services,
+            proxy,
+            project: None,
+            branch: None,
+            config_dir: None,
+            started_at: 0,
+            ports: Default::default(),
+            native_routes: Vec::new(),
+            no_share: false,
+        }
+    }
+
+    fn svc(name: &str, running: bool, health: &str) -> ipc::ServiceStatus {
+        ipc::ServiceStatus {
+            name: name.to_string(),
+            running,
+            health: health.to_string(),
+        }
+    }
+
+    #[test]
+    fn test_log_service_rows_reports_health_and_stopped() {
+        let status = test_status(
+            vec![svc("api", true, "healthy"), svc("worker", false, "unknown")],
+            None,
+        );
+        assert_eq!(
+            log_service_rows(&status, false),
+            vec![
+                ("api".to_string(), "healthy".to_string()),
+                ("worker".to_string(), "stopped".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_log_service_rows_appends_daemon_and_proxy() {
+        let status = test_status(
+            vec![svc("api", true, "healthy")],
+            Some(ipc::ProxyStatus {
+                running: true,
+                port: 3000,
+            }),
+        );
+        assert_eq!(
+            log_service_rows(&status, true),
+            vec![
+                ("api".to_string(), "healthy".to_string()),
+                ("daemon".to_string(), "running".to_string()),
+                ("proxy".to_string(), ":3000".to_string()),
+            ]
+        );
+        // No daemon.log on disk and no proxy configured: no extra rows.
+        let status = test_status(vec![svc("api", true, "healthy")], None);
+        assert_eq!(
+            log_service_rows(&status, false),
+            vec![("api".to_string(), "healthy".to_string())]
+        );
+    }
+
+    #[test]
+    fn test_log_service_rows_proxy_down() {
+        let status = test_status(
+            Vec::new(),
+            Some(ipc::ProxyStatus {
+                running: false,
+                port: 3000,
+            }),
+        );
+        assert_eq!(
+            log_service_rows(&status, false),
+            vec![("proxy".to_string(), ":down".to_string())]
+        );
     }
 
     #[test]

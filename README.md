@@ -114,7 +114,8 @@ for full details.
 fog <script> [OPTIONS]    # run a script (e.g. fog dev)
 fog ls [pid]              # list running instances
 fog kill [pid]            # gracefully shut down
-fog logs [pid]            # print captured output of a detached instance
+fog logs [pid]                  # list services and their status
+fog logs [pid] -s <name>        # print captured output of one service
 ```
 
 | Option | Description |
@@ -122,6 +123,7 @@ fog logs [pid]            # print captured output of a detached instance
 | `-c`, `--config <PATH>` | Path to config file or directory containing `fog.json` (default `fog.json`) |
 | `--branch <BRANCH>` | Run in the git worktree for this branch |
 | `-d`, `--detach` | Run in background without TUI, captures logs to `$TMPDIR/fog-<pid>.logs/` |
+| `-s`, `--service <NAME>` | With `fog logs`: show one service instead of listing (`daemon` and `proxy` included) |
 | `--save-logs` | Save service output to `temp/<name>.txt` on exit |
 | `--completions <SHELL>` | Print bash/zsh/fish completions |
 
