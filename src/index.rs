@@ -176,6 +176,22 @@ fn reachable_entries_from(
     entries
 }
 
+/// Splits a branch-specific infra compose project into its repo prefix and
+/// branch suffix, e.g. `red-fox-infra-main` → `("red-fox", "main")` and
+/// `red-fox-infra-feat-branch` → `("red-fox", "feat-branch")`.
+///
+/// Returns `None` for genuinely shared infra with no branch suffix (e.g.
+/// `red-fox-infra`, `gems-infra`) or for non-infra names. Underscores are
+/// treated as dashes because compose normalizes separators.
+fn infra_branch(project_name: &str) -> Option<(String, String)> {
+    let norm = project_name.to_ascii_lowercase().replace('_', "-");
+    let (prefix, suffix) = norm.split_once("-infra-")?;
+    if suffix.is_empty() {
+        return None;
+    }
+    Some((prefix.to_string(), suffix.to_string()))
+}
+
 /// Derives the display project name, worktree group and shared-infra flag for a
 /// container from its compose labels.
 ///
@@ -184,6 +200,11 @@ fn reachable_entries_from(
 /// label-derived name. This groups all worktrees of the same repo (e.g.
 /// `admin/` and `ui/` of red-fox) under one project, matching fog's own
 /// instance identity.
+///
+/// Infra (`working_dir` ends in `infra/`) with a branch suffix in its compose
+/// project (e.g. `red-fox-infra-feat-branch`) runs a dedicated container per
+/// branch, so it groups under that branch (`shared == false`). Only a bare
+/// `red-fox-infra` with no suffix stays under the `shared` group.
 fn derive_group(
     labels: &std::collections::HashMap<String, String>,
     container_name: &str,
@@ -197,7 +218,14 @@ fn derive_group(
         .get("com.docker.compose.project")
         .map(String::as_str)
         .unwrap_or(container_name);
-    let is_infra = wd.ends_with("/infra") || wd.ends_with("\\infra");
+    let wd_trimmed = wd.trim_end_matches(['/', '\\']);
+    let is_infra = wd_trimmed.ends_with("/infra")
+        || wd_trimmed.ends_with("\\infra")
+        || wd_trimmed.eq_ignore_ascii_case("infra");
+    // Branch-specific infra runs its own container per branch, e.g.
+    // `red-fox-infra-main` or `red-fox-infra-feat-branch`. Only a bare
+    // `red-fox-infra` (no branch suffix) is truly shared.
+    let infra_branch_suffix = is_infra.then(|| infra_branch(project_name)).flatten();
     let project = match git_project.filter(|p| !p.is_empty()) {
         Some(p) => p.to_string(),
         None => {
@@ -209,13 +237,23 @@ fn derive_group(
                     .map(|(p, _)| p.to_string())
                     .unwrap_or_else(|| project_name.to_string())
             } else if is_infra {
-                // Repo root is the parent of `infra/`.
-                let repo = std::path::Path::new(wd)
-                    .parent()
-                    .and_then(|p| p.file_name())
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| project_name.to_string());
-                repo.to_lowercase()
+                if let Some((prefix, _)) = infra_branch_suffix.as_ref()
+                    && !prefix.is_empty()
+                {
+                    // The worktree checkout lives outside its git repo (e.g. an
+                    // opencode worktree cache), so git resolution failed. The
+                    // compose prefix before `-infra-` is the repo name — the
+                    // worktree dir basename would be the branch (wrong).
+                    prefix.clone()
+                } else {
+                    // Repo root is the parent of `infra/`.
+                    let repo = std::path::Path::new(wd_trimmed)
+                        .parent()
+                        .and_then(|p| p.file_name())
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| project_name.to_string());
+                    repo.to_lowercase()
+                }
             } else {
                 std::path::Path::new(wd)
                     .file_name()
@@ -225,7 +263,16 @@ fn derive_group(
         }
     };
     if is_infra {
-        (project, "shared".to_string(), true)
+        if let Some((_, raw_branch)) = infra_branch_suffix {
+            let worktree = crate::ports::sanitize_hostname(&raw_branch)
+                .split('.')
+                .next()
+                .unwrap_or("main")
+                .to_string();
+            (project, worktree, false)
+        } else {
+            (project, "shared".to_string(), true)
+        }
     } else {
         let raw_worktree = project_name
             .split_once('-')
@@ -2996,6 +3043,68 @@ mod tests {
         assert_eq!(
             derive_group(&infra, "red-fox-infra-postgres-1", None),
             ("red-fox".into(), "shared".into(), true)
+        );
+    }
+
+    #[test]
+    fn test_derive_group_infra_per_branch_containers() {
+        // Each branch runs its own infra container
+        // (`red-fox-infra-<branch>`): it must group under that branch, not
+        // under `shared` and not under a stray branch-named project.
+        let main = labels(&[
+            (
+                "com.docker.compose.project.working_dir",
+                "/repo/red-fox/infra",
+            ),
+            ("com.docker.compose.project", "red-fox-infra-main"),
+        ]);
+        assert_eq!(
+            derive_group(&main, "red-fox-infra-main-postgres-1", Some("red-fox")),
+            ("red-fox".into(), "main".into(), false)
+        );
+
+        // The branch checkout lives outside its git repo (detached worktree
+        // cache), so git resolution fails — the compose prefix still yields
+        // the repo project instead of a stray branch-named one.
+        let branch = labels(&[
+            (
+                "com.docker.compose.project.working_dir",
+                "/tmp/worktrees/abc/feat-branch-specific-service/infra",
+            ),
+            (
+                "com.docker.compose.project",
+                "red-fox-infra-feat-branch-specific-service",
+            ),
+        ]);
+        assert_eq!(
+            derive_group(
+                &branch,
+                "red-fox-infra-feat-branch-specific-service-postgres-1",
+                None
+            ),
+            (
+                "red-fox".into(),
+                "feat-branch-specific-service".into(),
+                false
+            )
+        );
+    }
+
+    #[test]
+    fn test_infra_branch_parsing() {
+        assert_eq!(infra_branch("red-fox-infra"), None);
+        assert_eq!(infra_branch("gems-infra"), None);
+        assert_eq!(
+            infra_branch("red-fox-infra-main"),
+            Some(("red-fox".into(), "main".into()))
+        );
+        assert_eq!(
+            infra_branch("red-fox-infra-feat-branch-specific-service"),
+            Some(("red-fox".into(), "feat-branch-specific-service".into()))
+        );
+        assert_eq!(
+            infra_branch("red_fox_infra_feat_branch"),
+            Some(("red-fox".into(), "feat-branch".into()))
         );
     }
 
