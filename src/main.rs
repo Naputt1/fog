@@ -41,7 +41,7 @@ const DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(60);
     name = "fog",
     version = env!("CARGO_PKG_VERSION"),
     about = "Terminal-based service orchestrator & reverse-proxy dashboard",
-    after_help = "Built-in commands:\n  fog ls [PID]          list running instances and service status\n  fog kill [PID]        gracefully shut down a running instance\n  fog restart [PID]     restart a running instance\n  fog logs [PID]        print captured output of a detached instance\n  fog index serve       run the index server in the foreground\n  fog index kill        stop the index server\n  fog index restart     restart the index server\n\nRun a script from fog.json:\n  fog <script> [OPTIONS]  (e.g. fog dev)"
+    after_help = "Built-in commands:\n  fog ls [PID]          list running instances and service status\n  fog kill [PID]        gracefully shut down a running instance\n  fog restart [PID]     restart a running instance\n  fog logs [PID]        print captured output of a detached instance\n  fog index serve [--foreground] [--port N]  run the index server (detached by default)\n  fog index kill        stop the index server\n  fog index restart     restart the index server\n\nRun a script from fog.json:\n  fog <script> [OPTIONS]  (e.g. fog dev)"
 )]
 struct Cli {
     /// Script to run (e.g. `fog dev`), or a built-in command
@@ -1171,13 +1171,78 @@ fn daemonize(script: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// Parses `fog index serve` flags: `--foreground` runs in the foreground
+/// (blocking); otherwise the server detaches into the background by default.
+/// `--port N` / `--port=N` / `-p N` overrides the configured port.
+fn parse_index_serve_args(args: &[String]) -> (bool, Option<u16>) {
+    let mut foreground = false;
+    let mut port: Option<u16> = None;
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        if a == "--foreground" {
+            foreground = true;
+        } else if a == "--port" || a == "-p" {
+            i += 1;
+            match args.get(i).and_then(|s| s.parse::<u16>().ok()) {
+                Some(p) => port = Some(p),
+                None => {
+                    eprintln!(
+                        "error: {a} requires a port number (e.g. `fog index serve --port 18080`)"
+                    );
+                    std::process::exit(1);
+                }
+            }
+        } else if let Some(v) = a.strip_prefix("--port=") {
+            match v.parse::<u16>() {
+                Ok(p) => port = Some(p),
+                Err(_) => {
+                    eprintln!("error: invalid --port value '{v}'");
+                    std::process::exit(1);
+                }
+            }
+        } else if a == "-h" || a == "--help" {
+            println!("Usage: fog index serve [--foreground] [--port N]");
+            println!();
+            println!("Run the index server. Detaches into the background by default;");
+            println!("pass --foreground to block in the terminal.");
+            std::process::exit(0);
+        } else {
+            eprintln!(
+                "error: unknown flag '{a}' for `fog index serve` (see `fog index serve --help`)"
+            );
+            std::process::exit(1);
+        }
+        i += 1;
+    }
+    // The detached child (FOG_INDEX_CHILD=1) must block; it never re-detaches.
+    if std::env::var_os("FOG_INDEX_CHILD").is_some() {
+        foreground = true;
+    }
+    (foreground, port)
+}
+
+/// Entry point for `fog index serve`: detaches into a background service by
+/// default (logs to `$TMPDIR/fog-index-<port>.logs/daemon.log`), or blocks
+/// with `--foreground`.
+fn cmd_index_serve(args: &[String]) -> io::Result<()> {
+    let (foreground, explicit_port) = parse_index_serve_args(args);
+    let port = fog::index::resolve_serve_port(explicit_port);
+    let network = fog::index::resolve_serve_network();
+    if foreground {
+        fog::index::serve_foreground(port, network)
+    } else {
+        fog::index::serve_detached(port, &network)
+    }
+}
+
 fn main() -> io::Result<()> {
     // `fog index serve/kill/restart` are dispatched before clap so they are not
     // misparsed as the `[PID]` positional (which expects a number).
     let argv: Vec<String> = std::env::args().skip(1).collect();
     if argv.first().map(String::as_str) == Some("index") {
         match argv.get(1).map(String::as_str) {
-            Some("serve") => return fog::index::serve(),
+            Some("serve") => return cmd_index_serve(&argv[2..]),
             Some("kill") => {
                 // `fog index kill` terminates the index server unconditionally.
                 let killed = fog::index::kill_server(None);
@@ -1203,6 +1268,10 @@ fn main() -> io::Result<()> {
                 }
                 if fog::index::is_server_started(port) {
                     println!("index server restarted on :{port}");
+                    println!(
+                        "  logs: {}",
+                        fog::index::index_log_dir(port).join("daemon.log").display()
+                    );
                 } else {
                     eprintln!("error: index server did not start on :{port}");
                     std::process::exit(1);
@@ -1225,7 +1294,9 @@ fn main() -> io::Result<()> {
     // headless path in run_script and must not re-daemonize.
     if cli.detach && std::env::var_os("FOG_DAEMON_CHILD").is_none() {
         match cli.script.as_deref() {
-            Some(name) if !matches!(name, "ls" | "kill" | "restart" | "logs" | "index") => return daemonize(name),
+            Some(name) if !matches!(name, "ls" | "kill" | "restart" | "logs" | "index") => {
+                return daemonize(name);
+            }
             Some(_) => {
                 eprintln!("error: --detach only applies to running a script (e.g. `fog dev -d`)");
                 std::process::exit(1);

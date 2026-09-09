@@ -672,19 +672,171 @@ pub fn restart_server(cfg: Option<&RouterConfig>) -> Result<u16, String> {
     }
 }
 
+/// Directory holding a background index server's captured output:
+/// `$TMPDIR/fog-index-<port>.logs/`. The detached server's own diagnostics
+/// go to `daemon.log` inside it.
+pub fn index_log_dir(port: u16) -> PathBuf {
+    std::env::temp_dir().join(format!("fog-index-{port}.logs"))
+}
+
+/// Resolves the port for `fog index serve`: explicit `--port` wins, then
+/// `FOG_INDEX_PORT`, then the effective config port (project/global fallback),
+/// then the default.
+pub fn resolve_serve_port(explicit: Option<u16>) -> u16 {
+    if let Some(p) = explicit {
+        return p;
+    }
+    if let Ok(p) = std::env::var("FOG_INDEX_PORT")
+        && let Ok(p) = p.parse::<u16>()
+    {
+        return p;
+    }
+    load_runtime_config().effective_index_port()
+}
+
+/// Resolves the docker network for `fog index serve`: `FOG_INDEX_NETWORK`
+/// wins, then the runtime config.
+pub fn resolve_serve_network() -> String {
+    std::env::var("FOG_INDEX_NETWORK")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| load_runtime_config().index_network())
+}
+
 /// Launches the index server as a detached background process (`fog index
-/// serve`), so it survives any individual fog instance exiting. If it is
-/// already running this is a no-op.
+/// serve --foreground` as the child), so it survives the launching shell.
+/// The child's stdout/stderr go to `daemon.log` in [`index_log_dir`].
+/// If it is already running this is a no-op reporting the existing server.
+pub fn serve_detached(port: u16, network: &str) -> io::Result<()> {
+    if server_started(port) {
+        println!("index server already running on :{port}");
+        println!("  status: curl http://127.0.0.1:{port}/api/services");
+        return Ok(());
+    }
+    let log_dir = index_log_dir(port);
+    std::fs::create_dir_all(&log_dir).map_err(|e| {
+        io::Error::other(format!(
+            "could not create index log dir {}: {e}",
+            log_dir.display()
+        ))
+    })?;
+    let log_file = std::fs::File::create(log_dir.join("daemon.log")).map_err(|e| {
+        io::Error::other(format!(
+            "could not create {}: {e}",
+            log_dir.join("daemon.log").display()
+        ))
+    })?;
+    // Separate fds for stdout/stderr so both capture the child's diagnostics.
+    let log_err = log_file
+        .try_clone()
+        .map_err(|e| io::Error::other(format!("could not duplicate index log fd: {e}")))?;
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("fog"));
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.args([
+        "index",
+        "serve",
+        "--foreground",
+        "--port",
+        &port.to_string(),
+    ])
+    .env("FOG_INDEX_CHILD", "1")
+    .env("FOG_INDEX_PORT", port.to_string())
+    .env("FOG_INDEX_NETWORK", network)
+    .stdin(Stdio::null())
+    .stdout(log_file)
+    .stderr(log_err);
+    #[cfg(unix)]
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| io::Error::other(format!("could not spawn index server: {e}")))?;
+    let pid = child.id();
+    // Record the pid so `maybe_terminate_if_no_instances` can find it later.
+    let _ = std::fs::write(index_pid_path(port), pid.to_string());
+    // Wait for it to bind before reporting success (mirrors `daemonize`).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if server_started(port) {
+            println!("index server started in background (pid {pid}) on :{port}");
+            println!("  status: curl http://127.0.0.1:{port}/api/services");
+            println!("  stop:   fog index kill");
+            println!("  logs:   {}", log_dir.join("daemon.log").display());
+            println!("  log dir: {}", log_dir.display());
+            return Ok(());
+        }
+        if child.try_wait().ok().flatten().is_some() {
+            let _ = std::fs::remove_file(index_pid_path(port));
+            return Err(io::Error::other(format!(
+                "index server (pid {pid}) exited during startup; logs: {}",
+                log_dir.display()
+            )));
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(io::Error::other(format!(
+                "index server (pid {pid}) did not bind within 10s; logs: {}",
+                log_dir.display()
+            )));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+/// Runs the index server in the foreground until killed. Used by
+/// `fog index serve --foreground` and by the detached child spawned in
+/// [`serve_detached`] (which sets `FOG_INDEX_CHILD=1`).
+pub fn serve_foreground(port: u16, network: String) -> io::Result<()> {
+    // Drop the detach marker so it does not leak into spawned helpers.
+    // SAFETY: the process is still single-threaded at this point.
+    if std::env::var_os("FOG_INDEX_CHILD").is_some() {
+        unsafe { std::env::remove_var("FOG_INDEX_CHILD") };
+    }
+    serve_blocking(port, network)
+}
+
+/// Launches the index server as a detached background process (`fog index
+/// serve --foreground` as the child), so it survives any individual fog
+/// instance exiting. If it is already running this is a no-op.
 fn spawn_server(cfg: &RouterConfig) -> Result<(), String> {
     let port = cfg.index_port.unwrap_or(DEFAULT_INDEX_PORT);
+    if server_started(port) {
+        return Ok(());
+    }
+    let log_dir = index_log_dir(port);
+    let _ = std::fs::create_dir_all(&log_dir);
+    let log_file = std::fs::File::create(log_dir.join("daemon.log")).and_then(|f| {
+        let err = f.try_clone()?;
+        Ok((f, err))
+    });
     let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("fog"));
     let mut cmd = std::process::Command::new(&exe);
-    cmd.args(["index", "serve"])
-        .env("FOG_INDEX_PORT", port.to_string())
-        .env("FOG_INDEX_NETWORK", &cfg.shared_network)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+    // `--foreground`: the child must block; this parent does the detaching.
+    // (Plain `index serve` now detaches itself, which would double-fork here.)
+    cmd.args([
+        "index",
+        "serve",
+        "--foreground",
+        "--port",
+        &port.to_string(),
+    ])
+    .env("FOG_INDEX_CHILD", "1")
+    .env("FOG_INDEX_PORT", port.to_string())
+    .env("FOG_INDEX_NETWORK", &cfg.shared_network)
+    .stdin(std::process::Stdio::null());
+    match log_file {
+        Ok((out, err)) => {
+            cmd.stdout(out).stderr(err);
+        }
+        Err(_) => {
+            cmd.stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+        }
+    }
     #[cfg(unix)]
     unsafe {
         use std::os::unix::process::CommandExt;
@@ -717,8 +869,11 @@ fn spawn_server(cfg: &RouterConfig) -> Result<(), String> {
     Err(format!("index server (pid {pid}) did not bind within 5s"))
 }
 
-/// Entry point for the `fog index serve` subcommand: runs the standalone index
-/// server in the foreground until killed.
+/// Entry point for the `fog index serve` subcommand without flags.
+/// Kept for programmatic use: runs the standalone index server in the
+/// foreground until killed (env `FOG_INDEX_PORT`/`FOG_INDEX_NETWORK`).
+/// The CLI (`main.rs`) detaches by default and only calls this via
+/// `--foreground`.
 pub fn serve() -> io::Result<()> {
     let port: u16 = std::env::var("FOG_INDEX_PORT")
         .ok()
@@ -1103,11 +1258,15 @@ async fn handle_server_restart_request(method: &hyper::Method) -> Response<RespB
     tokio::task::spawn_blocking(move || {
         std::thread::sleep(std::time::Duration::from_millis(200));
         // Spawn a detached helper that waits for the port to free then
-        // launches a new `fog index serve`.
+        // launches a new `fog index serve`. `--foreground`: the helper is
+        // already detached via setsid, so the child must block (plain
+        // `serve` would detach itself and double-fork).
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("fog"));
         let mut cmd = std::process::Command::new("sh");
-        cmd.arg("-c")
-            .arg(format!("sleep 0.5; exec {} index serve", exe.display()));
+        cmd.arg("-c").arg(format!(
+            "sleep 0.5; exec {} index serve --foreground",
+            exe.display()
+        ));
         cmd.env("FOG_INDEX_PORT", port.to_string())
             .env("FOG_INDEX_NETWORK", &network)
             .stdin(std::process::Stdio::null())
@@ -2704,6 +2863,20 @@ fn command_exists(name: &str) -> bool {
 mod tests {
     use super::*;
     use std::thread;
+
+    #[test]
+    fn test_index_log_dir_naming() {
+        assert_eq!(
+            index_log_dir(18080),
+            std::env::temp_dir().join("fog-index-18080.logs")
+        );
+    }
+
+    #[test]
+    fn test_resolve_serve_port_explicit_wins() {
+        // Explicit --port always wins regardless of env/config.
+        assert_eq!(resolve_serve_port(Some(18991)), 18991);
+    }
 
     #[test]
     fn test_query_param_extracts_value() {
