@@ -31,7 +31,7 @@ cargo install --git https://github.com/Naputt1/fog.git
 Pin a specific version with `--tag`:
 
 ```bash
-cargo install --git https://github.com/Naputt1/fog.git --tag v0.1.1
+cargo install --git https://github.com/Naputt1/fog.git --tag v0.1.2
 ```
 
 The `fog` binary is placed in `~/.cargo/bin/`.
