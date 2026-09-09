@@ -1,11 +1,23 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 
 import type { Service } from "@/lib/api";
 import { useServices } from "@/lib/hooks";
 import { Button } from "@/components/ui/button";
-import { TerminalView } from "@/components/terminal/TerminalView";
-import { LogView } from "@/components/terminal/LogView";
+import { LoadingState } from "@/components/page-state";
+// xterm (~300K+) is the heaviest dependency of the dashboard. Both views that
+// use it are split into on-demand chunks so the entry bundle (index, status,
+// health pages) stays lean; the chunk loads when /logs renders, behind a
+// skeleton. `ref` passes straight through the lazy wrapper (React 19
+// ref-as-prop; both views declare it in their props).
+const TerminalView = lazy(() =>
+  import("@/components/terminal/TerminalView").then((m) => ({
+    default: m.TerminalView,
+  }))
+);
+const LogView = lazy(() =>
+  import("@/components/terminal/LogView").then((m) => ({ default: m.LogView }))
+);
 import { TerminalKeypad } from "@/components/terminal/TerminalKeypad";
 import { ServiceSidebar } from "@/components/terminal/ServiceSidebar";
 import type { TerminalHandle } from "@/components/terminal/terminal-handle";
@@ -349,22 +361,26 @@ function LogsPage() {
           )
         )}
         {showTerminal ? (
-          <TerminalView
-            key={`${active?.service ?? "__shell__"}:${live ? "live" : "cwd"}`}
-            ref={termApiRef}
-            service={active?.service}
-            live={live && !!active}
-            className="flex min-h-[320px] flex-1"
-          />
+          <Suspense fallback={<LoadingState label="Loading terminal…" />}>
+            <TerminalView
+              key={`${active?.service ?? "__shell__"}:${live ? "live" : "cwd"}`}
+              ref={termApiRef}
+              service={active?.service}
+              live={live && !!active}
+              className="flex min-h-[320px] flex-1"
+            />
+          </Suspense>
         ) : (
-          <LogView
-            key={`${active?.container ?? "__none__"}`}
-            ref={termApiRef}
-            container={active?.container ?? null}
-            pid={active?.pid ?? null}
-            service={active?.service ?? null}
-            className="flex min-h-[320px] flex-1"
-          />
+          <Suspense fallback={<LoadingState label="Loading logs…" />}>
+            <LogView
+              key={`${active?.container ?? "__none__"}`}
+              ref={termApiRef}
+              container={active?.container ?? null}
+              pid={active?.pid ?? null}
+              service={active?.service ?? null}
+              className="flex min-h-[320px] flex-1"
+            />
+          </Suspense>
         )}
         <TerminalKeypad
           input={showTerminal}
