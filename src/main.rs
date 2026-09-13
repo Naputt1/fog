@@ -41,7 +41,7 @@ const DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(60);
     name = "fog",
     version = env!("CARGO_PKG_VERSION"),
     about = "Terminal-based service orchestrator & reverse-proxy dashboard",
-    after_help = "Built-in commands:\n  fog ls [PID]                    list running instances and service status\n  fog kill [PID|--all]            gracefully shut down a running instance\n  fog restart [PID|--all]         restart a running instance\n  fog logs [PID]                  list services and their status\n  fog logs [PID] --service NAME   print captured output of one service\n  fog index serve [--foreground] [--port N]  run the index server (detached by default)\n  fog index kill                  stop the index server\n  fog index restart               restart the index server\n\nWith no PID, kill/restart/logs target the instance started from the local\nfog.json (same config directory, so the branch is implicit). When several\nlocal instances match, the command lists them: pass an explicit PID, or\n--all (kill/restart) to apply to every local match. Outside a directory\nwith fog.json, --all applies to every running instance.\n\nRun a script from fog.json:\n  fog <script> [OPTIONS]  (e.g. fog dev)"
+    after_help = "Built-in commands:\n  fog ls [PID]                    list running instances and service status\n  fog kill [PID|--all]            gracefully shut down a running instance\n  fog kill --force [PID|--all]    forcibly shut down a wedged instance\n  fog restart [PID|--all]         restart a running instance\n  fog logs [PID]                  list services and their status\n  fog logs [PID] --service NAME   print captured output of one service\n  fog index serve [--foreground] [--port N]  run the index server (detached by default)\n  fog index kill                  stop the index server\n  fog index restart               restart the index server\n\nWith no PID, kill/restart/logs target the instance started from the local\nfog.json (same config directory, so the branch is implicit). When several\nlocal instances match, the command lists them: pass an explicit PID, or\n--all (kill/restart) to apply to every local match. Outside a directory\nwith fog.json, --all applies to every running instance.\n\nWhen a kill/restart grace period is not enough (a wedged instance that never\nconsumes its kill flag), --force escalates to SIGTERM then SIGKILL.\n\nRun a script from fog.json:\n  fog <script> [OPTIONS]  (e.g. fog dev)"
 )]
 struct Cli {
     /// Script to run (e.g. `fog dev`), or a built-in command
@@ -58,6 +58,12 @@ struct Cli {
     /// Only used with `fog kill` and `fog restart`; conflicts with `PID`.
     #[arg(long)]
     all: bool,
+
+    /// Keep escalating when the instance does not stop gracefully: after the
+    /// normal grace period, send SIGTERM and then SIGKILL to the process tree.
+    /// Only used with `fog kill` and `fog restart`.
+    #[arg(long)]
+    force: bool,
 
     /// Only used with `fog logs`: print the captured output of this service
     /// instead of listing services. Without it, `fog logs` lists the
@@ -485,6 +491,70 @@ fn cmd_ls() -> io::Result<()> {
     Ok(())
 }
 
+/// Asks the instance at `path` to stop and waits for it to exit.
+///
+/// The instance is first asked to shut down gracefully over IPC (so services
+/// tear down cleanly). A wedged instance whose event loop never consumes the
+/// kill flag will not exit on its own, so with `force` we escalate: SIGTERM to
+/// the process tree, then SIGKILL, which cannot be caught or blocked.
+///
+/// Returns `true` once the process is no longer alive.
+fn stop_instance(pid: u32, path: &Path, force: bool) -> bool {
+    if let Err(e) = ipc::send_kill(path) {
+        eprintln!("warning: could not reach instance {pid}: {e}");
+    }
+    if wait_for_pid_exit(pid, Duration::from_millis(2500)) {
+        return true;
+    }
+
+    if !force {
+        eprintln!("warning: instance {pid} did not stop; retry with `fog kill --force {pid}`");
+        return false;
+    }
+
+    // SIGTERM first for a chance at a clean tree teardown, then SIGKILL. A
+    // fog instance registers a SIGTERM handler (the `ctrlc` termination
+    // feature), so a wedged loop can ignore the former but never the latter.
+    signal_instance(pid, libc::SIGTERM);
+    if wait_for_pid_exit(pid, Duration::from_millis(1000)) {
+        return true;
+    }
+    signal_instance(pid, libc::SIGKILL);
+    let exited = wait_for_pid_exit(pid, Duration::from_millis(2000));
+    if !exited {
+        eprintln!("warning: instance {pid} survived SIGKILL");
+    }
+    exited
+}
+
+/// Signals the instance's whole process tree and the process itself.
+///
+/// [`fog::process::signal_tree`] targets the group, which reaches the leader
+/// (fog is normally its own group leader), but a target that is not a group
+/// leader would be missed — so hit the PID directly too.
+fn signal_instance(pid: u32, signal: i32) {
+    fog::process::signal_tree(pid, signal);
+    // SAFETY: `pid` is a live process id observed from the instance scan; the
+    // signal is delivered to that process only.
+    unsafe {
+        libc::kill(pid as libc::pid_t, signal);
+    }
+}
+
+/// Waits until `pid` is no longer alive, up to `timeout`.
+fn wait_for_pid_exit(pid: u32, timeout: Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if !fog::process::is_pid_alive(pid) {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 fn cmd_kill(pid: Option<u32>, all: bool, cli: &Cli) -> io::Result<()> {
     let instances = ipc::find_instances()?;
 
@@ -495,34 +565,15 @@ fn cmd_kill(pid: Option<u32>, all: bool, cli: &Cli) -> io::Result<()> {
 
     let targets = resolve_targets(&instances, pid, all, cli, "kill");
     for (target_pid, path) in &targets {
-        match ipc::send_kill(path) {
-            Ok(()) => println!("sent kill request to fog instance {target_pid}"),
-            Err(e) => eprintln!("warning: could not kill instance {target_pid}: {e}"),
+        let target_pid = *target_pid;
+        if stop_instance(target_pid, path, cli.force) {
+            println!("stopped fog instance {target_pid}");
+        } else {
+            eprintln!("warning: fog instance {target_pid} is still running");
         }
     }
 
-    // Give the instance(s) a moment to exit and clean up, then tear down the
-    // index server if nothing remains. Best-effort: fire-and-forget.
-    if targets.len() == 1 {
-        let (target_pid, path) = &targets[0];
-        let target_pid = *target_pid;
-        if instances.len() == 1 && instances[0].0 == target_pid {
-            std::thread::sleep(std::time::Duration::from_millis(500));
-            for _ in 0..20 {
-                if ipc::query_status(path).is_err() && !path.exists() {
-                    break;
-                }
-                if !fog::process::is_pid_alive(target_pid) {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-        } else {
-            std::thread::sleep(std::time::Duration::from_millis(500));
-        }
-    } else {
-        std::thread::sleep(std::time::Duration::from_millis(500));
-    }
+    // Tear down the index server if no instance remains. Best-effort.
     fog::index::maybe_terminate_if_no_instances(None);
     Ok(())
 }
@@ -547,17 +598,15 @@ fn cmd_restart(pid: Option<u32>, all: bool, cli: &Cli) -> io::Result<()> {
         let config_dir = status.config_dir.clone();
         let branch = status.branch.clone();
 
-        ipc::send_kill(path)?;
-        println!("sent kill request to fog instance {target_pid} (script '{script}')");
-
         // Wait for the old instance to fully exit before relaunching to avoid
-        // port conflicts and owner-lock races.
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while std::time::Instant::now() < deadline {
-            if !fog::process::is_pid_alive(target_pid) && ipc::query_status(path).is_err() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(100));
+        // port conflicts and owner-lock races. `--force` escalates to SIGKILL
+        // so a wedged instance does not block the restart.
+        if stop_instance(target_pid, path, cli.force) {
+            println!("stopped fog instance {target_pid} (script '{script}')");
+        } else {
+            eprintln!(
+                "warning: instance {target_pid} did not stop; restarting anyway may conflict"
+            );
         }
         // Extra grace for socket file removal.
         wait_for_socket_gone(path);
@@ -1600,6 +1649,12 @@ fn main() -> io::Result<()> {
         }
     }
 
+    // `--force` only applies to `fog kill` / `fog restart`.
+    if cli.force && !matches!(cli.script.as_deref(), Some("kill") | Some("restart")) {
+        eprintln!("error: --force only applies to `fog kill` and `fog restart`");
+        std::process::exit(1);
+    }
+
     // Detach: run the script in the background and return once it is serving.
     // The daemon child (re-executed with FOG_DAEMON_CHILD=1) takes the
     // headless path in run_script and must not re-daemonize.
@@ -2001,5 +2056,41 @@ mod tests {
         assert!(!config_dir_matches(Some("/definitely/not/here"), &dir));
         assert!(!config_dir_matches(None, &dir));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_cli_accepts_force_flag() {
+        let cli = Cli::try_parse_from(["fog", "kill", "--force"]).unwrap();
+        assert!(cli.force);
+        assert_eq!(cli.script.as_deref(), Some("kill"));
+
+        let cli = Cli::try_parse_from(["fog", "restart", "--all", "--force"]).unwrap();
+        assert!(cli.force && cli.all);
+    }
+
+    #[test]
+    fn test_stop_instance_force_kills_unresponsive_pid() {
+        use std::os::unix::process::CommandExt;
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
+            .arg("sleep 30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0);
+        let mut child = cmd.spawn().expect("spawn sleeper");
+        let pid = child.id();
+        // Reap concurrently: otherwise the killed child lingers as a zombie and
+        // `is_pid_alive` (bare `kill(pid, 0)`) keeps reporting it as alive.
+        let reaper = std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+        // No instance socket exists, so the graceful IPC attempt fails; force
+        // must still terminate the process.
+        let bogus = std::env::temp_dir().join(format!("fog-nonexistent-{pid}.sock"));
+        let stopped = stop_instance(pid, &bogus, true);
+        assert!(stopped, "force stop must terminate the process");
+        reaper.join().expect("reaper thread");
+        assert!(!fog::process::is_pid_alive(pid));
     }
 }
