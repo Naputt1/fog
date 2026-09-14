@@ -125,6 +125,7 @@ fog logs [pid] -s <name>        # print captured output of one service
 | `-d`, `--detach` | Run in background without TUI, captures logs to `$TMPDIR/fog-<pid>.logs/` |
 | `-s`, `--service <NAME>` | With `fog logs`: show one service instead of listing (`daemon` and `proxy` included) |
 | `--save-logs` | Save service output to `temp/<name>.txt` on exit |
+| `-v`, `--verbose` | Print informational setup output (DNS, router, index, ports, native routes); warnings always print |
 | `--completions <SHELL>` | Print bash/zsh/fish completions |
 
 Each instance exposes a Unix socket at `$TMPDIR/fog-<pid>.sock`. `fog ls` and `fog kill` discover it there. Pass a PID when multiple instances run.

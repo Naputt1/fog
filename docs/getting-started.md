@@ -79,6 +79,7 @@ fog logs [pid] --service <name> # Print captured output of one service
 | `--branch <BRANCH>` | Run in the git worktree for this branch (see [Agentic guide](/agentic)) |
 | `-d`, `--detach` | Run the script in the background without the TUI; returns once the instance is serving |
 | `--save-logs` | Save service output to `temp/<name>.txt` on exit |
+| `-v`, `--verbose` | Print informational setup output (DNS, router, index, ports, native routes); warnings always print |
 | `--completions <SHELL>` | Print bash/zsh/fish completions |
 
 ### Managing instances

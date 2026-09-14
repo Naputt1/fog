@@ -196,12 +196,14 @@ fn sanitize_name(s: &str) -> String {
 /// Each `native_routes` entry becomes a router+service that forwards
 /// `Host(<host>)` to `http://host.docker.internal:<port>`. Explicit only:
 /// the caller must have already validated that `port` resolves and `host`
-/// is known. `branch` is used to resolve `${branch}` templates.
+/// is known. `branch` is used to resolve `${branch}` templates. Success
+/// messages are only produced when `verbose` is set; warnings are always.
 pub fn ensure_native_routes(
     routes: &[crate::config::NativeRouteConfig],
     ports: &crate::ports::PortMap,
     branch: Option<&str>,
     cfg: &crate::config::Config,
+    verbose: bool,
 ) -> Vec<String> {
     let mut messages = Vec::new();
     let dynamic_dir = default_dynamic_dir_for_config(cfg);
@@ -280,10 +282,12 @@ pub fn ensure_native_routes(
                 ));
                 continue;
             }
-            messages.push(format!(
-                "  + native route {} -> host.docker.internal:{} for Host({})",
-                r.service, port, host
-            ));
+            if verbose {
+                messages.push(format!(
+                    "native route {} -> host.docker.internal:{} (Host: {})",
+                    r.service, port, host
+                ));
+            }
         }
     }
 
@@ -664,5 +668,64 @@ mod tests {
         let mut c = cfg();
         c.tls.enabled = true;
         let _ = ensure(&c, &["red-fox".to_string()]);
+    }
+
+    fn native_cfg(cert_dir: &std::path::Path) -> crate::config::Config {
+        crate::config::Config {
+            scripts: std::collections::HashMap::new(),
+            ports: None,
+            native_routes: None,
+            max_scrollback: None,
+            sidebar: None,
+            theme: None,
+            dnsmasq: None,
+            router: Some(RouterConfig {
+                tls: crate::config::RouterTlsConfig {
+                    cert_dir: cert_dir.to_string_lossy().into_owned(),
+                    ..Default::default()
+                },
+                ..RouterConfig::default()
+            }),
+            index: None,
+        }
+    }
+
+    fn native_routes() -> Vec<crate::config::NativeRouteConfig> {
+        vec![crate::config::NativeRouteConfig {
+            host: "${branch}.red-fox".to_string(),
+            service: "frontend".to_string(),
+            port: "${ports.frontend}".to_string(),
+            path_prefix: None,
+        }]
+    }
+
+    fn ports() -> crate::ports::PortMap {
+        let mut m = crate::ports::PortMap::new();
+        m.insert("frontend".to_string(), 53123);
+        m
+    }
+
+    #[test]
+    fn test_native_routes_quiet_unless_verbose() {
+        let base = std::env::temp_dir().join(format!("fog-native-quiet-{}", std::process::id()));
+        let cfg = native_cfg(&base);
+        let quiet = ensure_native_routes(&native_routes(), &ports(), Some("main"), &cfg, false);
+        assert!(quiet.is_empty(), "expected no info lines: {quiet:?}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_native_routes_verbose_format() {
+        let base = std::env::temp_dir().join(format!("fog-native-loud-{}", std::process::id()));
+        let cfg = native_cfg(&base);
+        let loud = ensure_native_routes(&native_routes(), &ports(), Some("main"), &cfg, true);
+        assert_eq!(
+            loud,
+            vec![
+                "native route frontend -> host.docker.internal:53123 (Host: main.red-fox)"
+                    .to_string()
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

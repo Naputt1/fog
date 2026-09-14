@@ -98,6 +98,11 @@ struct Cli {
     /// `health_check`, start a fresh instance instead of borrowing/reusing.
     #[arg(long)]
     no_share: bool,
+
+    /// Print verbose setup output (DNS, router, index, port and native-route
+    /// details). Warnings are always printed.
+    #[arg(short, long)]
+    verbose: bool,
 }
 
 /// Resolves the config file to use, honoring `--branch`:
@@ -1133,9 +1138,7 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
     // raw mode, so sudo can prompt on a normal terminal. Best-effort: failures
     // only warn and never block the run.
     if let Some(dnsmasq) = config.dnsmasq.as_ref() {
-        for msg in fog::dnsmasq::ensure(dnsmasq, detached) {
-            eprintln!("{msg}");
-        }
+        fog::log::emit(&fog::dnsmasq::ensure(dnsmasq, detached), cli.verbose);
     }
 
     // Bring up the central reverse-proxy router (Traefik), mirroring the
@@ -1149,17 +1152,13 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
             .as_ref()
             .map(|d| d.domains.clone())
             .unwrap_or_default();
-        for msg in fog::router::ensure(router, &domains) {
-            eprintln!("{msg}");
-        }
+        fog::log::emit(&fog::router::ensure(router, &domains), cli.verbose);
     }
     // Standalone index server (service directory + web UI). Controlled by
     // fog config (`~/.config/fog/fog.json` alongside `theme`, plus per-project
     // `fog.json` top-level `index`). Both default true; either can opt-out.
     if config.effective_should_serve_index() {
-        for msg in fog::index::ensure_for_config(&config) {
-            eprintln!("{msg}");
-        }
+        fog::log::emit(&fog::index::ensure_for_config(&config), cli.verbose);
     }
 
     let config_path = config_path
@@ -1312,14 +1311,14 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
     }
     // Bring up native Traefik routes for allocated ports (explicit only)
     if let Some(routes) = &config.native_routes {
-        for msg in fog::router::ensure_native_routes(
+        let messages = fog::router::ensure_native_routes(
             routes,
             &port_map,
             branch_for_ports.as_deref(),
             &config,
-        ) {
-            eprintln!("{msg}");
-        }
+            cli.verbose,
+        );
+        fog::log::emit(&messages, cli.verbose);
     }
 
     let runtime = fog::runtime::build_with_ports_no_share(
@@ -1344,7 +1343,7 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
         io::Error::new(io::ErrorKind::InvalidData, format!("error: {}", e))
     })?;
     // Log allocated ports for visibility (also useful for `fog logs`)
-    if !port_map.is_empty() {
+    if cli.verbose && !port_map.is_empty() {
         let mut names: Vec<&String> = port_map.keys().collect();
         names.sort();
         for n in names {
@@ -1385,6 +1384,7 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
         config_rel: cli.config.clone(),
         save_logs: cli.save_logs,
         no_share: cli.no_share,
+        verbose: cli.verbose,
     });
     if detached {
         app.run_headless()?;
@@ -1393,9 +1393,7 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
     }
 
     if config.effective_should_serve_index() {
-        for msg in fog::index::ensure_for_config(&config) {
-            eprintln!("{msg}");
-        }
+        fog::log::emit(&fog::index::ensure_for_config(&config), cli.verbose);
     }
 
     ipc::cleanup_socket();
@@ -1594,9 +1592,8 @@ fn main() -> io::Result<()> {
                 std::thread::sleep(std::time::Duration::from_millis(300));
                 let port = cfg.index_port();
                 let network = cfg.index_network();
-                for msg in fog::index::ensure_with_port(port, &network) {
-                    eprintln!("{msg}");
-                }
+                let verbose = argv.iter().any(|a| a == "-v" || a == "--verbose");
+                fog::log::emit(&fog::index::ensure_with_port(port, &network), verbose);
                 if fog::index::is_server_started(port) {
                     println!("index server restarted on :{port}");
                     println!(

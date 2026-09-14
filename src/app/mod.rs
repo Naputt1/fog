@@ -117,6 +117,8 @@ pub struct App {
     /// Whether `--no-share` was passed: when true shared/reuse services are
     /// always started fresh instead of borrowed/handed over.
     no_share: bool,
+    /// Whether `--verbose` was passed: gates informational setup output.
+    verbose: bool,
 }
 
 /// Options for creating an `App` without `clippy::too_many_arguments`.
@@ -135,6 +137,7 @@ pub struct AppCreateOpts {
     pub config_rel: PathBuf,
     pub save_logs: bool,
     pub no_share: bool,
+    pub verbose: bool,
 }
 
 impl App {
@@ -178,6 +181,7 @@ impl App {
             config_rel,
             save_logs,
             no_share: false,
+            verbose: false,
         })
     }
 
@@ -198,6 +202,7 @@ impl App {
             config_rel,
             save_logs,
             no_share,
+            verbose,
         } = opts;
         let (tabs, proxy_tab_index) = Self::build_tabs(
             &items,
@@ -240,6 +245,7 @@ impl App {
             content_layout: Vec::new(),
             switch_popup: None,
             no_share,
+            verbose,
         }
     }
 
@@ -1105,6 +1111,7 @@ impl App {
                 &port_map,
                 branch_for_ports.as_deref(),
                 &config,
+                self.verbose,
             ) {
                 self.errors.push(msg);
             }
@@ -1897,6 +1904,7 @@ mod tests {
             content_layout: Vec::new(),
             switch_popup: None,
             no_share: false,
+            verbose: false,
         }
     }
 

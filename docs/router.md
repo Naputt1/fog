@@ -150,3 +150,5 @@ For non-container services you can declare explicit file-provider routes:
 `${branch}` / `${FOG_BRANCH}` are DNS-safe slugs (`feat/book` → `feat-book`, lowercased, `/` → `-`, `[^a-z0-9-]` → `-`, collapsed, trimmed; `>63` chars errors). Use `${branch_raw}` / `${FOG_BRANCH_RAW}` only for display — never for `Host()`.
 
 Each entry maps a `Host` rule to a service's allocated port via `host.docker.internal`. See [Configuration](/configuration) for the full `native_routes` schema.
+
+Route files are rewritten on every start (ports allocated with `0` are random and the files are removed on shutdown), so the wiring lines (`native route … -> host.docker.internal:…`) are only printed with `fog <script> --verbose` / `-v`. Warnings always print.
