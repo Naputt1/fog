@@ -54,7 +54,25 @@
                           "description": "Compose file used by the `docker` health kind, relative to the service path (default: docker-compose.yml)"
                         },
                         "interval_ms": { "type": "integer", "minimum": 100, "default": 5000 },
-                        "timeout_ms": { "type": "integer", "minimum": 100, "default": 2000 }
+                        "timeout_ms": { "type": "integer", "minimum": 100, "default": 2000 },
+                        "start_interval_ms": {
+                          "type": "integer",
+                          "minimum": 100,
+                          "default": 500,
+                          "description": "Fast check interval used until the first successful check; then interval_ms takes over."
+                        },
+                        "start_period_ms": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "default": 0,
+                          "description": "Grace window after start during which failed checks report 'starting' instead of 'unhealthy'."
+                        },
+                        "retries": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "default": 3,
+                          "description": "Consecutive failed checks before the service is reported unhealthy."
+                        }
                       }
                     },
                     {
@@ -70,7 +88,25 @@
                             "description": "Compose file used by the `docker` health kind, relative to the service path (default: docker-compose.yml)"
                           },
                           "interval_ms": { "type": "integer", "minimum": 100, "default": 5000 },
-                          "timeout_ms": { "type": "integer", "minimum": 100, "default": 2000 }
+                          "timeout_ms": { "type": "integer", "minimum": 100, "default": 2000 },
+                          "start_interval_ms": {
+                            "type": "integer",
+                            "minimum": 100,
+                            "default": 500,
+                            "description": "Fast check interval used until the first successful check; then interval_ms takes over."
+                          },
+                          "start_period_ms": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "default": 0,
+                            "description": "Grace window after start during which failed checks report 'starting' instead of 'unhealthy'."
+                          },
+                          "retries": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "default": 3,
+                            "description": "Consecutive failed checks before the service is reported unhealthy."
+                          }
                         }
                       }
                     }

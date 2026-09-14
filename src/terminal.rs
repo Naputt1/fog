@@ -25,6 +25,61 @@ const INITIAL_COLS: u16 = 256;
 /// How long a reused service may be unhealthy before fog starts it itself.
 const DEFAULT_REUSE_GRACE: Duration = Duration::from_secs(10);
 
+/// Default cadence used until a service's first successful health check.
+const DEFAULT_START_INTERVAL: Duration = Duration::from_millis(500);
+/// Default steady-state cadence, used once the service is healthy.
+const DEFAULT_HEALTH_INTERVAL: Duration = Duration::from_millis(5000);
+/// Default consecutive failures before a service is reported unhealthy.
+const DEFAULT_HEALTH_RETRIES: u32 = 3;
+/// Health check intervals are clamped to at least this (matches the schema).
+const MIN_HEALTH_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Fires a wake-up ping to the app loop whenever any service's health status
+/// changes, so dependents gated by `depends_on` start the moment a dependency
+/// becomes ready instead of waiting for the next poll tick.
+pub struct HealthSignal {
+    subscribers: Mutex<Vec<std::sync::mpsc::Sender<()>>>,
+}
+
+impl HealthSignal {
+    fn new() -> Self {
+        Self {
+            subscribers: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Subscribes to health-change pings. The loop wakes when it receives.
+    pub fn subscribe(&self) -> std::sync::mpsc::Receiver<()> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.subscribers
+            .lock()
+            .expect("health signal mutex poisoned")
+            .push(tx);
+        rx
+    }
+
+    /// Pings every subscriber, pruning any whose receiver has been dropped.
+    pub fn notify(&self) {
+        let mut subs = self
+            .subscribers
+            .lock()
+            .expect("health signal mutex poisoned");
+        subs.retain(|tx| tx.send(()).is_ok());
+    }
+}
+
+/// Process-wide health-change signal shared by every health-check thread and the
+/// app loop. A single orchestrator instance runs at a time, so a shared source
+/// is sufficient and avoids threading an `Arc` through every terminal.
+pub fn health_signal() -> &'static Arc<HealthSignal> {
+    static SIGNAL: std::sync::OnceLock<Arc<HealthSignal>> = std::sync::OnceLock::new();
+    SIGNAL.get_or_init(|| Arc::new(HealthSignal::new()))
+}
+
+fn clamp_interval(ms: u64) -> Duration {
+    Duration::from_millis(ms).max(MIN_HEALTH_INTERVAL)
+}
+
 /// How a terminal was initialized.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Init {
@@ -45,6 +100,9 @@ pub enum HealthStatus {
     /// Service is waiting for dependencies to start.
     Pending,
     Unknown,
+    /// Health checks have not passed yet, but the service is still within its
+    /// startup grace window (`start_period_ms`) or below `retries`.
+    Starting,
     Healthy,
     Unhealthy,
 }
@@ -1509,23 +1567,85 @@ impl Terminal {
         let branch = self.branch.clone();
 
         thread::spawn(move || {
-            let min_interval = configs
+            let start_interval = clamp_interval(
+                configs
+                    .iter()
+                    .filter_map(|c| c.start_interval_ms)
+                    .min()
+                    .unwrap_or(DEFAULT_START_INTERVAL.as_millis() as u64),
+            );
+            let interval = clamp_interval(
+                configs
+                    .iter()
+                    .filter_map(|c| c.interval_ms)
+                    .min()
+                    .unwrap_or(DEFAULT_HEALTH_INTERVAL.as_millis() as u64),
+            );
+            let start_period = Duration::from_millis(
+                configs
+                    .iter()
+                    .filter_map(|c| c.start_period_ms)
+                    .max()
+                    .unwrap_or(0),
+            );
+            let retries = configs
                 .iter()
-                .map(|c| c.interval_ms.unwrap_or(5000))
-                .min()
-                .unwrap_or(5000);
+                .map(|c| c.retries.unwrap_or(DEFAULT_HEALTH_RETRIES))
+                .max()
+                .unwrap_or(DEFAULT_HEALTH_RETRIES)
+                .max(1);
+
+            let started = Instant::now();
+            let mut failures: u32 = 0;
+            let mut ever_healthy = false;
+            let mut last = HealthStatus::Unknown;
+
             loop {
-                thread::sleep(std::time::Duration::from_millis(min_interval));
                 if stop.load(Ordering::SeqCst) {
                     return;
                 }
-                let all_healthy = health_checks_pass(&configs, branch.as_deref());
-                let mut s = status.lock().expect("health status mutex poisoned");
-                *s = if all_healthy {
+                let pass = health_checks_pass(&configs, branch.as_deref());
+                let next = if pass {
+                    failures = 0;
+                    ever_healthy = true;
                     HealthStatus::Healthy
                 } else {
-                    HealthStatus::Unhealthy
+                    failures = failures.saturating_add(1);
+                    if !ever_healthy && started.elapsed() < start_period {
+                        HealthStatus::Starting
+                    } else if failures < retries {
+                        // Not enough consecutive failures yet: hold the previous
+                        // reading so a single blip does not flap the indicator.
+                        if last == HealthStatus::Healthy {
+                            HealthStatus::Healthy
+                        } else {
+                            HealthStatus::Starting
+                        }
+                    } else {
+                        HealthStatus::Unhealthy
+                    }
                 };
+
+                if next != last {
+                    *status.lock().expect("health status mutex poisoned") = next;
+                    last = next;
+                    health_signal().notify();
+                }
+
+                let sleep_for = if ever_healthy {
+                    interval
+                } else {
+                    start_interval
+                };
+                // Sleep in short slices so shutdown stays responsive.
+                let deadline = Instant::now() + sleep_for;
+                while Instant::now() < deadline {
+                    if stop.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    thread::sleep(remaining.min(Duration::from_millis(50)));
+                }
             }
         });
     }
@@ -1565,7 +1685,10 @@ impl Terminal {
             self.stopped = !up;
             return;
         }
-        if *self.health_status.lock().expect("mutex poisoned") == HealthStatus::Pending {
+        if matches!(
+            *self.health_status.lock().expect("mutex poisoned"),
+            HealthStatus::Pending | HealthStatus::Starting
+        ) {
             return;
         }
         if let Some(ref handler) = self.handler
@@ -1825,6 +1948,9 @@ mod tests {
             compose_file: None,
             interval_ms: Some(50),
             timeout_ms: Some(50),
+            start_interval_ms: None,
+            start_period_ms: None,
+            retries: None,
         });
         t.reuse_grace = Duration::ZERO;
         t.start_health_checks();
@@ -1851,6 +1977,9 @@ mod tests {
             compose_file: None,
             interval_ms: None,
             timeout_ms: Some(100),
+            start_interval_ms: None,
+            start_period_ms: None,
+            retries: None,
         }];
         assert!(!health_checks_pass(&closed, None));
 
@@ -1863,6 +1992,9 @@ mod tests {
             compose_file: None,
             interval_ms: None,
             timeout_ms: Some(200),
+            start_interval_ms: None,
+            start_period_ms: None,
+            retries: None,
         }];
         assert!(health_checks_pass(&open, None));
 
@@ -1874,6 +2006,9 @@ mod tests {
                 compose_file: None,
                 interval_ms: None,
                 timeout_ms: Some(200),
+                start_interval_ms: None,
+                start_period_ms: None,
+                retries: None,
             },
             HealthCheckConfig {
                 kind: crate::config::HealthCheckKind::Tcp,
@@ -1881,9 +2016,112 @@ mod tests {
                 compose_file: None,
                 interval_ms: None,
                 timeout_ms: Some(100),
+                start_interval_ms: None,
+                start_period_ms: None,
+                retries: None,
             },
         ];
         assert!(!health_checks_pass(&mixed, None));
+    }
+
+    /// Polls a terminal's health status until it matches `want` or times out.
+    fn wait_for_health(t: &Terminal, want: HealthStatus, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if t.get_health_status() == want {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        t.get_health_status() == want
+    }
+
+    fn tcp_check(target: String) -> HealthCheckConfig {
+        HealthCheckConfig {
+            kind: crate::config::HealthCheckKind::Tcp,
+            target,
+            compose_file: None,
+            interval_ms: None,
+            timeout_ms: Some(200),
+            start_interval_ms: None,
+            start_period_ms: None,
+            retries: None,
+        }
+    }
+
+    #[test]
+    fn test_health_probe_is_immediate_not_interval_delayed() {
+        // A reachable service must be marked Healthy by the immediate startup
+        // probe, not after the (long) start interval elapses.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut t = Terminal::spawn_reused("svc".into(), ".".into(), "true".into(), 100);
+        let mut check = tcp_check(addr.to_string());
+        check.start_interval_ms = Some(5000);
+        check.interval_ms = Some(5000);
+        t.health_checks.push(check);
+        t.start_health_checks();
+        assert!(
+            wait_for_health(&t, HealthStatus::Healthy, Duration::from_millis(2000)),
+            "immediate probe should mark the service healthy without waiting the interval"
+        );
+    }
+
+    #[test]
+    fn test_health_retries_starting_then_unhealthy() {
+        let mut t = Terminal::spawn_reused("svc".into(), ".".into(), "true".into(), 100);
+        let mut check = tcp_check("127.0.0.1:1".into());
+        check.start_interval_ms = Some(20);
+        check.retries = Some(3);
+        t.health_checks.push(check);
+        t.start_health_checks();
+        assert!(
+            wait_for_health(&t, HealthStatus::Starting, Duration::from_millis(1000)),
+            "below the retries threshold the service reports Starting"
+        );
+        assert!(!t.is_ready(), "Starting is not ready");
+        assert!(
+            wait_for_health(&t, HealthStatus::Unhealthy, Duration::from_millis(1000)),
+            "after `retries` consecutive failures the service reports Unhealthy"
+        );
+    }
+
+    #[test]
+    fn test_health_start_period_holds_starting() {
+        let mut t = Terminal::spawn_reused("svc".into(), ".".into(), "true".into(), 100);
+        let mut check = tcp_check("127.0.0.1:1".into());
+        check.start_interval_ms = Some(20);
+        check.start_period_ms = Some(10_000);
+        check.retries = Some(1);
+        t.health_checks.push(check);
+        t.start_health_checks();
+        assert!(wait_for_health(
+            &t,
+            HealthStatus::Starting,
+            Duration::from_millis(1000)
+        ));
+        // Inside the grace window, failures never flip the status to Unhealthy.
+        thread::sleep(Duration::from_millis(200));
+        assert_eq!(t.get_health_status(), HealthStatus::Starting);
+    }
+
+    #[test]
+    fn test_health_interval_is_clamped_to_minimum() {
+        assert_eq!(clamp_interval(1), MIN_HEALTH_INTERVAL);
+        assert_eq!(clamp_interval(100), MIN_HEALTH_INTERVAL);
+        assert_eq!(clamp_interval(5000), Duration::from_millis(5000));
+    }
+
+    #[test]
+    fn test_health_signal_pings_subscribers() {
+        let signal = Arc::new(HealthSignal::new());
+        let rx = signal.subscribe();
+        assert!(rx.try_recv().is_err(), "no ping before notify");
+        signal.notify();
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_ok(),
+            "subscriber should be woken by notify"
+        );
     }
 
     #[test]
@@ -1971,6 +2209,9 @@ mod tests {
             compose_file: Some("compose.yml".into()),
             interval_ms: None,
             timeout_ms: Some(2000),
+            start_interval_ms: None,
+            start_period_ms: None,
+            retries: None,
         };
         assert!(
             check_docker_target(&config, Some("ui")),
@@ -2024,6 +2265,9 @@ mod tests {
             compose_file: Some("compose.yml".into()),
             interval_ms: None,
             timeout_ms: Some(2000),
+            start_interval_ms: None,
+            start_period_ms: None,
+            retries: None,
         };
         assert!(
             check_docker_target(&config, Some("feat/barber")),
@@ -2067,6 +2311,9 @@ mod tests {
             compose_file: None,
             interval_ms: None,
             timeout_ms: Some(200),
+            start_interval_ms: None,
+            start_period_ms: None,
+            retries: None,
         });
         t.probe_health();
         assert_eq!(t.get_health_status(), HealthStatus::Healthy);
@@ -2078,6 +2325,9 @@ mod tests {
             compose_file: None,
             interval_ms: None,
             timeout_ms: Some(100),
+            start_interval_ms: None,
+            start_period_ms: None,
+            retries: None,
         });
         t.probe_health();
         assert_eq!(t.get_health_status(), HealthStatus::Unhealthy);

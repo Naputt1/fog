@@ -23,6 +23,17 @@ pub struct HealthCheckConfig {
     pub compose_file: Option<String>,
     pub interval_ms: Option<u64>,
     pub timeout_ms: Option<u64>,
+    /// Fast cadence used until the first successful check (default 500ms).
+    /// Once healthy, the steady `interval_ms` takes over. Mirrors Docker
+    /// Compose's `start_interval`.
+    pub start_interval_ms: Option<u64>,
+    /// Grace window after the service starts during which failed checks report
+    /// `starting` rather than `unhealthy` (default 0, disabled). Mirrors
+    /// Docker Compose's `start_period`.
+    pub start_period_ms: Option<u64>,
+    /// Consecutive failed checks before the service is reported `unhealthy`
+    /// (default 3). Damps flapping during slow starts.
+    pub retries: Option<u32>,
 }
 #[derive(Debug, Deserialize, Clone)]
 pub struct ThemeConfig {

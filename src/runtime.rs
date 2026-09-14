@@ -865,6 +865,9 @@ mod tests {
             compose_file: None,
             interval_ms: None,
             timeout_ms: Some(100),
+            start_interval_ms: None,
+            start_period_ms: None,
+            retries: None,
         })
     }
 
@@ -1114,6 +1117,9 @@ mod tests {
             compose_file: Some("docker-compose.yml".into()),
             interval_ms: None,
             timeout_ms: None,
+            start_interval_ms: None,
+            start_period_ms: None,
+            retries: None,
         }];
         let resolved = resolve_docker_compose_paths(checks, Path::new("/repo/app/infra"));
         assert_eq!(
@@ -1130,6 +1136,9 @@ mod tests {
             compose_file: None,
             interval_ms: None,
             timeout_ms: None,
+            start_interval_ms: None,
+            start_period_ms: None,
+            retries: None,
         }];
         let resolved = resolve_docker_compose_paths(checks, Path::new("/repo/app/infra"));
         assert_eq!(resolved[0].compose_file, None);
@@ -1143,6 +1152,9 @@ mod tests {
             compose_file: None,
             interval_ms: None,
             timeout_ms: None,
+            start_interval_ms: None,
+            start_period_ms: None,
+            retries: None,
         }];
         let resolved = resolve_docker_compose_paths(checks, Path::new("/repo/app/infra"));
         assert_eq!(resolved[0].compose_file, None);

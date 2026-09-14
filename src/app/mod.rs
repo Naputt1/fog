@@ -41,6 +41,16 @@ enum Mode {
     ProxyFilter,
 }
 
+/// Events delivered to the TUI loop by the input-reader and health-forwarder
+/// threads. Fusing them onto one channel lets the loop wake instantly on either
+/// input or a service health change.
+enum AppEvent {
+    /// A crossterm input event.
+    Input(Event),
+    /// A service health status changed; re-check pending dependents.
+    Health,
+}
+
 /// A service waiting for its dependencies to become ready.
 pub struct PendingService {
     /// Display name of the service.
@@ -291,6 +301,31 @@ impl App {
     }
 
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
+        let health_rx = crate::terminal::health_signal().subscribe();
+        let (event_tx, event_rx) = std::sync::mpsc::channel::<AppEvent>();
+
+        // crossterm's event reader is not thread-safe: exactly one thread may
+        // read from it. This reader owns the terminal input for the whole run.
+        let input_tx = event_tx.clone();
+        thread::spawn(move || {
+            while let Ok(ev) = event::read() {
+                if input_tx.send(AppEvent::Input(ev)).is_err() {
+                    break;
+                }
+            }
+        });
+        // Bridge health pings onto the same channel so the loop wakes the moment
+        // a dependency becomes ready instead of waiting out the poll timeout.
+        let health_tx = event_tx.clone();
+        thread::spawn(move || {
+            while health_rx.recv().is_ok() {
+                if health_tx.send(AppEvent::Health).is_err() {
+                    break;
+                }
+            }
+        });
+        drop(event_tx);
+
         while !self.exit {
             if self.config_rx.try_recv().is_ok() {
                 self.reload_config();
@@ -308,17 +343,19 @@ impl App {
                 }
             }
             terminal.draw(|frame| self.draw(frame))?;
-            if event::poll(Duration::from_millis(50))? {
-                self.handle_events()?;
+            match event_rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(AppEvent::Input(ev)) => self.handle_event(ev)?,
+                Ok(AppEvent::Health) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+            // Drain any queued input without blocking so bursts stay responsive.
+            while let Ok(AppEvent::Input(ev)) = event_rx.try_recv() {
+                self.handle_event(ev)?;
             }
             self.handle_auto_scroll();
         }
         self.clear_reuse_skip_shutdown_cmds();
         let _ = execute!(std::io::stdout(), DisableMouseCapture);
-        let _ = event::poll(Duration::from_millis(20));
-        while event::poll(Duration::from_millis(0)).unwrap_or(false) {
-            let _ = event::read();
-        }
         if !self.errors.is_empty() {
             for err in &self.errors {
                 let _ = writeln!(std::io::stderr(), "{}", err);
@@ -380,6 +417,7 @@ impl App {
     /// IPC socket, so `fog ls` / `fog kill` / `fog logs` behave exactly as
     /// with the TUI, but nothing is drawn and the loop never blocks on input.
     pub fn run_headless(&mut self) -> io::Result<()> {
+        let health_rx = crate::terminal::health_signal().subscribe();
         while !self.exit {
             if (self.sigint.load(Ordering::SeqCst)
                 || self.ipc_state.kill_flag.load(Ordering::SeqCst))
@@ -398,7 +436,9 @@ impl App {
                 item.refresh_status();
             }
             self.update_shared_state();
-            thread::sleep(Duration::from_millis(50));
+            // Wake immediately when a dependency becomes ready; the timeout
+            // still services signals, IPC and config changes.
+            let _ = health_rx.recv_timeout(Duration::from_millis(50));
         }
         self.clear_reuse_skip_shutdown_cmds();
         if !self.errors.is_empty() {
@@ -425,8 +465,8 @@ impl App {
         }
     }
 
-    fn handle_events(&mut self) -> io::Result<()> {
-        match event::read()? {
+    fn handle_event(&mut self, ev: Event) -> io::Result<()> {
+        match ev {
             Event::Key(key) if key.kind == KeyEventKind::Press => self.handle_key(key),
             Event::Mouse(mouse) => match mouse.kind {
                 MouseEventKind::Down(MouseButton::Left) => {

@@ -203,8 +203,15 @@ Once configured, a background thread periodically checks the service health and 
 | `kind` | **Yes** | `string` | — | `"tcp"`, `"http"`, or `"docker"` |
 | `target` | **Yes** | `string` | — | Address to check (e.g. `"localhost:8080"`), or the compose service name for `"docker"` |
 | `compose_file` | No | `string` | `"docker-compose.yml"` | Compose file used by the `"docker"` kind, relative to the service `path` |
-| `interval_ms` | No | `integer` | `5000` | Check interval in milliseconds (min: 100) |
+| `interval_ms` | No | `integer` | `5000` | Steady-state check interval in milliseconds, used once the service is healthy (min: 100) |
 | `timeout_ms` | No | `integer` | `2000` | Connection/subprocess timeout in milliseconds (min: 100) |
+| `start_interval_ms` | No | `integer` | `500` | Fast check interval in milliseconds until the first successful check, then `interval_ms` takes over (min: 100) |
+| `start_period_ms` | No | `integer` | `0` | Grace window after the service starts during which failed checks report `starting` instead of `unhealthy` |
+| `retries` | No | `integer` | `3` | Consecutive failed checks before the service is reported `unhealthy` (min: 1) |
+
+A service with no configured health check is considered ready as soon as its process is running; a service **with** a health check gates its dependents (`depends_on`) until the check passes.
+
+Health checking is **adaptive**: fog probes once immediately, then polls every `start_interval_ms` while the service is starting, and switches to the slower `interval_ms` once it is healthy. This mirrors Docker Compose's `start_interval`/`start_period` and keeps `depends_on` startup fast without hammering a healthy service. Failed checks are damped by `retries`, and failures inside `start_period_ms` show as `starting` rather than `unhealthy`.
 
 Both `"tcp"` and `"http"` health checks currently probe via a TCP connection to the target address (the `target` may be prefixed with `tcp://`, `http://`, or `https://` — the prefix is stripped before connecting). `http` is reserved for a future HTTP-status check; today it behaves like `tcp`.
 

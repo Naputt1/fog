@@ -207,6 +207,8 @@ impl ClickTab {
                     Span::styled("○", Style::default().fg(theme.stopped))
                 } else if e.health_status == HealthStatus::Unhealthy {
                     Span::styled("●", Style::default().fg(Color::Red).bold())
+                } else if e.health_status == HealthStatus::Starting {
+                    Span::styled("●", Style::default().fg(Color::Yellow))
                 } else if e.process_running {
                     Span::styled("●", Style::default().fg(Color::Green))
                 } else {

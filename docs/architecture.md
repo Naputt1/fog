@@ -28,11 +28,12 @@ flowchart TB
 <summary>ASCII fallback (for offline view)</summary>
 
 ```
-Main Thread (TUI): App::run() → draw() every 50ms / handle_events()
+Main Thread (TUI): App::run() → draw() every 50ms / event+health channel
 Proxy Thread:      ProxyInstance::start() → tokio::runtime::block_on()
 Config Watcher:    spawn_config_watcher() → notify::Watcher
 Per Terminal:      spawn_reader() → loop { reader.read() → vt100::Parser }
-Per HealthCheck:   Terminal::start_health_checks() → loop { TcpStream::connect }
+Per HealthCheck:   Terminal::start_health_checks() → probe now, then start_interval_ms → interval_ms
+Input / Health:    dedicated crossterm reader + HealthSignal forwarder → AppEvent channel
 ```
 
 </details>
@@ -42,7 +43,7 @@ Per HealthCheck:   Terminal::start_health_checks() → loop { TcpStream::connect
 - **Main ↔ Proxy**: `Arc<AtomicBool>` flags for running/shutdown control, `Arc<Mutex<VecDeque<LogEntry>>>` for request log sharing
 - **Main ↔ Config watcher**: `std::sync::mpsc::Receiver<()>` — receives a signal when the config file changes
 - **Main ↔ PTY reader**: `Arc<Mutex<vt100::Parser>>` and `Arc<AtomicUsize>` generation counter — the main thread reads styled output, the reader thread writes raw data
-- **Main ↔ Health check**: `Arc<Mutex<HealthStatus>>` — health check thread writes status, main thread reads it during rendering
+- **Main ↔ Health check**: `Arc<Mutex<HealthStatus>>` — health check thread writes status, main thread reads it during rendering. Status changes also ping a process-wide `HealthSignal` that wakes the app loop immediately, so `depends_on` dependents start without waiting for the next poll tick.
 
 ## Component architecture
 
