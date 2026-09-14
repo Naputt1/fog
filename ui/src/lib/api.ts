@@ -325,6 +325,30 @@ export interface LogLine {
   [key: string]: unknown;
 }
 
+/**
+ * Normalizes one raw SSE `data:` payload into a {@link LogLine}.
+ *
+ * The fog server always sends raw log text, but a line may itself be JSON
+ * (e.g. Go's `slog` JSON handler starts every line with `{`). Only treat the
+ * payload as a structured envelope when it parses to an object carrying a
+ * string `text` field; anything else — including JSON log lines — is kept as
+ * raw text so it is displayed rather than dropped.
+ */
+export function parseLogLine(data: string): LogLine {
+  const raw = data ?? "";
+  if (raw.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(raw) as { text?: unknown };
+      if (parsed && typeof parsed.text === "string") {
+        return parsed as LogLine;
+      }
+    } catch {
+      // Not JSON after all: fall through and keep the raw text.
+    }
+  }
+  return { text: raw };
+}
+
 export interface LogStreamOptions {
   onLine: (line: LogLine, raw: MessageEvent) => void;
   onOpen?: () => void;
@@ -357,15 +381,7 @@ export function subscribeLogs(
   const es = new EventSource(`/logs/stream?${params.toString()}`);
 
   es.addEventListener("message", (ev: MessageEvent) => {
-    let line: LogLine = { text: ev.data ?? "" };
-    if (ev.data && ev.data.startsWith("{")) {
-      try {
-        line = JSON.parse(ev.data) as LogLine;
-      } catch {
-        line = { text: ev.data };
-      }
-    }
-    onLine(line, ev);
+    onLine(parseLogLine(ev.data ?? ""), ev);
   });
   if (onOpen) es.onopen = onOpen;
   if (onError) es.onerror = onError;
