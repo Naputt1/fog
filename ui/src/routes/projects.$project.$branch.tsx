@@ -265,6 +265,7 @@ function BranchServicesPage() {
                   }}
                   mode={mode}
                   onModeChange={setMode}
+                  showModeToggle={selected.pid != null}
                 />
               </div>
             </>

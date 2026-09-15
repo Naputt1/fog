@@ -40,11 +40,13 @@ export function ServiceTerminal({
   active,
   mode,
   onModeChange,
+  showModeToggle = true,
   className,
 }: {
   active: TerminalTarget | null;
   mode: TerminalMode;
   onModeChange: (mode: TerminalMode) => void;
+  showModeToggle?: boolean;
   className?: string;
 }) {
   const termApiRef = useRef<TerminalHandle | null>(null);
@@ -83,38 +85,40 @@ export function ServiceTerminal({
         className
       )}
     >
-      <div className="flex shrink-0 flex-wrap items-center gap-2">
-        <div className="inline-flex rounded-md border p-1">
-          <Button
-            variant={showTerminal ? "ghost" : "default"}
-            size="sm"
-            className="h-7 font-mono text-xs"
-            onClick={() => onModeChange("logs")}
-          >
-            Logs (SSE)
-          </Button>
-          <Button
-            variant={showTerminal ? "default" : "ghost"}
-            size="sm"
-            className={cn("h-7 font-mono text-xs", isDocker && "opacity-50")}
-            onClick={() => onModeChange("terminal")}
-            disabled={isDocker}
-            title={
-              isDocker
-                ? "PTY not available for docker containers"
-                : "Interactive PTY shell (bidirectional) via WebSocket"
-            }
-          >
-            Terminal (PTY)
-          </Button>
+      {showModeToggle ? (
+        <div className="flex shrink-0 flex-wrap items-center gap-2">
+          <div className="inline-flex rounded-md border p-1">
+            <Button
+              variant={showTerminal ? "ghost" : "default"}
+              size="sm"
+              className="h-7 font-mono text-xs"
+              onClick={() => onModeChange("logs")}
+            >
+              Logs (SSE)
+            </Button>
+            <Button
+              variant={showTerminal ? "default" : "ghost"}
+              size="sm"
+              className={cn("h-7 font-mono text-xs", isDocker && "opacity-50")}
+              onClick={() => onModeChange("terminal")}
+              disabled={isDocker}
+              title={
+                isDocker
+                  ? "PTY not available for docker containers"
+                  : "Interactive PTY shell (bidirectional) via WebSocket"
+              }
+            >
+              Terminal (PTY)
+            </Button>
+          </div>
+          <span className="text-muted-foreground font-mono text-xs">
+            {showTerminal
+              ? `interactive shell${active ? ` — ${active.service} workdir` : " — ephemeral"}`
+              : "read-only stream from docker/fog"}
+          </span>
         </div>
-        <span className="text-muted-foreground font-mono text-xs">
-          {showTerminal
-            ? `interactive shell${active ? ` — ${active.service} workdir` : " — ephemeral"}`
-            : "read-only stream from docker/fog"}
-        </span>
-      </div>
-      {isDocker ? (
+      ) : null}
+      {isDocker && showModeToggle ? (
         <div className="text-muted-foreground flex shrink-0 items-center gap-2 font-mono text-xs">
           <span className="rounded-full bg-amber-500/20 px-2 py-0.5 text-amber-600">
             docker logs — read-only
