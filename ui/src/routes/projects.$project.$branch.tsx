@@ -41,7 +41,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { cn } from "@/lib/utils";
+import { cn, toDisplayEndpointUrl } from "@/lib/utils";
 
 export const Route = createFileRoute("/projects/$project/$branch")({
   validateSearch: (
@@ -124,29 +124,33 @@ function EndpointList({ svc }: { svc: InstanceServiceView }) {
   if (endpoints.length === 0) return null;
   return (
     <ul className="space-y-1.5">
-      {endpoints.map((endpoint) => (
-        <li
-          key={endpoint.name}
-          className="flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-xs"
-        >
-          <span className="text-muted-foreground">↳</span>
-          <span className="text-foreground">{endpoint.name}</span>
-          <StatusBadge status={endpoint.health} />
-          {endpoint.url ? (
-            <a
-              href={endpoint.url}
-              target="_blank"
-              rel="noreferrer"
-              onClick={(e) => e.stopPropagation()}
-              className="text-primary min-w-0 truncate underline-offset-4 hover:underline"
-            >
-              {endpoint.url}
-            </a>
-          ) : endpoint.port ? (
-            <span className="text-muted-foreground">:{endpoint.port}</span>
-          ) : null}
-        </li>
-      ))}
+      {endpoints.map((endpoint) => {
+        const displayUrl = toDisplayEndpointUrl(endpoint.url, endpoint.port);
+        return (
+          <li
+            key={endpoint.name}
+            className="flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-xs"
+          >
+            <span className="text-muted-foreground">↳</span>
+            <span className="text-foreground">{endpoint.name}</span>
+            <StatusBadge status={endpoint.health} />
+            {displayUrl ? (
+              <a
+                href={displayUrl}
+                target="_blank"
+                rel="noreferrer"
+                title={displayUrl}
+                onClick={(e) => e.stopPropagation()}
+                className="text-primary min-w-0 truncate underline-offset-4 hover:underline"
+              >
+                {displayUrl}
+              </a>
+            ) : endpoint.port ? (
+              <span className="text-muted-foreground">:{endpoint.port}</span>
+            ) : null}
+          </li>
+        );
+      })}
     </ul>
   );
 }

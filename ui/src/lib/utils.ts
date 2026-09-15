@@ -60,6 +60,48 @@ function extractHostPort(ports: string[]): string | null {
 }
 
 /**
+ * Extract the host-published port from a declared endpoint's `port` field.
+ * Handles a bare port ("53123"), a comma-joined list ("53123, 53124"), and
+ * docker/native mapping entries ("0.0.0.0:53123->80/tcp") inherited from a
+ * docker-discovered sibling. Returns null when no numeric port is found.
+ */
+function extractEndpointPort(port: string): string | null {
+  if (!port) return null;
+  const mapped = extractHostPort(port.split(",").map((p) => p.trim()));
+  if (mapped) return mapped;
+  const bare = port.match(/(\d{1,5})/);
+  return bare ? bare[1] : null;
+}
+
+/**
+ * Rewrite a declared endpoint (sub-service) URL to be host-reliant.
+ * - localhost → return `url` unchanged (DNS), or `http://localhost:<port>`
+ *   when the endpoint declares no host (display + health only).
+ * - any other host → `http://<request-host>:<published-port>/` so remote peers
+ *   reach the endpoint without resolving the DNS name.
+ * - no usable port → return `url` unchanged.
+ */
+export function toDisplayEndpointUrl(url: string, port: string): string {
+  if (typeof window === "undefined") return url;
+  const reqHost = window.location.hostname;
+  const hostPort = extractEndpointPort(port);
+  if (!reqHost || isLocalHost(reqHost)) {
+    return (
+      url || (hostPort ? `http://${reqHost || "localhost"}:${hostPort}` : url)
+    );
+  }
+  if (!hostPort) return url;
+  if (!url) return `http://${reqHost}:${hostPort}`;
+  try {
+    const u = new URL(url);
+    if (u.hostname === reqHost) return url;
+    return `http://${reqHost}:${hostPort}${u.pathname}${u.search}${u.hash}`;
+  } catch {
+    return `http://${reqHost}:${hostPort}`;
+  }
+}
+
+/**
  * Rewrite a service URL to be host-reliant.
  * - localhost → return `url` unchanged (DNS)
  * - other host + URL has explicit port → replace hostname, keep port (raw-TCP)
