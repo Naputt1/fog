@@ -1,28 +1,14 @@
-import { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 
 import { useServices } from "@/lib/hooks";
 import { groupServices } from "@/lib/services";
-import { Button } from "@/components/ui/button";
-import { LoadingState } from "@/components/page-state";
-// xterm (~300K+) is the heaviest dependency of the dashboard. Both views that
-// use it are split into on-demand chunks so the entry bundle (index, status,
-// health pages) stays lean; the chunk loads when /logs renders, behind a
-// skeleton. `ref` passes straight through the lazy wrapper (React 19
-// ref-as-prop; both views declare it in their props).
-const TerminalView = lazy(() =>
-  import("@/components/terminal/TerminalView").then((m) => ({
-    default: m.TerminalView,
-  }))
-);
-const LogView = lazy(() =>
-  import("@/components/terminal/LogView").then((m) => ({ default: m.LogView }))
-);
-import { TerminalKeypad } from "@/components/terminal/TerminalKeypad";
+import {
+  ServiceTerminal,
+  type TerminalMode,
+} from "@/components/terminal/ServiceTerminal";
 import { ServiceSidebar } from "@/components/terminal/ServiceSidebar";
-import type { TerminalHandle } from "@/components/terminal/terminal-handle";
 import { useSwipeNavigation } from "@/lib/use-swipe-navigation";
-import { cn } from "@/lib/utils";
 
 export const Route = createFileRoute("/logs")({
   validateSearch: (search: Record<string, unknown>) => ({
@@ -30,7 +16,7 @@ export const Route = createFileRoute("/logs")({
     service: typeof search.service === "string" ? search.service : undefined,
     view:
       search.view === "terminal" || search.view === "logs"
-        ? (search.view as "terminal" | "logs")
+        ? (search.view as TerminalMode)
         : undefined,
   }),
   component: LogsPage,
@@ -43,9 +29,7 @@ export const Route = createFileRoute("/logs")({
 const LS_KEY = "fog:terminal:last";
 const LS_MODE_KEY = "fog:logs:mode";
 
-type ViewMode = "logs" | "terminal";
-
-function readMode(): ViewMode {
+function readMode(): TerminalMode {
   if (typeof window === "undefined") return "logs";
   try {
     return window.localStorage.getItem(LS_MODE_KEY) === "terminal"
@@ -56,7 +40,7 @@ function readMode(): ViewMode {
   }
 }
 
-function writeMode(mode: ViewMode) {
+function writeMode(mode: TerminalMode) {
   if (typeof window === "undefined") return;
   try {
     window.localStorage.setItem(LS_MODE_KEY, mode);
@@ -92,33 +76,12 @@ function writeStored(project: string, service: string) {
 function LogsPage() {
   const navigate = useNavigate();
   const search = Route.useSearch();
-  const termApiRef = useRef<TerminalHandle | null>(null);
   // Logs picker needs non-Traefik services too (e.g. postgres) so opt-in
   const {
     data: services,
     isLoading,
     isError,
   } = useServices({ withInternal: true });
-  const [live, setLive] = useState(true);
-  const handleCopy = () => {
-    const text = termApiRef.current?.copyText() ?? "";
-    if (!text) return;
-    if (navigator.clipboard?.writeText) {
-      return navigator.clipboard.writeText(text);
-    }
-    // Fallback for contexts without the async clipboard API.
-    const ta = document.createElement("textarea");
-    ta.value = text;
-    ta.style.position = "fixed";
-    ta.style.opacity = "0";
-    document.body.appendChild(ta);
-    ta.select();
-    try {
-      document.execCommand("copy");
-    } finally {
-      document.body.removeChild(ta);
-    }
-  };
 
   const groups = useMemo(() => groupServices(services ?? []), [services]);
   const projectNames = useMemo(() => groups.map((g) => g.project), [groups]);
@@ -142,9 +105,7 @@ function LogsPage() {
   // All services in the effective project (flattened)
   const projectServices = useMemo(() => {
     if (!filteredGroups.length) return [];
-    return filteredGroups.flatMap((g) =>
-      g.worktrees.flatMap((w) => w.services)
-    );
+    return filteredGroups.flatMap((g) => g.worktrees.flatMap((w) => w.services));
   }, [filteredGroups]);
 
   const active = useMemo(() => {
@@ -238,14 +199,9 @@ function LogsPage() {
     });
   };
 
-  // Logs (SSE) is the default: fast on slow networks, read-only. PTY is
-  // opt-in via the toggle (and unavailable for docker containers, which have
-  // no fog PTY — they always use `docker logs`).
-  const viewMode: ViewMode = search.view ?? readMode();
-  const isDocker = active?.pid == null;
-  const showTerminal = viewMode === "terminal" && !isDocker;
+  const viewMode: TerminalMode = search.view ?? readMode();
 
-  const handleViewMode = (mode: ViewMode) => {
+  const handleViewMode = (mode: TerminalMode) => {
     writeMode(mode);
     void navigate({
       to: "/logs",
@@ -284,95 +240,10 @@ function LogsPage() {
         data-swipe-scope="services"
         className="flex min-h-0 min-w-0 flex-1 flex-col gap-3"
       >
-        <div className="flex shrink-0 flex-wrap items-center gap-2">
-          <div className="inline-flex rounded-md border p-1">
-            <Button
-              variant={showTerminal ? "ghost" : "default"}
-              size="sm"
-              className="h-7 font-mono text-xs"
-              onClick={() => handleViewMode("logs")}
-            >
-              Logs (SSE)
-            </Button>
-            <Button
-              variant={showTerminal ? "default" : "ghost"}
-              size="sm"
-              className={cn("h-7 font-mono text-xs", isDocker && "opacity-50")}
-              onClick={() => handleViewMode("terminal")}
-              disabled={isDocker}
-              title={
-                isDocker
-                  ? "PTY not available for docker containers"
-                  : "Interactive PTY shell (bidirectional) via WebSocket"
-              }
-            >
-              Terminal (PTY)
-            </Button>
-          </div>
-          <span className="text-muted-foreground font-mono text-xs">
-            {showTerminal
-              ? `interactive shell${active ? ` — ${active.service} workdir` : " — ephemeral"}`
-              : "read-only stream from docker/fog"}
-          </span>
-        </div>
-        {isDocker ? (
-          <div className="text-muted-foreground flex shrink-0 items-center gap-2 font-mono text-xs">
-            <span className="rounded-full bg-amber-500/20 px-2 py-0.5 text-amber-600">
-              docker logs — read-only
-            </span>
-            <span>
-              PTY not available for container — streaming `docker logs`
-            </span>
-          </div>
-        ) : (
-          showTerminal && (
-            <label className="flex shrink-0 items-center gap-2 text-sm">
-              <input
-                type="checkbox"
-                checked={live}
-                onChange={(e) => setLive(e.target.checked)}
-                disabled={!active}
-                className="rounded"
-              />
-              <span className={active ? "" : "text-muted-foreground"}>
-                Live — same PTY as TUI (mirror service, bidirectional).
-                Unchecked = fresh shell in service workdir.
-              </span>
-            </label>
-          )
-        )}
-        {showTerminal ? (
-          <Suspense fallback={<LoadingState label="Loading terminal…" />}>
-            <TerminalView
-              key={`${active?.service ?? "__shell__"}:${live ? "live" : "cwd"}`}
-              ref={termApiRef}
-              service={active?.service}
-              live={live && !!active}
-              className="flex min-h-[320px] flex-1 lg:min-h-0"
-            />
-          </Suspense>
-        ) : (
-          <Suspense fallback={<LoadingState label="Loading logs…" />}>
-            <LogView
-              key={`${active?.container ?? "__none__"}`}
-              ref={termApiRef}
-              container={active?.container ?? null}
-              pid={active?.pid ?? null}
-              service={active?.service ?? null}
-              className="flex min-h-[320px] flex-1 lg:min-h-0"
-            />
-          </Suspense>
-        )}
-        <TerminalKeypad
-          input={showTerminal}
-          enabled={!!active}
-          onDispatch={(init, keyCode) =>
-            termApiRef.current?.dispatchKey(init, keyCode)
-          }
-          onRaw={(data) => termApiRef.current?.sendRaw(data)}
-          onScroll={(amount) => termApiRef.current?.scroll(amount)}
-          onCopy={handleCopy}
-          className="shrink-0 lg:hidden"
+        <ServiceTerminal
+          active={active}
+          mode={viewMode}
+          onModeChange={handleViewMode}
         />
       </div>
 

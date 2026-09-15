@@ -1,6 +1,6 @@
 import { Link, useLocation } from "@tanstack/react-router";
 
-import { NAV_ITEMS } from "@/lib/nav";
+import { NAV_ITEMS, isNavActive } from "@/lib/nav";
 import { cn } from "@/lib/utils";
 
 /**
@@ -20,10 +20,7 @@ export function BottomNav() {
     >
       <ul className="mx-auto grid max-w-lg grid-cols-4">
         {NAV_ITEMS.map((item) => {
-          const active =
-            item.match === ""
-              ? pathname === "/"
-              : pathname.startsWith(item.match);
+          const active = isNavActive(item, pathname);
           const Icon = item.icon;
           return (
             <li key={item.to}>

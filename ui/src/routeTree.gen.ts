@@ -13,6 +13,9 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as HealthRouteImport } from './routes/health'
 import { Route as LogsRouteImport } from './routes/logs'
 import { Route as StatusRouteImport } from './routes/status'
+import { Route as ProjectsProjectRouteImport } from './routes/projects.$project'
+import { Route as ProjectsProjectIndexRouteImport } from './routes/projects.$project.index'
+import { Route as ProjectsProjectBranchRouteImport } from './routes/projects.$project.$branch'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -34,18 +37,38 @@ const StatusRoute = StatusRouteImport.update({
   path: '/status',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ProjectsProjectRoute = ProjectsProjectRouteImport.update({
+  id: '/projects/$project',
+  path: '/projects/$project',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ProjectsProjectIndexRoute = ProjectsProjectIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => ProjectsProjectRoute,
+} as any)
+const ProjectsProjectBranchRoute = ProjectsProjectBranchRouteImport.update({
+  id: '/$branch',
+  path: '/$branch',
+  getParentRoute: () => ProjectsProjectRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/health': typeof HealthRoute
   '/logs': typeof LogsRoute
   '/status': typeof StatusRoute
+  '/projects/$project': typeof ProjectsProjectRouteWithChildren
+  '/projects/$project/$branch': typeof ProjectsProjectBranchRoute
+  '/projects/$project/': typeof ProjectsProjectIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/health': typeof HealthRoute
   '/logs': typeof LogsRoute
   '/status': typeof StatusRoute
+  '/projects/$project/$branch': typeof ProjectsProjectBranchRoute
+  '/projects/$project': typeof ProjectsProjectIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -53,13 +76,37 @@ export interface FileRoutesById {
   '/health': typeof HealthRoute
   '/logs': typeof LogsRoute
   '/status': typeof StatusRoute
+  '/projects/$project': typeof ProjectsProjectRouteWithChildren
+  '/projects/$project/$branch': typeof ProjectsProjectBranchRoute
+  '/projects/$project/': typeof ProjectsProjectIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/health' | '/logs' | '/status'
+  fullPaths:
+    | '/'
+    | '/health'
+    | '/logs'
+    | '/status'
+    | '/projects/$project'
+    | '/projects/$project/$branch'
+    | '/projects/$project/'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/health' | '/logs' | '/status'
-  id: '__root__' | '/' | '/health' | '/logs' | '/status'
+  to:
+    | '/'
+    | '/health'
+    | '/logs'
+    | '/status'
+    | '/projects/$project/$branch'
+    | '/projects/$project'
+  id:
+    | '__root__'
+    | '/'
+    | '/health'
+    | '/logs'
+    | '/status'
+    | '/projects/$project'
+    | '/projects/$project/$branch'
+    | '/projects/$project/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -67,6 +114,7 @@ export interface RootRouteChildren {
   HealthRoute: typeof HealthRoute
   LogsRoute: typeof LogsRoute
   StatusRoute: typeof StatusRoute
+  ProjectsProjectRoute: typeof ProjectsProjectRouteWithChildren
 }
 
 declare module '@tanstack/react-router' {
@@ -99,14 +147,50 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof StatusRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/projects/$project': {
+      id: '/projects/$project'
+      path: '/projects/$project'
+      fullPath: '/projects/$project'
+      preLoaderRoute: typeof ProjectsProjectRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/projects/$project/': {
+      id: '/projects/$project/'
+      path: '/'
+      fullPath: '/projects/$project/'
+      preLoaderRoute: typeof ProjectsProjectIndexRouteImport
+      parentRoute: typeof ProjectsProjectRoute
+    }
+    '/projects/$project/$branch': {
+      id: '/projects/$project/$branch'
+      path: '/$branch'
+      fullPath: '/projects/$project/$branch'
+      preLoaderRoute: typeof ProjectsProjectBranchRouteImport
+      parentRoute: typeof ProjectsProjectRoute
+    }
   }
 }
+
+interface ProjectsProjectRouteChildren {
+  ProjectsProjectBranchRoute: typeof ProjectsProjectBranchRoute
+  ProjectsProjectIndexRoute: typeof ProjectsProjectIndexRoute
+}
+
+const ProjectsProjectRouteChildren: ProjectsProjectRouteChildren = {
+  ProjectsProjectBranchRoute: ProjectsProjectBranchRoute,
+  ProjectsProjectIndexRoute: ProjectsProjectIndexRoute,
+}
+
+const ProjectsProjectRouteWithChildren = ProjectsProjectRoute._addFileChildren(
+  ProjectsProjectRouteChildren,
+)
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   HealthRoute: HealthRoute,
   LogsRoute: LogsRoute,
   StatusRoute: StatusRoute,
+  ProjectsProjectRoute: ProjectsProjectRouteWithChildren,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

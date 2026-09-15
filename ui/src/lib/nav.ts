@@ -21,9 +21,19 @@ export const NAV_ITEMS: NavItem[] = [
   { to: "/status", label: "Status", icon: Activity, match: "/status" },
 ];
 
+/**
+ * Whether a nav destination is active for a pathname. The Services item
+ * (`match: ""`) owns both the index and every drill-down route under
+ * `/projects`, so the tab stays lit while browsing a project/branch.
+ */
+export function isNavActive(item: NavItem, pathname: string): boolean {
+  if (item.match === "") {
+    return pathname === "/" || pathname.startsWith("/projects");
+  }
+  return pathname.startsWith(item.match);
+}
+
 /** Index of the nav item matching a pathname, or -1. */
 export function navIndexForPath(pathname: string): number {
-  return NAV_ITEMS.findIndex((item) =>
-    item.match === "" ? pathname === "/" : pathname.startsWith(item.match)
-  );
+  return NAV_ITEMS.findIndex((item) => isNavActive(item, pathname));
 }

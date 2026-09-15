@@ -3,7 +3,7 @@ import { Link, useLocation, useNavigate } from "@tanstack/react-router";
 import { PanelRight, Cog } from "lucide-react";
 
 import { RightSidebarContext } from "@/lib/right-sidebar-context";
-import { NAV_ITEMS, navIndexForPath } from "@/lib/nav";
+import { NAV_ITEMS, isNavActive, navIndexForPath } from "@/lib/nav";
 import { useSwipeNavigation } from "@/lib/use-swipe-navigation";
 
 import { cn, getHostLabel } from "@/lib/utils";
@@ -38,10 +38,7 @@ function SidebarNav() {
   return (
     <nav aria-label="Primary" className="flex flex-col gap-1 px-2">
       {NAV_ITEMS.map((item) => {
-        const active =
-          item.match === ""
-            ? location.pathname === "/"
-            : location.pathname.startsWith(item.match);
+        const active = isNavActive(item, location.pathname);
         const Icon = item.icon;
         return (
           <Link
