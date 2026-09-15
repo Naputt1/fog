@@ -46,9 +46,10 @@ export interface Service {
   /** Fog PID for native services; when present logs stream via `?pid=&service=` instead of docker. */
   pid?: number | null;
   /**
-   * Optional project icon (image URL or `data:image/…` URI) sourced from the
-   * owning project's `fog.json` (`project.icon`). Absent when unset; the same
-   * value is repeated on every service of a project.
+   * Optional project icon sourced from the owning project's `fog.json`
+   * (`project.icon`). Either the configured URL/data URI verbatim, or a
+   * same-origin `/api/projects/{name}/icon` URL when the config points at a
+   * filesystem path. Absent when unset; repeated on every service of a project.
    */
   icon?: string;
 }

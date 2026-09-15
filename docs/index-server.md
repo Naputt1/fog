@@ -59,14 +59,20 @@ a small JSON API consumed by the SPA:
 - `GET /api/config` — loaded configuration
 - `GET /api/health` — per-service health
 - `GET /api/launch/targets` — launchable projects/worktrees/scripts (see below)
+- `GET /api/projects/{name}/icon` — a project's configured icon (see below)
 - `POST /api/launch` — start a new detached fog instance (see below)
 - `POST /api/instances/{pid}/services/{name}/action` — start/stop/restart a service of a running instance (see below)
 - `/logs/stream` — SSE stream of a service's logs
 
 Each service also carries an optional `icon` field on `GET /api/services`, taken
 from the owning project's `fog.json` (`project.icon` — see
-[Project metadata](/configuration#project-metadata)). The SPA uses it as the
-project card image on the project list, falling back to the default glyph.
+[Project metadata](/configuration#project-metadata)). For a URL/data URI it is
+the value verbatim; for a filesystem path it is `/api/projects/{name}/icon`,
+which the index server resolves against that project's config dir and serves
+with the matching image content-type (URL/data icons `302`-redirect). The SPA
+uses it as the project card image on the project list, falling back to the
+default glyph on any error. Only files named in `project.icon` are read; the
+request path selects a project, never a file.
 
 Build the SPA with `cd ui && pnpm install && pnpm build`; `build.rs` embeds
 `ui/dist/` into the binary at compile time. Without a build the server falls

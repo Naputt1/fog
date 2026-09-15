@@ -305,16 +305,24 @@ Optional UI metadata for this project, shown in the web UI.
 ```json
 {
   "project": {
-    "icon": "https://example.com/logo.png"
+    "icon": "frontend/public/logo.svg"
   }
 }
 ```
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `project.icon` | `string` | `null` | Image URL (`http://` / `https://`) or `data:image/…` URI shown as this project's icon on the index project list page. Ignored (falls back to the default glyph) when unset or the scheme is not allowed. |
+| `project.icon` | `string` | `null` | Project icon shown on the index project list page. Accepts an `http(s)://` URL, a `data:image/…` URI, or a filesystem path. |
 
-The icon is read from each project's own `fog.json`, so the [index server](/index-server) can show a distinct icon per project in the grouped project list.
+`project.icon` accepts three forms:
+
+- **URL** (`http://` / `https://`) — used verbatim.
+- **Data URI** (`data:image/…`) — used verbatim.
+- **Filesystem path** — relative paths resolve against this `fog.json`'s directory; absolute paths and `~/` are allowed. Supported extensions: `svg`, `png`, `jpg`, `jpeg`, `gif`, `webp`, `avif`, `ico` (max 2 MiB). The [index server](/index-server) serves the file at `/api/projects/{name}/icon`.
+
+Anything unset, unreadable, or of an unsupported type falls back to the default glyph. The icon is read from each project's own `fog.json`, so the index server can show a distinct icon per project in the grouped project list.
+
+> **Note:** The index server serves only files named in `project.icon` — the request path selects a project, never a file. Because the index is reachable beyond loopback (the Traefik catch-all on the tailnet), avoid pointing `project.icon` at sensitive files.
 
 ## Host-global services
 
