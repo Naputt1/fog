@@ -1,6 +1,11 @@
 import { useState } from "react";
-import { Link, useLocation, useNavigate } from "@tanstack/react-router";
-import { PanelRight, Cog } from "lucide-react";
+import {
+  Link,
+  useLocation,
+  useNavigate,
+  useParams,
+} from "@tanstack/react-router";
+import { PanelRight, Cog, ChevronRight } from "lucide-react";
 
 import { RightSidebarContext } from "@/lib/right-sidebar-context";
 import { NAV_ITEMS, isNavActive, navIndexForPath } from "@/lib/nav";
@@ -29,6 +34,81 @@ function Brand() {
         </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * Breadcrumb for the top bar, driven by the active route params. Ancestor
+ * segments link back up; the current segment is plain text.
+ */
+function TopbarBreadcrumb({
+  project,
+  branch,
+  script,
+}: {
+  project: string;
+  branch?: string;
+  script?: string;
+}) {
+  const crumbClass =
+    "text-muted-foreground hover:text-foreground max-w-[30%] truncate transition-colors";
+  const sep = (
+    <ChevronRight
+      className="text-muted-foreground/50 size-3 shrink-0"
+      aria-hidden
+    />
+  );
+  const current = (label: string) => (
+    <span
+      className="text-foreground min-w-0 truncate font-semibold"
+      aria-current="page"
+    >
+      {label}
+    </span>
+  );
+
+  return (
+    <nav
+      aria-label="Breadcrumb"
+      className="flex min-w-0 items-center gap-1.5 overflow-hidden font-mono text-xs"
+    >
+      <Link
+        to="/"
+        className="text-muted-foreground hover:text-foreground shrink-0 transition-colors"
+      >
+        Services
+      </Link>
+      {sep}
+      {!branch ? (
+        current(project)
+      ) : (
+        <>
+          <Link
+            to="/projects/$project"
+            params={{ project }}
+            className={crumbClass}
+          >
+            {project}
+          </Link>
+          {sep}
+          {!script ? (
+            current(branch)
+          ) : (
+            <>
+              <Link
+                to="/projects/$project/$branch"
+                params={{ project, branch }}
+                className={crumbClass}
+              >
+                {branch}
+              </Link>
+              {sep}
+              {current(script)}
+            </>
+          )}
+        </>
+      )}
+    </nav>
   );
 }
 
@@ -84,6 +164,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [rightEnabled, setRightEnabled] = useState(false);
   const location = useLocation();
   const navigate = useNavigate();
+  const params = useParams({ strict: false }) as {
+    project?: string;
+    branch?: string;
+    script?: string;
+  };
   const index = navIndexForPath(location.pathname);
   const current = NAV_ITEMS[index] ?? NAV_ITEMS[0];
 
@@ -124,12 +209,20 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
           {/* Topbar */}
           <header className="border-border bg-card/60 pt-safe flex min-h-14 shrink-0 items-center gap-3 border-b px-4 backdrop-blur">
-            <div className="flex min-w-0 items-center gap-2 font-mono">
-              <span className="text-primary">~</span>
-              <span className="text-foreground truncate text-sm">
-                /{current.label.toLowerCase()}
-              </span>
-            </div>
+            {params.project ? (
+              <TopbarBreadcrumb
+                project={params.project}
+                branch={params.branch}
+                script={params.script}
+              />
+            ) : (
+              <div className="flex min-w-0 items-center gap-2 font-mono">
+                <span className="text-primary">~</span>
+                <span className="text-foreground truncate text-sm">
+                  /{current.label.toLowerCase()}
+                </span>
+              </div>
+            )}
 
             <div className="ml-auto flex items-center gap-3">
               {rightEnabled && (

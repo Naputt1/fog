@@ -1,10 +1,4 @@
-import {
-  createFileRoute,
-  Link,
-  Outlet,
-  useParams,
-} from "@tanstack/react-router";
-import { ChevronRight } from "lucide-react";
+import { createFileRoute, Link, Outlet } from "@tanstack/react-router";
 
 import { useServices, useStatus } from "@/lib/hooks";
 import { findProject, groupServices } from "@/lib/services";
@@ -16,18 +10,12 @@ export const Route = createFileRoute("/projects/$project")({
 });
 
 /**
- * Pass-through layout for a project. Renders the breadcrumb and guards the
- * route, then hands off to the branches index or the branch services page via
- * `<Outlet />`.
+ * Pass-through layout for a project. Guards the route, then hands off to the
+ * branches index, branch script list, or script services page via `<Outlet />`.
+ * The breadcrumb lives in the app-shell top bar.
  */
 function ProjectLayout() {
   const { project } = Route.useParams();
-  // `branch` only exists while a child branch route is active.
-  const params = useParams({ strict: false }) as {
-    project: string;
-    branch?: string;
-  };
-  const branch = params.branch;
 
   const { data, isLoading, isError, error } = useServices({
     withInternal: true,
@@ -44,50 +32,6 @@ function ProjectLayout() {
 
   return (
     <div className="flex min-w-0 flex-col gap-4">
-      <nav
-        aria-label="Breadcrumb"
-        className="flex min-w-0 items-center gap-1.5 font-mono text-xs"
-      >
-        <Link
-          to="/"
-          className="text-muted-foreground hover:text-foreground shrink-0 transition-colors"
-        >
-          Services
-        </Link>
-        <ChevronRight
-          className="text-muted-foreground/50 size-3 shrink-0"
-          aria-hidden
-        />
-        {branch ? (
-          <>
-            <Link
-              to="/projects/$project"
-              params={{ project }}
-              className="text-muted-foreground hover:text-foreground max-w-[40%] truncate transition-colors"
-            >
-              {bucket?.project ?? project}
-            </Link>
-            <ChevronRight
-              className="text-muted-foreground/50 size-3 shrink-0"
-              aria-hidden
-            />
-            <span
-              className="text-foreground min-w-0 truncate font-semibold"
-              aria-current="page"
-            >
-              {branch}
-            </span>
-          </>
-        ) : (
-          <span
-            className="text-foreground min-w-0 truncate font-semibold"
-            aria-current="page"
-          >
-            {bucket?.project ?? project}
-          </span>
-        )}
-      </nav>
-
       {isLoading ? (
         <LoadingState label="Loading project…" />
       ) : isError ? (

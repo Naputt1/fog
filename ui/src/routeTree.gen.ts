@@ -16,6 +16,8 @@ import { Route as StatusRouteImport } from './routes/status'
 import { Route as ProjectsProjectRouteImport } from './routes/projects.$project'
 import { Route as ProjectsProjectIndexRouteImport } from './routes/projects.$project.index'
 import { Route as ProjectsProjectBranchRouteImport } from './routes/projects.$project.$branch'
+import { Route as ProjectsProjectBranchIndexRouteImport } from './routes/projects.$project.$branch.index'
+import { Route as ProjectsProjectBranchScriptRouteImport } from './routes/projects.$project.$branch.$script'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -52,6 +54,18 @@ const ProjectsProjectBranchRoute = ProjectsProjectBranchRouteImport.update({
   path: '/$branch',
   getParentRoute: () => ProjectsProjectRoute,
 } as any)
+const ProjectsProjectBranchIndexRoute =
+  ProjectsProjectBranchIndexRouteImport.update({
+    id: '/',
+    path: '/',
+    getParentRoute: () => ProjectsProjectBranchRoute,
+  } as any)
+const ProjectsProjectBranchScriptRoute =
+  ProjectsProjectBranchScriptRouteImport.update({
+    id: '/$script',
+    path: '/$script',
+    getParentRoute: () => ProjectsProjectBranchRoute,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -59,16 +73,19 @@ export interface FileRoutesByFullPath {
   '/logs': typeof LogsRoute
   '/status': typeof StatusRoute
   '/projects/$project': typeof ProjectsProjectRouteWithChildren
-  '/projects/$project/$branch': typeof ProjectsProjectBranchRoute
+  '/projects/$project/$branch': typeof ProjectsProjectBranchRouteWithChildren
   '/projects/$project/': typeof ProjectsProjectIndexRoute
+  '/projects/$project/$branch/$script': typeof ProjectsProjectBranchScriptRoute
+  '/projects/$project/$branch/': typeof ProjectsProjectBranchIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/health': typeof HealthRoute
   '/logs': typeof LogsRoute
   '/status': typeof StatusRoute
-  '/projects/$project/$branch': typeof ProjectsProjectBranchRoute
   '/projects/$project': typeof ProjectsProjectIndexRoute
+  '/projects/$project/$branch/$script': typeof ProjectsProjectBranchScriptRoute
+  '/projects/$project/$branch': typeof ProjectsProjectBranchIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -77,8 +94,10 @@ export interface FileRoutesById {
   '/logs': typeof LogsRoute
   '/status': typeof StatusRoute
   '/projects/$project': typeof ProjectsProjectRouteWithChildren
-  '/projects/$project/$branch': typeof ProjectsProjectBranchRoute
+  '/projects/$project/$branch': typeof ProjectsProjectBranchRouteWithChildren
   '/projects/$project/': typeof ProjectsProjectIndexRoute
+  '/projects/$project/$branch/$script': typeof ProjectsProjectBranchScriptRoute
+  '/projects/$project/$branch/': typeof ProjectsProjectBranchIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -90,14 +109,17 @@ export interface FileRouteTypes {
     | '/projects/$project'
     | '/projects/$project/$branch'
     | '/projects/$project/'
+    | '/projects/$project/$branch/$script'
+    | '/projects/$project/$branch/'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
     | '/health'
     | '/logs'
     | '/status'
-    | '/projects/$project/$branch'
     | '/projects/$project'
+    | '/projects/$project/$branch/$script'
+    | '/projects/$project/$branch'
   id:
     | '__root__'
     | '/'
@@ -107,6 +129,8 @@ export interface FileRouteTypes {
     | '/projects/$project'
     | '/projects/$project/$branch'
     | '/projects/$project/'
+    | '/projects/$project/$branch/$script'
+    | '/projects/$project/$branch/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -168,16 +192,45 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ProjectsProjectBranchRouteImport
       parentRoute: typeof ProjectsProjectRoute
     }
+    '/projects/$project/$branch/': {
+      id: '/projects/$project/$branch/'
+      path: '/'
+      fullPath: '/projects/$project/$branch/'
+      preLoaderRoute: typeof ProjectsProjectBranchIndexRouteImport
+      parentRoute: typeof ProjectsProjectBranchRoute
+    }
+    '/projects/$project/$branch/$script': {
+      id: '/projects/$project/$branch/$script'
+      path: '/$script'
+      fullPath: '/projects/$project/$branch/$script'
+      preLoaderRoute: typeof ProjectsProjectBranchScriptRouteImport
+      parentRoute: typeof ProjectsProjectBranchRoute
+    }
   }
 }
 
+interface ProjectsProjectBranchRouteChildren {
+  ProjectsProjectBranchScriptRoute: typeof ProjectsProjectBranchScriptRoute
+  ProjectsProjectBranchIndexRoute: typeof ProjectsProjectBranchIndexRoute
+}
+
+const ProjectsProjectBranchRouteChildren: ProjectsProjectBranchRouteChildren = {
+  ProjectsProjectBranchScriptRoute: ProjectsProjectBranchScriptRoute,
+  ProjectsProjectBranchIndexRoute: ProjectsProjectBranchIndexRoute,
+}
+
+const ProjectsProjectBranchRouteWithChildren =
+  ProjectsProjectBranchRoute._addFileChildren(
+    ProjectsProjectBranchRouteChildren,
+  )
+
 interface ProjectsProjectRouteChildren {
-  ProjectsProjectBranchRoute: typeof ProjectsProjectBranchRoute
+  ProjectsProjectBranchRoute: typeof ProjectsProjectBranchRouteWithChildren
   ProjectsProjectIndexRoute: typeof ProjectsProjectIndexRoute
 }
 
 const ProjectsProjectRouteChildren: ProjectsProjectRouteChildren = {
-  ProjectsProjectBranchRoute: ProjectsProjectBranchRoute,
+  ProjectsProjectBranchRoute: ProjectsProjectBranchRouteWithChildren,
   ProjectsProjectIndexRoute: ProjectsProjectIndexRoute,
 }
 

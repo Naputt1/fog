@@ -22,6 +22,9 @@ export interface ProjectBucket {
 /** Label used when a service has no git worktree (started from the main checkout). */
 export const DEFAULT_WORKTREE = "default";
 
+/** Synthetic script token for docker-directory services with no fog instance. */
+export const DEFAULT_SCRIPT = "default";
+
 /**
  * Group services by project (git-derived from the repo) and within each
  * project by worktree. The default checkout ("") sorts first, remaining
@@ -384,25 +387,74 @@ export function findBranch(
   );
 }
 
-/** Rollup counts + ports for one instance's services. */
-export function instanceStats(view: InstanceView): BucketStats {
-  let running = 0;
-  const ports = new Set<string>();
-  for (const svc of view.services) {
-    if (svc.running) running += 1;
-    for (const port of svc.service?.ports ?? []) ports.add(port);
+/** Synthetic pid for directory-only services when no instance is reported. */
+const SYNTHETIC_PID = 0;
+
+/**
+ * Instance views for a branch: the real fog instances when the project is
+ * reported, otherwise a single synthetic instance built from the docker
+ * directory so the common rendering path still works (controls are disabled
+ * for the synthetic instance). The synthetic instance uses {@link DEFAULT_SCRIPT}
+ * as its script token so it can be addressed by the script route.
+ */
+export function branchInstances(
+  bucket: BranchBucket | null,
+  legacy: WorktreeBucket | null,
+  project: string
+): InstanceView[] {
+  if (bucket) return bucket.instances;
+  if (!legacy) return [];
+  return [
+    {
+      pid: SYNTHETIC_PID,
+      script: DEFAULT_SCRIPT,
+      project,
+      worktree: legacy.worktree,
+      branch: null,
+      services: legacy.services
+        .slice()
+        .sort((a, b) => a.service.localeCompare(b.service))
+        .map((s) => ({
+          name: s.service,
+          running: s.status === "running",
+          health: s.health,
+          service: s,
+          endpoints: [],
+        })),
+    },
+  ];
+}
+
+/** Groups instances by script, sorted by script name. */
+export function groupByScript(
+  instances: InstanceView[]
+): [string, InstanceView[]][] {
+  const map = new Map<string, InstanceView[]>();
+  for (const inst of instances) {
+    const list = map.get(inst.script);
+    if (list) list.push(inst);
+    else map.set(inst.script, [inst]);
   }
-  return { total: view.services.length, running, ports: [...ports] };
+  return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+}
+
+/** Case-insensitive lookup of a branch's instances for one script token. */
+export function findScriptInstances(
+  instances: InstanceView[],
+  script: string
+): InstanceView[] {
+  const needle = script.toLowerCase();
+  return instances.filter((i) => i.script.toLowerCase() === needle);
 }
 
 /**
- * Rollup counts + ports for a branch, deduplicating services that several
- * instances share (concurrent mode): a name is "running" when any instance
- * reports it running, so the branch header never double-counts shared services.
+ * Rollup counts + ports for a set of instances, deduplicating services that
+ * several instances share (concurrent mode): a name is "running" when any
+ * instance reports it running, so shared services are never double-counted.
  */
-export function branchStats(bucket: BranchBucket): BucketStats {
+export function scriptStats(instances: InstanceView[]): BucketStats {
   const byName = new Map<string, { running: boolean; ports: Set<string> }>();
-  for (const inst of bucket.instances) {
+  for (const inst of instances) {
     for (const svc of inst.services) {
       let entry = byName.get(svc.name);
       if (!entry) {
@@ -420,4 +472,24 @@ export function branchStats(bucket: BranchBucket): BucketStats {
     for (const port of entry.ports) ports.add(port);
   }
   return { total: byName.size, running, ports: [...ports] };
+}
+
+/** Rollup counts + ports for one instance's services. */
+export function instanceStats(view: InstanceView): BucketStats {
+  let running = 0;
+  const ports = new Set<string>();
+  for (const svc of view.services) {
+    if (svc.running) running += 1;
+    for (const port of svc.service?.ports ?? []) ports.add(port);
+  }
+  return { total: view.services.length, running, ports: [...ports] };
+}
+
+/**
+ * Rollup counts + ports for a branch, deduplicating services that several
+ * instances share (concurrent mode): a name is "running" when any instance
+ * reports it running, so the branch header never double-counts shared services.
+ */
+export function branchStats(bucket: BranchBucket): BucketStats {
+  return scriptStats(bucket.instances);
 }

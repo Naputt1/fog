@@ -8,6 +8,7 @@ import {
   buildInstanceViews,
   findProject,
   groupByBranch,
+  groupByScript,
   groupServices,
   worktreeParam,
   worktreeStats,
@@ -40,18 +41,7 @@ function branchServiceNames(
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
-/** Groups a branch's instances by script, preserving script (and pid) order. */
-function groupByScript(instances: InstanceView[]): [string, InstanceView[]][] {
-  const map = new Map<string, InstanceView[]>();
-  for (const inst of instances) {
-    const list = map.get(inst.script);
-    if (list) list.push(inst);
-    else map.set(inst.script, [inst]);
-  }
-  return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0]));
-}
-
-/** One instance row: link into the branch scoped to this pid, plus its Kill. */
+/** One instance row: link into the script scoped to this pid, plus its Kill. */
 function InstanceRow({
   project,
   branch,
@@ -66,8 +56,8 @@ function InstanceRow({
   return (
     <div className="border-border flex items-center gap-2 rounded-md border px-2.5 py-1.5">
       <Link
-        to="/projects/$project/$branch"
-        params={{ project, branch }}
+        to="/projects/$project/$branch/$script"
+        params={{ project, branch, script: inst.script }}
         search={{ pid: inst.pid }}
         className="focus-visible:ring-ring/60 flex min-w-0 flex-1 items-center gap-2 rounded outline-none focus-visible:ring-2"
       >
