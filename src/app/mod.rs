@@ -1028,6 +1028,18 @@ impl App {
         ) {
             return Err(format!("switch worktree: {e}"));
         }
+        // Adopt the live ports of a sibling that already owns a shared service
+        // on the target branch, so its dependents resolve to the real port.
+        let mut port_map = port_map;
+        runtime::adopt_shared_ports(
+            script,
+            &script_name,
+            &config_dir,
+            self.ipc_state.project.as_deref(),
+            branch_for_ports.as_deref(),
+            &mut port_map,
+            self.no_share,
+        );
 
         // Build the new runtime *before* tearing down the old one, so a
         // build failure doesn't leave the UI empty.

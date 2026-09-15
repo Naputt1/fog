@@ -171,7 +171,7 @@ Services flagged with `"reuse": true` are treated specially to save time when sw
 - **Probe-first**: at startup fog probes the resource once via `health_check`. If it is already reachable, the service's `cmd` is **not** run and the tab shows a `♻ reusing already-running ...` notice instead. If it is **not** reachable, fog runs the `cmd` immediately — no misleading "reusing" tab, no delay.
 - **Mid-session fallback**: if a borrowed service later becomes unreachable (e.g. the handed-over process died), fog starts the `cmd` itself after a short grace period (~10s).
 - **Take over**: pressing `R` on a reused tab kills the borrowed process and starts the `cmd` fresh in this worktree.
-- **Persistence**: reused resources survive only as long as a live successor takes them over (handover in a reclaim/worktree switch). With concurrent branches, a shared resource is torn down only when the **last** instance serving that (project, script) exits — a sibling branch's `fog dev` keeps it alive. When the very last instance exits — via `q`, Ctrl+C, or `fog kill <pid>` — with no successor, fog kills the borrowed process (if any) and runs its `shutdown_cmd`.
+- **Persistence**: reused resources survive only as long as a live successor takes them over (handover in a reclaim/worktree switch). A shared resource is torn down only when the **last** instance serving that (project, script, branch) exits. When the very last instance on the branch exits — via `q`, Ctrl+C, or `fog kill <pid>` — with no successor, fog kills the borrowed process (if any) and runs its `shutdown_cmd`. A sibling on a **different branch** never keeps it alive: shared resources are branch-scoped (e.g. a compose project named `red-fox-infra-${FOG_BRANCH}` gives every branch its own containers).
 
 ```json
 {
@@ -199,7 +199,8 @@ Services flagged `"share": true` are **shared between all concurrent instances**
 - **Probe-first**: at startup fog probes the resource once via `health_check`. If it is already reachable (a sibling instance started it), the service's `cmd` is **not** re-run and the tab shows a `♻ reusing already-running ...` notice instead — so a database or compose stack is not duplicated.
 - **Start when down**: if it is not reachable, fog runs the `cmd` (the first instance to start becomes the owner). No misleading "reusing" tab, no delay.
 - **Mid-session fallback**: if a borrowed shared service later becomes unreachable, fog starts the `cmd` itself after a short grace period (~10s).
-- **Last-instance teardown**: a shared resource is torn down (`shutdown_cmd`, e.g. `docker compose down`) only when the **last** instance serving that (project, script) exits — a sibling instance or a different branch's `fog dev` keeps it alive.
+- **Last-instance teardown**: a shared resource is torn down (`shutdown_cmd`, e.g. `docker compose down`) only when the **last** instance serving that (project, script, **branch**) exits. A same-branch sibling instance keeps it alive; an instance on another branch does not, since each branch owns its own (branch-suffixed) resources.
+- **Port adoption**: when this instance borrows a shared resource a sibling already started, it adopts that sibling's live ports for the port names the shared service references (`cmd`, `shutdown_cmd`, `env`, health checks and endpoint ports), so dependent services resolve `${ports.*}` to the running container instead of a freshly allocated port.
 
 ```json
 {

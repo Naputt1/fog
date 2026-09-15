@@ -276,6 +276,75 @@ pub fn has_template(s: &str) -> bool {
     s.contains("${")
 }
 
+/// Collects every `${ports.<name>}` name referenced by `s` into `out`.
+///
+/// Used to decide which allocated ports a borrowing instance must adopt from
+/// the sibling that already owns a shared resource, so dependent services point
+/// at the live container instead of a freshly allocated port.
+pub fn referenced_port_names(s: &str, out: &mut std::collections::BTreeSet<String>) {
+    const PREFIX: &str = "${ports.";
+    let mut rest = s;
+    while let Some(start) = rest.find(PREFIX) {
+        let after = &rest[start + PREFIX.len()..];
+        let Some(end) = after.find('}') else {
+            break;
+        };
+        let name = after[..end].trim();
+        if !name.is_empty() {
+            out.insert(name.to_string());
+        }
+        rest = &after[end + 1..];
+    }
+}
+
+/// Collects every `${ports.<name>}` referenced by a service entry: its `cmd`,
+/// `shutdown_cmd`, `env` values, health-check targets, and declared endpoints.
+pub fn entry_referenced_ports(
+    entry: &crate::config::ConfigEntry,
+) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    referenced_port_names(&entry.cmd, &mut out);
+    if let Some(cmd) = &entry.shutdown_cmd {
+        referenced_port_names(cmd, &mut out);
+    }
+    if let Some(env) = &entry.env {
+        for value in env.values() {
+            referenced_port_names(value, &mut out);
+        }
+    }
+    collect_health_check_ports(entry.health_check.as_ref(), &mut out);
+    if let Some(endpoints) = &entry.endpoint {
+        for endpoint in endpoints {
+            if let Some(h) = &endpoint.host {
+                referenced_port_names(h, &mut out);
+            }
+            if let Some(p) = &endpoint.port {
+                referenced_port_names(p, &mut out);
+            }
+            if let Some(p) = &endpoint.path_prefix {
+                referenced_port_names(p, &mut out);
+            }
+            collect_health_check_ports(endpoint.health_check.as_ref(), &mut out);
+        }
+    }
+    out
+}
+
+fn collect_health_check_ports(
+    spec: Option<&crate::config::HealthCheckSpec>,
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    match spec {
+        Some(crate::config::HealthCheckSpec::Single(c)) => referenced_port_names(&c.target, out),
+        Some(crate::config::HealthCheckSpec::Multiple(v)) => {
+            for c in v {
+                referenced_port_names(&c.target, out);
+            }
+        }
+        None => {}
+    }
+}
+
 /// Validates native route ports against the allocated port map and branch.
 /// Mirrors the checks previously duplicated in `main.rs` and `runtime.rs`.
 pub fn validate_native_routes(

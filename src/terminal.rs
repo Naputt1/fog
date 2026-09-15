@@ -178,8 +178,8 @@ pub struct Terminal {
     pub reused: bool,
     /// Whether this service is a shared resource for a concurrent script
     /// (`share: true`). Even when it was started (not borrowed) here, its
-    /// `shutdown_cmd` is skipped on teardown while any other instance still
-    /// serves the same (project, script).
+    /// `shutdown_cmd` is skipped on teardown while another instance on the
+    /// same (project, script, branch) still serves it.
     pub shared: bool,
     /// When a reused service is adopted from another instance, the child PID
     /// to wait on / kill instead of a [`Child`] handle.
@@ -1932,19 +1932,23 @@ impl Drop for Terminal {
         // assumed-up reuse service with no successor must still be torn down,
         // so the gate is `handed_off`, not `reused`.
         //
-        // Multi-branch: a shared (reuse/share) service is only torn down when
-        // this is the last instance serving the same (project, script) —
-        // another branch, or a concurrent same-branch instance, may still be
-        // using it, so its `shutdown_cmd` (e.g. `docker compose down`) must
-        // not run while a sibling is alive. A shared service that was started
-        // (not borrowed) here is covered by `shared`, not just `reused`.
+        // A shared (reuse/share) service is only torn down when this is the
+        // last instance serving the same (project, script, branch) — a
+        // concurrent same-branch instance may still be using it, so its
+        // `shutdown_cmd` (e.g. `docker compose down`) must not run while a
+        // sibling on the same branch is alive. Other branches run their own
+        // (branch-suffixed) resources and must not keep this one alive: e.g.
+        // `red-fox-infra-${FOG_BRANCH}` gives every branch its own containers.
+        // A shared service that was started (not borrowed) here is covered by
+        // `shared`, not just `reused`.
         let is_shared = self.reused || self.shared;
         let last_instance = !is_shared
             || self.project.is_none()
             || self.script.is_empty()
-            || crate::ipc::find_instances_any_branch(
+            || crate::ipc::find_instances_for(
                 self.project.as_deref().unwrap_or_default(),
                 &self.script,
+                self.branch.as_deref(),
             )
             .is_empty();
         if !self.handed_off && last_instance {
@@ -2529,6 +2533,88 @@ mod tests {
         assert!(
             !seen,
             "a service handed off to a successor must not run its shutdown_cmd"
+        );
+    }
+
+    /// Binds a fake live instance socket (`$TMPDIR/fog-<pid>.sock`) that answers
+    /// status requests, so it is discovered as a sibling instance.
+    fn spawn_status_instance(
+        pid: u32,
+        project: &str,
+        script: &str,
+        branch: Option<&str>,
+    ) -> std::path::PathBuf {
+        use std::os::unix::net::UnixListener;
+        let state = std::sync::Arc::new(crate::ipc::IpcState::new(
+            script.to_string(),
+            Some(project.to_string()),
+            branch.map(str::to_string),
+            false,
+        ));
+        let path = std::env::temp_dir().join(format!("fog-{pid}.sock"));
+        let _ = fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { break };
+                crate::ipc::handle_connection(stream, state.clone());
+            }
+        });
+        path
+    }
+
+    #[test]
+    fn test_drop_tears_down_shared_with_sibling_on_other_branch() {
+        // Branch-scoped shared resources (e.g. `red-fox-infra-${FOG_BRANCH}`):
+        // a sibling on another branch must not keep this branch's resource up.
+        let project = format!("fog-test-drop-cross-{}", std::process::id());
+        let sibling_pid = std::process::id().wrapping_add(11);
+        let sibling = spawn_status_instance(sibling_pid, &project, "dev", Some("other"));
+        let marker =
+            std::env::temp_dir().join(format!("fog-test-drop-cross-{}.marker", std::process::id()));
+        let _ = fs::remove_file(&marker);
+
+        let mut t = Terminal::spawn_reused("infra".into(), ".".into(), "true".into(), 100);
+        t.shared = true;
+        t.project = Some(project);
+        t.script = "dev".into();
+        t.branch = Some("mine".into());
+        t.shutdown_cmd = Some(format!("touch {}", marker.display()));
+        drop(t);
+
+        let seen = wait_for_marker(&marker, Duration::from_secs(5));
+        let _ = fs::remove_file(&marker);
+        let _ = fs::remove_file(&sibling);
+        assert!(
+            seen,
+            "a shared resource must be torn down while only another branch runs"
+        );
+    }
+
+    #[test]
+    fn test_drop_skips_shared_teardown_with_sibling_on_same_branch() {
+        let project = format!("fog-test-drop-same-{}", std::process::id());
+        let sibling_pid = std::process::id().wrapping_add(12);
+        let sibling = spawn_status_instance(sibling_pid, &project, "dev", Some("mine"));
+        let marker =
+            std::env::temp_dir().join(format!("fog-test-drop-same-{}.marker", std::process::id()));
+        let _ = fs::remove_file(&marker);
+
+        let mut t = Terminal::spawn_reused("infra".into(), ".".into(), "true".into(), 100);
+        t.shared = true;
+        t.project = Some(project);
+        t.script = "dev".into();
+        t.branch = Some("mine".into());
+        t.shutdown_cmd = Some(format!("touch {}", marker.display()));
+        drop(t);
+
+        std::thread::sleep(Duration::from_millis(500));
+        let seen = marker.exists();
+        let _ = fs::remove_file(&marker);
+        let _ = fs::remove_file(&sibling);
+        assert!(
+            !seen,
+            "a shared resource must stay up while a same-branch sibling runs"
         );
     }
 

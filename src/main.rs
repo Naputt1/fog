@@ -1246,7 +1246,7 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
         .branch
         .clone()
         .or_else(|| fog::runtime::resolve_branch(&config_dir));
-    let port_map = if let Some(specs) = &config.ports {
+    let mut port_map = if let Some(specs) = &config.ports {
         match fog::ports::allocate_ports(specs) {
             Ok(m) => m,
             Err(e) => {
@@ -1301,6 +1301,18 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
             format!("error: {e}"),
         ));
     }
+    // Adopt the live ports of a sibling that already owns a shared service, so
+    // dependent services resolve `${ports.*}` to the borrowed resource's real
+    // port instead of this instance's freshly allocated one.
+    fog::runtime::adopt_shared_ports(
+        script,
+        name,
+        &config_dir,
+        project.as_deref(),
+        branch_for_ports.as_deref(),
+        &mut port_map,
+        cli.no_share,
+    );
     // Publish allocated ports + native routes to IPC so the index server can synthesize
     // native ApiService entries for the Services UI (which otherwise only sees docker).
     {

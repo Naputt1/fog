@@ -174,6 +174,101 @@ fn resolve_docker_compose_paths(
         .collect()
 }
 
+/// Computes a service entry's aggregate health checks: its own plus those of
+/// its declared endpoints, with any `docker`-kind `compose_file` resolved
+/// absolute (the background check thread has no working-directory context).
+///
+/// Endpoints carry their own checks. Folding them into the service's aggregate
+/// lets `depends_on` gating and `share`/`reuse` probing account for every
+/// exposed endpoint, while each endpoint keeps its own status thread for
+/// display. Duplicate checks are collapsed.
+fn entry_health_checks(entry: &ConfigEntry, service_path: &Path) -> Vec<HealthCheckConfig> {
+    let mut checks: Vec<HealthCheckConfig> = match &entry.health_check {
+        Some(HealthCheckSpec::Single(c)) => vec![c.clone()],
+        Some(HealthCheckSpec::Multiple(v)) => v.clone(),
+        None => vec![],
+    };
+    for endpoint in resolve_endpoint_compose_paths(entry, service_path) {
+        for check in crate::terminal::endpoint_health_checks(&endpoint.health_check) {
+            if !checks.contains(&check) {
+                checks.push(check);
+            }
+        }
+    }
+    resolve_docker_compose_paths(checks, service_path)
+}
+
+/// Adopts the live ports of an already-running sibling for any `share` (or
+/// `reuse`) service this instance is about to borrow.
+///
+/// `ports` is allocated per instance, so without this a borrower hands its
+/// dependents a fresh random port while the borrowed container keeps listening
+/// on the owner's port — e.g. an API's `DATABASE_URL` would point at the wrong
+/// Postgres port. Called before templates are resolved so `${ports.*}` in
+/// dependent services resolves to the borrowed resource's real port.
+///
+/// Only same-branch siblings are considered (shared resources are
+/// branch-scoped, e.g. `red-fox-infra-${FOG_BRANCH}`).
+pub fn adopt_shared_ports(
+    script: &ScriptConfig,
+    script_name: &str,
+    config_dir: &Path,
+    project: Option<&str>,
+    branch: Option<&str>,
+    ports: &mut crate::ports::PortMap,
+    no_share: bool,
+) {
+    if no_share {
+        return;
+    }
+    let Some(project) = project else {
+        return;
+    };
+    let siblings = crate::ipc::find_instances_with_status(project, script_name, branch);
+    // Mirror the borrow decision: a sibling started with --no-share owns the
+    // resource without yielding it, so nothing is borrowed (and nothing is
+    // adopted) while one is alive.
+    if siblings.is_empty() || siblings.iter().any(|(_, _, s)| s.no_share) {
+        return;
+    }
+    let raw = script.service.clone().unwrap_or_default();
+    for entry in &raw {
+        let shared = if script.concurrent {
+            entry.share
+        } else {
+            entry.reuse
+        };
+        if !shared {
+            continue;
+        }
+        let service_path = config_dir.join(&entry.path);
+        let resolved = match resolve_service_templates(entry, ports, branch) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let health_checks = entry_health_checks(&resolved, &service_path);
+        if health_checks.is_empty() || !health_checks_pass(&health_checks, branch) {
+            continue;
+        }
+        // Scan the *raw* entry: `resolved` has already substituted the
+        // templates, so it no longer names the ports to adopt.
+        let names = crate::ports::entry_referenced_ports(entry);
+        if names.is_empty() {
+            continue;
+        }
+        for (_, _, status) in &siblings {
+            if names.iter().all(|n| status.ports.contains_key(n)) {
+                for name in &names {
+                    if let Some(port) = status.ports.get(name) {
+                        ports.insert(name.clone(), *port);
+                    }
+                }
+                break;
+            }
+        }
+    }
+}
+
 /// Spawns a terminal that runs `cmd` and wires up its health checks and
 /// shutdown command. Used for services that should be started directly —
 /// non-reused services, and reused services whose resource is currently down.
@@ -628,28 +723,10 @@ pub fn build_with_opts(opts: BuildOpts) -> Result<Runtime, String> {
         });
         let service_path_str = normalize_service_path(&service_path);
 
-        let health_checks: Vec<HealthCheckConfig> = match &entry.health_check {
-            Some(HealthCheckSpec::Single(c)) => vec![c.clone()],
-            Some(HealthCheckSpec::Multiple(v)) => v.clone(),
-            None => vec![],
-        };
-        // Endpoints carry their own checks. Fold them into the service's
-        // aggregate so `depends_on` gating and `share`/`reuse` probing account
-        // for every exposed endpoint, while each endpoint keeps its own status
-        // thread for display. Duplicate checks are collapsed.
+        let health_checks: Vec<HealthCheckConfig> = entry_health_checks(entry, &service_path);
+        // Endpoints keep their own status thread for display, so resolve them
+        // separately (the aggregate above already folded in their checks).
         let endpoints = resolve_endpoint_compose_paths(entry, &service_path);
-        let mut health_checks = health_checks;
-        for endpoint in &endpoints {
-            for check in crate::terminal::endpoint_health_checks(&endpoint.health_check) {
-                if !health_checks.contains(&check) {
-                    health_checks.push(check);
-                }
-            }
-        }
-        // The `docker` health kind needs an absolute compose path so the
-        // background check thread (which has no working-directory context) can
-        // find the file. Resolve it against the service's directory now.
-        let health_checks = resolve_docker_compose_paths(health_checks, &service_path);
 
         let has_deps = entry.depends_on.is_some();
 
@@ -721,11 +798,14 @@ pub fn build_with_opts(opts: BuildOpts) -> Result<Runtime, String> {
                 ));
                 t
             } else if health_checks_pass(&health_checks, branch.as_deref()) {
-                // Check if any existing instance has --no-share set; if so,
-                // don't borrow from it — start fresh instead.
+                // Check if any existing instance on this branch has --no-share
+                // set; if so, don't borrow from it — start fresh instead. A
+                // sibling on another branch owns different (branch-suffixed)
+                // resources, so it must not block borrowing here.
                 let dominated = project.as_ref().is_some_and(|p| {
-                    let others = crate::ipc::find_instances_any_branch(p, &script_name);
-                    others.iter().any(|(_, _, s)| s.no_share)
+                    crate::ipc::find_instances_with_status(p, &script_name, branch.as_deref())
+                        .iter()
+                        .any(|(_, _, s)| s.no_share)
                 });
                 if !dominated {
                     // The resource is genuinely up: borrow it instead of re-running
@@ -1032,6 +1112,149 @@ mod tests {
             start_period_ms: None,
             retries: None,
         })
+    }
+
+    /// Binds a fake live instance socket (`$TMPDIR/fog-<pid>.sock`) that answers
+    /// status requests, so `find_instances_with_status` treats it as a sibling.
+    fn spawn_status_instance(
+        pid: u32,
+        project: &str,
+        script: &str,
+        branch: Option<&str>,
+        no_share: bool,
+        ports: crate::ports::PortMap,
+    ) -> std::path::PathBuf {
+        use std::os::unix::net::UnixListener;
+        let state = std::sync::Arc::new(crate::ipc::IpcState::new(
+            script.to_string(),
+            Some(project.to_string()),
+            branch.map(str::to_string),
+            no_share,
+        ));
+        *state.ports.lock().expect("mutex poisoned") = ports;
+        let path = std::env::temp_dir().join(format!("fog-{pid}.sock"));
+        let _ = std::fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { break };
+                crate::ipc::handle_connection(stream, state.clone());
+            }
+        });
+        path
+    }
+
+    #[test]
+    fn test_adopt_shared_ports_uses_same_branch_sibling_ports() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let project = format!("fog-test-adopt-{}", std::process::id());
+        let sibling = spawn_status_instance(
+            std::process::id().wrapping_add(21),
+            &project,
+            "dev",
+            Some("mine"),
+            false,
+            [("db".to_string(), 55555u16)].into_iter().collect(),
+        );
+
+        let mut db = share_entry("db", Some(tcp_health(&addr.to_string())));
+        db.env = Some(
+            [(
+                "DATABASE_URL".to_string(),
+                "postgres://x@127.0.0.1:${ports.db}/x".to_string(),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let script = script_with_concurrent(vec![db]);
+        let mut ports: crate::ports::PortMap = [("db".to_string(), 12345u16)].into_iter().collect();
+
+        adopt_shared_ports(
+            &script,
+            "dev",
+            Path::new("."),
+            Some(&project),
+            Some("mine"),
+            &mut ports,
+            false,
+        );
+
+        let _ = std::fs::remove_file(&sibling);
+        assert_eq!(
+            ports["db"], 55555,
+            "a borrowed shared service must adopt the owner's live port"
+        );
+    }
+
+    #[test]
+    fn test_adopt_shared_ports_ignores_other_branch_sibling() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let project = format!("fog-test-adopt-branch-{}", std::process::id());
+        let sibling = spawn_status_instance(
+            std::process::id().wrapping_add(22),
+            &project,
+            "dev",
+            Some("other"),
+            false,
+            [("db".to_string(), 55555u16)].into_iter().collect(),
+        );
+
+        let db = share_entry("db", Some(tcp_health(&addr.to_string())));
+        let script = script_with_concurrent(vec![db]);
+        let mut ports: crate::ports::PortMap = [("db".to_string(), 12345u16)].into_iter().collect();
+
+        adopt_shared_ports(
+            &script,
+            "dev",
+            Path::new("."),
+            Some(&project),
+            Some("mine"),
+            &mut ports,
+            false,
+        );
+
+        let _ = std::fs::remove_file(&sibling);
+        assert_eq!(
+            ports["db"], 12345,
+            "another branch owns different resources and must not be adopted"
+        );
+    }
+
+    #[test]
+    fn test_adopt_shared_ports_ignores_no_share_sibling() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let project = format!("fog-test-adopt-noshare-{}", std::process::id());
+        let sibling = spawn_status_instance(
+            std::process::id().wrapping_add(23),
+            &project,
+            "dev",
+            Some("mine"),
+            true,
+            [("db".to_string(), 55555u16)].into_iter().collect(),
+        );
+
+        let db = share_entry("db", Some(tcp_health(&addr.to_string())));
+        let script = script_with_concurrent(vec![db]);
+        let mut ports: crate::ports::PortMap = [("db".to_string(), 12345u16)].into_iter().collect();
+
+        adopt_shared_ports(
+            &script,
+            "dev",
+            Path::new("."),
+            Some(&project),
+            Some("mine"),
+            &mut ports,
+            false,
+        );
+
+        let _ = std::fs::remove_file(&sibling);
+        assert_eq!(
+            ports["db"], 12345,
+            "a --no-share sibling yields nothing to adopt"
+        );
     }
 
     #[test]
