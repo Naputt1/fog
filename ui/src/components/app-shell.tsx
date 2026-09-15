@@ -1,37 +1,18 @@
 import { useState } from "react";
-import { Link, useLocation } from "@tanstack/react-router";
-import {
-  Boxes,
-  SquareTerminal,
-  HeartPulse,
-  Activity,
-  PanelLeft,
-  PanelRight,
-  Cog,
-  type LucideIcon,
-} from "lucide-react";
+import { Link, useLocation, useNavigate } from "@tanstack/react-router";
+import { PanelRight, Cog } from "lucide-react";
+
 import { RightSidebarContext } from "@/lib/right-sidebar-context";
+import { NAV_ITEMS, navIndexForPath } from "@/lib/nav";
+import { useSwipeNavigation } from "@/lib/use-swipe-navigation";
 
 import { cn, getHostLabel } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
-import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
-import { ScrollArea } from "@/components/ui/scroll-area";
+import { BottomNav } from "@/components/bottom-nav";
 import { BrandCloud } from "@/components/brand-cloud";
 
-interface NavItem {
-  to: string;
-  label: string;
-  icon: LucideIcon;
-  /** Path segment used to match active state ("" for the index route). */
-  match: string;
-}
-
-const NAV_ITEMS: NavItem[] = [
-  { to: "/", label: "Services", icon: Boxes, match: "" },
-  { to: "/logs", label: "Terminal", icon: SquareTerminal, match: "/logs" },
-  { to: "/health", label: "Health", icon: HeartPulse, match: "/health" },
-  { to: "/status", label: "Status", icon: Activity, match: "/status" },
-];
+/** Swipe surface that owns its own gesture; the shell must not also react. */
+const SERVICE_SWIPE_SCOPE = '[data-swipe-scope="services"]';
 
 function Brand() {
   return (
@@ -51,11 +32,11 @@ function Brand() {
   );
 }
 
-function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
+function SidebarNav() {
   const location = useLocation();
 
   return (
-    <nav className="flex flex-col gap-1 px-2">
+    <nav aria-label="Primary" className="flex flex-col gap-1 px-2">
       {NAV_ITEMS.map((item) => {
         const active =
           item.match === ""
@@ -66,7 +47,7 @@ function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
           <Link
             key={item.to}
             to={item.to}
-            onClick={onNavigate}
+            aria-current={active ? "page" : undefined}
             className={cn(
               "text-muted-foreground hover:bg-accent hover:text-accent-foreground flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm font-medium transition-colors",
               active &&
@@ -74,7 +55,7 @@ function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
             )}
             activeOptions={{ exact: item.match === "" }}
           >
-            <Icon className="size-4 shrink-0" />
+            <Icon className="size-4 shrink-0" aria-hidden="true" />
             {item.label}
           </Link>
         );
@@ -83,14 +64,14 @@ function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
   );
 }
 
-function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
+function SidebarContent() {
   const hostLabel = getHostLabel();
   return (
     <div className="flex h-full flex-col gap-4">
       <div className="border-border flex h-14 items-center border-b px-4">
         <Brand />
       </div>
-      <SidebarNav onNavigate={onNavigate} />
+      <SidebarNav />
       <div className="border-border mt-auto border-t p-4">
         <div className="text-muted-foreground flex items-center gap-2 font-mono text-xs">
           <Cog className="size-3.5" />
@@ -102,16 +83,24 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
 }
 
 export function AppShell({ children }: { children: React.ReactNode }) {
-  const [mobileOpen, setMobileOpen] = useState(false);
   const [rightOpen, setRightOpen] = useState(false);
   const [rightEnabled, setRightEnabled] = useState(false);
   const location = useLocation();
-  const current =
-    NAV_ITEMS.find((i) =>
-      i.match === ""
-        ? location.pathname === "/"
-        : location.pathname.startsWith(i.match)
-    ) ?? NAV_ITEMS[0];
+  const navigate = useNavigate();
+  const index = navIndexForPath(location.pathname);
+  const current = NAV_ITEMS[index] ?? NAV_ITEMS[0];
+
+  const goTo = (nextIndex: number) => {
+    const target = NAV_ITEMS[nextIndex];
+    if (!target) return;
+    void navigate({ to: target.to });
+  };
+
+  const swipeRef = useSwipeNavigation({
+    onPrev: () => goTo(index <= 0 ? NAV_ITEMS.length - 1 : index - 1),
+    onNext: () => goTo((index + 1) % NAV_ITEMS.length),
+    ignoreScope: SERVICE_SWIPE_SCOPE,
+  });
 
   return (
     <RightSidebarContext.Provider
@@ -122,67 +111,60 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         setEnabled: setRightEnabled,
       }}
     >
-      <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
-        <div className="bg-background text-foreground flex h-dvh w-full overflow-hidden">
-          {/* Desktop sidebar */}
-          <aside className="border-border bg-card hidden w-60 shrink-0 border-r md:block">
-            <SidebarContent />
-          </aside>
+      <div className="bg-background text-foreground flex h-dvh w-full flex-col overflow-hidden md:flex-row">
+        <a
+          href="#main"
+          className="bg-card focus-visible:ring-ring sr-only rounded-md px-3 py-2 text-sm focus-visible:not-sr-only focus-visible:absolute focus-visible:top-3 focus-visible:left-3 focus-visible:z-50 focus-visible:ring-2"
+        >
+          Skip to content
+        </a>
 
-          <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-            {/* Topbar */}
-            <header className="border-border bg-card/60 flex h-14 shrink-0 items-center gap-3 border-b px-4 backdrop-blur">
-              <SheetTrigger asChild className="md:hidden">
+        {/* Desktop sidebar */}
+        <aside className="border-border bg-card hidden w-60 shrink-0 border-r md:block">
+          <SidebarContent />
+        </aside>
+
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+          {/* Topbar */}
+          <header className="border-border bg-card/60 pt-safe flex min-h-14 shrink-0 items-center gap-3 border-b px-4 backdrop-blur">
+            <div className="flex min-w-0 items-center gap-2 font-mono">
+              <span className="text-primary">~</span>
+              <span className="text-foreground truncate text-sm">
+                /{current.label.toLowerCase()}
+              </span>
+            </div>
+
+            <div className="ml-auto flex items-center gap-3">
+              {rightEnabled && (
                 <Button
                   variant="ghost"
                   size="icon"
-                  aria-label="Open navigation"
+                  aria-label="Open services"
+                  className="lg:hidden"
+                  onClick={() => setRightOpen(true)}
                 >
-                  <PanelLeft className="size-5" />
+                  <PanelRight className="size-5" />
                 </Button>
-              </SheetTrigger>
+              )}
+            </div>
+          </header>
 
-              <div className="flex min-w-0 items-center gap-2 font-mono">
-                <span className="text-primary">~</span>
-                <span className="text-foreground truncate text-sm">
-                  /{current.label.toLowerCase()}
-                </span>
-              </div>
-
-              <div className="ml-auto flex items-center gap-3">
-                <div className="border-border bg-background flex items-center gap-1.5 rounded-full border px-2.5 py-1">
-                  <span className="bg-primary size-1.5 rounded-full" />
-                  <span className="text-muted-foreground font-mono text-[11px]">
-                    connected
-                  </span>
-                </div>
-                {rightEnabled && (
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    aria-label="Open services"
-                    className="lg:hidden"
-                    onClick={() => setRightOpen(true)}
-                  >
-                    <PanelRight className="size-5" />
-                  </Button>
-                )}
-              </div>
-            </header>
-
-            <ScrollArea className="min-h-0 flex-1">
-              <main className="mx-auto w-full max-w-6xl min-w-0 p-4 md:p-6">
-                {children}
-              </main>
-            </ScrollArea>
+          <div
+            ref={swipeRef}
+            className="min-h-0 flex-1 overflow-y-auto overscroll-contain"
+          >
+            <main
+              id="main"
+              tabIndex={-1}
+              className="mx-auto w-full max-w-6xl min-w-0 p-4 outline-none md:p-6"
+            >
+              {children}
+            </main>
           </div>
-        </div>
 
-        {/* Mobile sidebar (fixed overlay, side="left") */}
-        <SheetContent side="left" className="w-60 p-0">
-          <SidebarContent onNavigate={() => setMobileOpen(false)} />
-        </SheetContent>
-      </Sheet>
+          <BottomNav />
+        </div>
+      </div>
     </RightSidebarContext.Provider>
   );
 }

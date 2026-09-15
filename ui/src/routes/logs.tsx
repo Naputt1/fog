@@ -1,8 +1,8 @@
 import { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 
-import type { Service } from "@/lib/api";
 import { useServices } from "@/lib/hooks";
+import { groupServices } from "@/lib/services";
 import { Button } from "@/components/ui/button";
 import { LoadingState } from "@/components/page-state";
 // xterm (~300K+) is the heaviest dependency of the dashboard. Both views that
@@ -21,6 +21,7 @@ const LogView = lazy(() =>
 import { TerminalKeypad } from "@/components/terminal/TerminalKeypad";
 import { ServiceSidebar } from "@/components/terminal/ServiceSidebar";
 import type { TerminalHandle } from "@/components/terminal/terminal-handle";
+import { useSwipeNavigation } from "@/lib/use-swipe-navigation";
 import { cn } from "@/lib/utils";
 
 export const Route = createFileRoute("/logs")({
@@ -38,48 +39,6 @@ export const Route = createFileRoute("/logs")({
 /* ------------------------------------------------------------------ */
 /* Service grouping (project → worktree → services)                    */
 /* ------------------------------------------------------------------ */
-
-interface WorktreeBucket {
-  worktree: string;
-  services: Service[];
-}
-
-interface ProjectBucket {
-  project: string;
-  worktrees: WorktreeBucket[];
-}
-
-/** Group services by project, then worktree ("" = default checkout first). */
-function groupServices(services: Service[]): ProjectBucket[] {
-  const byProject = new Map<string, Map<string, Service[]>>();
-  for (const svc of services) {
-    let byWorktree = byProject.get(svc.project);
-    if (!byWorktree) {
-      byWorktree = new Map();
-      byProject.set(svc.project, byWorktree);
-    }
-    const bucket = byWorktree.get(svc.worktree);
-    if (bucket) bucket.push(svc);
-    else byWorktree.set(svc.worktree, [svc]);
-  }
-
-  const projects: ProjectBucket[] = [];
-  for (const [project, byWorktree] of byProject) {
-    const worktrees: WorktreeBucket[] = [];
-    for (const [worktree, list] of byWorktree) {
-      list.sort((a, b) => a.service.localeCompare(b.service));
-      worktrees.push({ worktree, services: list });
-    }
-    worktrees.sort((a, b) => {
-      if (a.worktree === "") return -1;
-      if (b.worktree === "") return 1;
-      return a.worktree.localeCompare(b.worktree);
-    });
-    projects.push({ project, worktrees });
-  }
-  projects.sort((a, b) => a.project.localeCompare(b.project));
-  return projects;
-}
 
 const LS_KEY = "fog:terminal:last";
 const LS_MODE_KEY = "fog:logs:mode";
@@ -299,11 +258,33 @@ function LogsPage() {
     });
   };
 
+  // Swiping across the log/terminal pane steps through the project's services,
+  // mirroring the TUI's j/k. The shell page-swipe ignores this scope so the two
+  // gestures never fight.
+  const serviceIndex = projectServices.findIndex(
+    (s) => s.container === active?.container
+  );
+  const swipeRef = useSwipeNavigation({
+    enabled: projectServices.length > 1,
+    onPrev: () => {
+      if (serviceIndex > 0)
+        handleSelectService(projectServices[serviceIndex - 1].container);
+    },
+    onNext: () => {
+      if (serviceIndex >= 0 && serviceIndex < projectServices.length - 1)
+        handleSelectService(projectServices[serviceIndex + 1].container);
+    },
+  });
+
   return (
-    <div className="flex min-w-0 flex-col gap-3 lg:h-[calc(100dvh-8rem)] lg:flex-row lg:gap-6">
-      {/* Main terminal / logs */}
-      <div className="flex min-w-0 flex-1 flex-col gap-3 lg:min-h-0">
-        <div className="flex flex-wrap items-center gap-2">
+    <div className="flex h-[calc(100dvh-var(--topbar-h)-var(--bottom-nav-h)-2rem)] min-w-0 flex-col gap-3 md:h-auto lg:h-[calc(100dvh-8rem)] lg:flex-row lg:gap-6">
+      {/* Main terminal / logs — the service-swipe scope */}
+      <div
+        ref={swipeRef}
+        data-swipe-scope="services"
+        className="flex min-h-0 min-w-0 flex-1 flex-col gap-3"
+      >
+        <div className="flex shrink-0 flex-wrap items-center gap-2">
           <div className="inline-flex rounded-md border p-1">
             <Button
               variant={showTerminal ? "ghost" : "default"}
@@ -335,7 +316,7 @@ function LogsPage() {
           </span>
         </div>
         {isDocker ? (
-          <div className="text-muted-foreground flex items-center gap-2 font-mono text-xs">
+          <div className="text-muted-foreground flex shrink-0 items-center gap-2 font-mono text-xs">
             <span className="rounded-full bg-amber-500/20 px-2 py-0.5 text-amber-600">
               docker logs — read-only
             </span>
@@ -345,7 +326,7 @@ function LogsPage() {
           </div>
         ) : (
           showTerminal && (
-            <label className="flex items-center gap-2 text-sm">
+            <label className="flex shrink-0 items-center gap-2 text-sm">
               <input
                 type="checkbox"
                 checked={live}
@@ -367,7 +348,7 @@ function LogsPage() {
               ref={termApiRef}
               service={active?.service}
               live={live && !!active}
-              className="flex min-h-[320px] flex-1"
+              className="flex min-h-[320px] flex-1 lg:min-h-0"
             />
           </Suspense>
         ) : (
@@ -378,7 +359,7 @@ function LogsPage() {
               container={active?.container ?? null}
               pid={active?.pid ?? null}
               service={active?.service ?? null}
-              className="flex min-h-[320px] flex-1"
+              className="flex min-h-[320px] flex-1 lg:min-h-0"
             />
           </Suspense>
         )}
@@ -391,7 +372,7 @@ function LogsPage() {
           onRaw={(data) => termApiRef.current?.sendRaw(data)}
           onScroll={(amount) => termApiRef.current?.scroll(amount)}
           onCopy={handleCopy}
-          className="lg:hidden"
+          className="shrink-0 lg:hidden"
         />
       </div>
 

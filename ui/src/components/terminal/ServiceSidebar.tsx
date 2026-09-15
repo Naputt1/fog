@@ -1,6 +1,6 @@
-import { Fragment, useEffect } from "react";
+import { Fragment, useEffect, useId } from "react";
 import type { Service } from "@/lib/api";
-import { ScrollArea } from "@/components/ui/scroll-area";
+import type { ProjectBucket } from "@/lib/services";
 import {
   Sheet,
   SheetContent,
@@ -9,16 +9,6 @@ import {
 } from "@/components/ui/sheet";
 import { cn } from "@/lib/utils";
 import { useRightSidebar } from "@/lib/right-sidebar-context";
-
-interface WorktreeBucket {
-  worktree: string;
-  services: Service[];
-}
-
-interface ProjectBucket {
-  project: string;
-  worktrees: WorktreeBucket[];
-}
 
 interface ServiceSidebarProps {
   groups: ProjectBucket[];
@@ -45,21 +35,28 @@ function ServiceButton({
     <button
       type="button"
       onClick={() => onSelect(svc.container)}
+      aria-current={active ? "true" : undefined}
       className={cn(
-        "flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left font-mono text-xs transition-colors",
+        "focus-visible:ring-ring/60 flex min-h-9 w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left font-mono text-xs transition-colors outline-none focus-visible:ring-2",
         active
           ? "bg-accent text-accent-foreground shadow-[inset_0_0_0_1px_var(--color-primary)/20]"
           : "text-muted-foreground hover:bg-accent/60 hover:text-foreground"
       )}
     >
       <span
+        aria-hidden="true"
         className={cn(
           "size-1.5 shrink-0 rounded-full",
           running ? "bg-emerald-500" : "bg-muted-foreground/50"
         )}
       />
       <span className="min-w-0 flex-1 truncate">{svc.service}</span>
-      {active && <span className="bg-primary h-1 w-1 shrink-0 rounded-full" />}
+      {active && (
+        <span
+          aria-hidden="true"
+          className="bg-primary h-1 w-1 shrink-0 rounded-full"
+        />
+      )}
     </button>
   );
 }
@@ -173,7 +170,7 @@ export function ServiceSidebar(props: ServiceSidebarProps) {
           selectedProject={selectedProject}
           onSelectProject={onSelectProject}
         />
-        <ScrollArea className="min-h-0 flex-1">
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
           <SidebarContent
             groups={displayGroups}
             activeContainer={activeContainer}
@@ -181,13 +178,13 @@ export function ServiceSidebar(props: ServiceSidebarProps) {
             isLoading={isLoading}
             isError={isError}
           />
-        </ScrollArea>
+        </div>
       </aside>
 
       {/* Mobile: sheet controlled by header button */}
       <Sheet open={ctx?.open ?? false} onOpenChange={(o) => ctx?.setOpen(o)}>
-        <SheetContent side="right" className="w-72 p-0">
-          <SheetHeader className="border-b px-4 py-3">
+        <SheetContent side="right" className="w-72 gap-0 p-0">
+          <SheetHeader className="border-border pt-safe border-b px-4 py-3">
             <SheetTitle className="font-mono text-xs tracking-wider uppercase">
               Services
             </SheetTitle>
@@ -197,7 +194,7 @@ export function ServiceSidebar(props: ServiceSidebarProps) {
             selectedProject={selectedProject}
             onSelectProject={onSelectProject}
           />
-          <ScrollArea className="h-[calc(100dvh-96px)]">
+          <div className="pb-safe min-h-0 flex-1 overflow-y-auto overscroll-contain">
             <SidebarContent
               groups={displayGroups}
               activeContainer={activeContainer}
@@ -205,7 +202,7 @@ export function ServiceSidebar(props: ServiceSidebarProps) {
               isLoading={isLoading}
               isError={isError}
             />
-          </ScrollArea>
+          </div>
         </SheetContent>
       </Sheet>
     </>
@@ -221,16 +218,21 @@ function ProjectDropdown({
   selectedProject?: string;
   onSelectProject?: (project: string) => void;
 }) {
+  const selectId = useId();
   if (!projectOptions.length || !onSelectProject) return null;
   return (
     <div className="border-b px-2 py-2">
-      <label className="text-muted-foreground mb-1 block font-mono text-[10px] tracking-wider uppercase">
+      <label
+        htmlFor={selectId}
+        className="text-muted-foreground mb-1 block font-mono text-[10px] tracking-wider uppercase"
+      >
         Project
       </label>
       <select
+        id={selectId}
         value={selectedProject ?? ""}
         onChange={(e) => onSelectProject(e.target.value)}
-        className="bg-background border-input focus:ring-ring w-full rounded-md border px-2 py-1.5 font-mono text-xs focus:ring-1 focus:outline-none"
+        className="bg-background border-input focus:ring-ring h-9 w-full rounded-md border px-2 py-1.5 font-mono text-xs focus:ring-1 focus:outline-none"
       >
         {projectOptions.map((p) => (
           <option key={p.name} value={p.name}>
@@ -241,5 +243,3 @@ function ProjectDropdown({
     </div>
   );
 }
-
-export type { ProjectBucket, WorktreeBucket };

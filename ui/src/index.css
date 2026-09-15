@@ -1,5 +1,4 @@
 @import "tailwindcss";
-@import "tw-animate-css";
 
 @custom-variant dark (&:is(.dark *));
 
@@ -32,7 +31,7 @@
   --secondary-foreground: oklch(0.93 0.008 165);
 
   --muted: oklch(0.22 0.016 165);
-  --muted-foreground: oklch(0.62 0.02 165);
+  --muted-foreground: oklch(0.66 0.02 165);
 
   --accent: oklch(0.24 0.04 180);
   --accent-foreground: oklch(0.93 0.008 165);
@@ -50,6 +49,13 @@
   --ring: oklch(0.79 0.19 150);
 
   --radius: 0.5rem;
+
+  /* Height reserved for the mobile bottom tab bar, including the home
+     indicator inset so page content and the terminal keypad clear it. */
+  --bottom-nav-h: calc(3.5rem + env(safe-area-inset-bottom));
+
+  /* App topbar height including the status-bar/notch inset. */
+  --topbar-h: calc(3.5rem + env(safe-area-inset-top));
 
   /* Fonts */
   --font-sans:
@@ -97,9 +103,11 @@
 @layer base {
   * {
     border-color: var(--color-border);
+    -webkit-tap-highlight-color: transparent;
   }
   html {
     color-scheme: dark;
+    -webkit-text-size-adjust: 100%;
     /*
      * Horizontal-overflow safety net for narrow viewports.
      * `overflow-x: clip` (not `hidden`) intentionally does NOT create a scroll
@@ -119,6 +127,35 @@
     /* Same guard on body for content that escapes the html scroll box. */
     overflow-x: clip;
   }
+  /* Installed (standalone) app: don't rubber-band the whole document, so a
+     vertical drag never triggers the browser's pull-to-refresh. */
+  @media (display-mode: standalone) {
+    body {
+      overscroll-behavior-y: none;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+@utility pt-safe {
+  padding-top: env(safe-area-inset-top);
+}
+
+@utility pb-safe {
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+@utility h-safe-bottom {
+  height: env(safe-area-inset-bottom);
 }
 
 @layer utilities {

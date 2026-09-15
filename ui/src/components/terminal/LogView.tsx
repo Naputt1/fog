@@ -373,18 +373,25 @@ export function LogView({
       <div className="border-border bg-card/60 flex h-10 shrink-0 items-center gap-2 border-b px-3">
         <span className="flex items-center gap-2 font-mono text-xs">
           <span
+            aria-hidden="true"
             className={cn(
               "size-2 rounded-full",
               connected ? "bg-emerald-500" : "animate-pulse bg-amber-400"
             )}
           />
-          <span className="text-muted-foreground">
+          <span className="text-muted-foreground" aria-live="polite">
             {connected ? "streaming" : "connecting…"}
           </span>
-          <span className="text-muted-foreground/70 hidden sm:inline">
+          <span
+            aria-hidden="true"
+            className="text-muted-foreground/70 hidden sm:inline"
+          >
             {lineCount} lines
           </span>
-          <span className="text-muted-foreground/70 hidden md:inline">
+          <span
+            aria-hidden="true"
+            className="text-muted-foreground/70 hidden md:inline"
+          >
             {loadingMore
               ? "loading older…"
               : hasMore
@@ -428,7 +435,7 @@ export function LogView({
       <div className="flex min-h-0 flex-1 bg-[#0d1117] p-2">
         <div
           ref={elRef}
-          className={cn("h-full min-h-[280px] w-full", !fitted && "opacity-0")}
+          className={cn("h-full min-h-0 w-full", !fitted && "opacity-0")}
         />
       </div>
     </div>

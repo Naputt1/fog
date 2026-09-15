@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useId, useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import {
   useKillInstance,
@@ -233,12 +233,21 @@ function ServiceTable({
 const selectClass =
   "border-input dark:bg-input/30 h-9 w-full min-w-0 rounded-md border bg-transparent px-3 py-1 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50";
 
-/** Tiny stacked field label above a select/input. */
-function FieldLabel({ children }: { children: React.ReactNode }) {
+/** Tiny stacked field label above a select/input, wired to its control id. */
+function FieldLabel({
+  htmlFor,
+  children,
+}: {
+  htmlFor: string;
+  children: React.ReactNode;
+}) {
   return (
-    <span className="text-muted-foreground mb-1 block font-mono text-[11px] tracking-wide uppercase">
+    <label
+      htmlFor={htmlFor}
+      className="text-muted-foreground mb-1 block font-mono text-[11px] tracking-wide uppercase"
+    >
       {children}
-    </span>
+    </label>
   );
 }
 
@@ -249,6 +258,7 @@ function FieldLabel({ children }: { children: React.ReactNode }) {
 function LaunchCard() {
   const { data, isLoading, isError, error } = useLaunchTargets();
   const { mutate, isPending, data: result, error: launchError } = useLaunch();
+  const fieldId = useId();
 
   // Known-project mode state.
   const [projectPath, setProjectPath] = useState("");
@@ -316,8 +326,9 @@ function LaunchCard() {
           ) : (
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_1fr_1fr_auto] sm:items-end">
               <div>
-                <FieldLabel>Project</FieldLabel>
+                <FieldLabel htmlFor={`${fieldId}-project`}>Project</FieldLabel>
                 <select
+                  id={`${fieldId}-project`}
                   className={selectClass}
                   value={projectPath}
                   disabled={isPending}
@@ -343,8 +354,11 @@ function LaunchCard() {
                 ) : null}
               </div>
               <div>
-                <FieldLabel>Worktree / branch</FieldLabel>
+                <FieldLabel htmlFor={`${fieldId}-worktree`}>
+                  Worktree / branch
+                </FieldLabel>
                 <select
+                  id={`${fieldId}-worktree`}
                   className={selectClass}
                   value={worktreePath}
                   disabled={isPending || launchable.length === 0}
@@ -364,8 +378,11 @@ function LaunchCard() {
                 </select>
               </div>
               <div>
-                <FieldLabel>Script</FieldLabel>
+                <FieldLabel htmlFor={`${fieldId}-known-script`}>
+                  Script
+                </FieldLabel>
                 <select
+                  id={`${fieldId}-known-script`}
                   className={selectClass}
                   value={script}
                   disabled={isPending || !selectedWorktree}
@@ -399,8 +416,11 @@ function LaunchCard() {
           </div>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-[2fr_1fr_1fr_auto] sm:items-end">
             <div>
-              <FieldLabel>Config dir (absolute)</FieldLabel>
+              <FieldLabel htmlFor={`${fieldId}-new-path`}>
+                Config dir (absolute)
+              </FieldLabel>
               <Input
+                id={`${fieldId}-new-path`}
                 value={newPath}
                 placeholder="/abs/path/to/project"
                 className="font-mono"
@@ -409,8 +429,9 @@ function LaunchCard() {
               />
             </div>
             <div>
-              <FieldLabel>Script</FieldLabel>
+              <FieldLabel htmlFor={`${fieldId}-new-script`}>Script</FieldLabel>
               <Input
+                id={`${fieldId}-new-script`}
                 value={newScript}
                 placeholder="dev"
                 className="font-mono"
@@ -419,8 +440,11 @@ function LaunchCard() {
               />
             </div>
             <div>
-              <FieldLabel>Branch (optional)</FieldLabel>
+              <FieldLabel htmlFor={`${fieldId}-new-branch`}>
+                Branch (optional)
+              </FieldLabel>
               <Input
+                id={`${fieldId}-new-branch`}
                 value={newBranch}
                 placeholder="feature-x"
                 className="font-mono"

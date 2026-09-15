@@ -76,53 +76,6 @@ export interface StatusSnapshot {
   instances: InstanceStatus[];
 }
 
-/** Sidebar layout section of the fog config (null when unset). */
-export interface SidebarConfig {
-  min_width: number;
-  max_width: number;
-}
-
-/** dnsmasq section of the fog config (null when unset). */
-export interface DnsmasqConfig {
-  /** Domains resolved via the dnsmasq instance. */
-  domains: string[];
-  /** Address dnsmasq binds / resolves to. */
-  address: string;
-  /** Port dnsmasq listens on. */
-  port: number;
-}
-
-/** router section of the fog config (null when unset). */
-export interface RouterConfig {
-  /** Name of the shared docker network. */
-  shared_network: string;
-  /** Port the index/landing page is served on. */
-  index_port: number;
-  /** Whether TLS is enabled for router-managed routes. */
-  tls_enabled: boolean;
-}
-
-/** Fog config summary returned by GET /api/config. */
-export interface FogConfig {
-  /** Names of the available scripts. */
-  scripts: string[];
-  /** Max log scrollback lines, null when unset (unlimited?). */
-  max_scrollback: number | null;
-  /** Sidebar layout options, null when unset. */
-  sidebar: SidebarConfig | null;
-  /** Whether dark theme is enabled. */
-  theme: boolean;
-  /** dnsmasq integration options, null when unset. */
-  dnsmasq: DnsmasqConfig | null;
-  /** Router options, null when unset. */
-  router: RouterConfig | null;
-}
-
-/** Response envelope of GET /api/config. */
-export interface ConfigResponse {
-  config: FogConfig;
-}
-
 /** One entry of GET /api/health. */
 export interface HealthItem {
   /** Process id of the instance running the service. */
@@ -230,11 +183,6 @@ export function fetchServices(opts?: {
 /** IPC status snapshot. */
 export function fetchStatus(): Promise<StatusSnapshot> {
   return fetchJson<StatusSnapshot>("/api/status");
-}
-
-/** Fog config summary. */
-export function fetchConfig(): Promise<ConfigResponse> {
-  return fetchJson<ConfigResponse>("/api/config");
 }
 
 /** Per-service health results. */

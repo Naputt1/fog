@@ -451,13 +451,14 @@ export function TerminalView({
   return (
     <div
       className={cn(
-        "flex flex-col overflow-hidden rounded-lg border transition-none",
+        "flex flex-col overflow-hidden rounded-lg border",
         className
       )}
     >
-      <div className="border-border bg-card/60 flex h-10 shrink-0 items-center gap-2 border-b px-3 transition-none">
+      <div className="border-border bg-card/60 flex h-10 shrink-0 items-center gap-2 border-b px-3">
         <span className="flex items-center gap-2 font-mono text-xs">
           <span
+            aria-hidden="true"
             className={cn(
               "size-2 rounded-full",
               connState === "connected" && "bg-emerald-500",
@@ -465,7 +466,7 @@ export function TerminalView({
               connState === "disconnected" && "bg-destructive"
             )}
           />
-          <span className="text-muted-foreground">
+          <span className="text-muted-foreground" aria-live="polite">
             {connState === "connected" && "connected"}
             {connState === "connecting" && "connecting…"}
             {connState === "disconnected" && "disconnected"}
@@ -500,13 +501,10 @@ export function TerminalView({
           </Button>
         </div>
       </div>
-      <div className="flex min-h-0 flex-1 bg-[#0d1117] p-2 transition-none">
+      <div className="flex min-h-0 flex-1 bg-[#0d1117] p-2">
         <div
           ref={containerRef}
-          className={cn(
-            "h-full min-h-[280px] w-full transition-none",
-            !fitted && "opacity-0"
-          )}
+          className={cn("h-full min-h-0 w-full", !fitted && "opacity-0")}
         />
       </div>
     </div>

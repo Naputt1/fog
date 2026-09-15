@@ -1,22 +1,17 @@
 /**
- * React Query hooks + a small SSE hook that wrap the fog API client
- * (`@/lib/api`). Keeping data-fetching in hooks means pages stay thin and
- * adding mutations later (post/restart/control) only requires adding a
- * `useMutation` — the api module already isolates the transport layer.
+ * React Query hooks that wrap the fog API client (`@/lib/api`). Keeping
+ * data-fetching in hooks means pages stay thin and adding mutations later
+ * only requires adding a `useMutation` — the api module isolates transport.
  */
-import { useCallback, useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   fetchServices,
   fetchStatus,
-  fetchConfig,
   fetchHealth,
   fetchLaunchTargets,
   postLaunch,
   postKillInstance,
   postServiceAction,
-  subscribeLogs,
-  type LogLine,
   type ServiceAction,
 } from "@/lib/api";
 
@@ -38,15 +33,6 @@ export function useStatus() {
     queryKey: ["status"],
     queryFn: fetchStatus,
     refetchInterval: POLL_MS,
-  });
-}
-
-/** Fog config summary. */
-export function useConfig() {
-  return useQuery({
-    queryKey: ["config"],
-    queryFn: fetchConfig,
-    staleTime: 30_000,
   });
 }
 
@@ -98,8 +84,6 @@ export function useKillInstance() {
   });
 }
 
-const MAX_LOG_LINES = 2_000;
-
 /** Launchable projects/worktrees/scripts (cached briefly, not polled). */
 export function useLaunchTargets() {
   return useQuery({
@@ -131,42 +115,4 @@ export function useLaunch() {
       queryClient.invalidateQueries({ queryKey: ["health"] });
     },
   });
-}
-
-/**
- * Subscribe to the live SSE log stream for a service.
- *
- * Keeps the last `MAX_LOG_LINES` lines in memory and clears the buffer when
- * the service changes. Callers get `lines` (append-only) and `clear()`.
- */
-export function useLogStream(service: string | null | undefined) {
-  const [lines, setLines] = useState<LogLine[]>([]);
-  const [connected, setConnected] = useState(false);
-
-  useEffect(() => {
-    if (!service) {
-      setLines([]);
-      setConnected(false);
-      return;
-    }
-    setLines([]);
-    setConnected(false);
-
-    const unsubscribe = subscribeLogs(service, {
-      onOpen: () => setConnected(true),
-      onLine: (line) =>
-        setLines((prev) =>
-          prev.length >= MAX_LOG_LINES
-            ? [...prev.slice(prev.length - MAX_LOG_LINES + 1), line]
-            : [...prev, line]
-        ),
-      // EventSource fires `error` on transient reconnects too; keep connected
-      // until we actually open again — the browser manages retries.
-    });
-    return unsubscribe;
-  }, [service]);
-
-  const clear = useCallback(() => setLines([]), []);
-
-  return { lines, connected, clear };
 }
