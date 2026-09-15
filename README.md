@@ -51,6 +51,18 @@ cargo install --git https://github.com/Naputt1/fog.git --tag v0.1.2
 
 If `ui/dist` is absent on a git install, `build.rs` fetches the prebuilt SPA from the GitHub Release. For offline builds use `FOG_SKIP_SPA_DOWNLOAD=1`. Use `FOG_REQUIRE_SPA=1` to fail the build instead of embedding the fallback page.
 
+### Local rebuild
+
+After changing the UI or Rust sources, rebuild the SPA, recompile, and replace the installed `fog` in one step:
+
+```bash
+scripts/reinstall.sh             # build ui/ + cargo --release, swap the binary in place
+scripts/reinstall.sh --skip-ui   # Rust only (reuse the current ui/dist)
+scripts/reinstall.sh --restart   # also restart the running index server so the new UI is live
+```
+
+A running index server keeps serving its old embedded SPA until restarted, so the script warns when it detects one. Pass `--restart` to kill the detected index server(s) and respawn them from the new binary (safe; the dashboard re-attaches on the next request).
+
 ## Quick start
 
 Create `fog.json`:

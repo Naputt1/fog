@@ -38,6 +38,20 @@ The `fog` binary is placed in `~/.cargo/bin/`.
 
 If `ui/dist` is absent on a git install, `build.rs` fetches the prebuilt SPA from the GitHub Release. For offline builds use `FOG_SKIP_SPA_DOWNLOAD=1`. Use `FOG_REQUIRE_SPA=1` to fail the build instead of embedding the fallback page.
 
+### Rebuild and replace the installed binary
+
+From a checkout, rebuild the frontend, recompile, and atomically replace the `fog` on your `$PATH` (falls back to `~/.cargo/bin/fog`):
+
+```bash
+scripts/reinstall.sh             # build ui/ + cargo --release
+scripts/reinstall.sh --skip-ui   # Rust only (reuse the current ui/dist)
+scripts/reinstall.sh --restart   # also restart the running index server
+```
+
+The final swap is a rename, so it is safe to run while `fog` is running: new invocations pick up the new binary, the running process keeps the old one until it restarts.
+
+The index server (the web dashboard) embeds the SPA at compile time and keeps serving its old UI until it is restarted. The script detects a running index server via its `fog-index-<port>.pid` pidfile and warns about it; pass `--restart` to kill it and respawn it from the freshly installed binary. This is safe — the dashboard re-attaches on the next request — and is what makes UI changes show up immediately.
+
 ## Quick start
 
 Create a `fog.json` with at least one script:
