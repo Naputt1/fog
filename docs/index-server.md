@@ -74,9 +74,20 @@ back to the generated directory page above.
 
 ### Service controls
 
-The `/status` page shows **Start**, **Stop** and **Restart** buttons on each
-service row — the services of a running fog instance, as listed by
-`GET /api/status` → `instances[].services[]`. The buttons call
+Start, **Stop** and **Restart** buttons appear on each service row of:
+
+- the `/status` page — the services of a running fog instance, as listed by
+  `GET /api/status` → `instances[].services[]`;
+- the project → branch pages (`/projects/{project}/{branch}`) — the branch's
+  services across its instances, plus the per-service logs/terminal drawer.
+
+The branch views are driven by `GET /api/status` (so **stopped** services are
+still listed and can be restarted) and enriched with `GET /api/services` for the
+URL/ports/container of running services. When several scripts (or several
+instances of the same script) serve one branch, the branch list splits them per
+instance, and each instance has a **Kill** button.
+
+The buttons call
 `POST /api/instances/{pid}/services/{name}/action` with a JSON body:
 
 ```json

@@ -1,17 +1,28 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { ExternalLink, X } from "lucide-react";
 
-import { useServices } from "@/lib/hooks";
+import { useServices, useStatus } from "@/lib/hooks";
 import {
   DEFAULT_WORKTREE,
+  branchStats,
+  buildInstanceViews,
+  findBranch,
   findProject,
   findWorktree,
+  groupByBranch,
   groupServices,
+  type InstanceServiceView,
+  type InstanceView,
+  type WorktreeBucket,
 } from "@/lib/services";
 import { PageHeader } from "@/components/page-state";
 import { StatusBadge } from "@/components/status-badge";
 import { ServiceUrl } from "@/components/service-url";
-import { ServiceTerminal, type TerminalMode } from "@/components/terminal/ServiceTerminal";
+import { ServiceActions } from "@/components/service-actions";
+import {
+  ServiceTerminal,
+  type TerminalMode,
+} from "@/components/terminal/ServiceTerminal";
 import { buttonVariants } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import {
@@ -33,8 +44,14 @@ import { cn } from "@/lib/utils";
 export const Route = createFileRoute("/projects/$project/$branch")({
   validateSearch: (
     search: Record<string, unknown>
-  ): { service?: string; view?: TerminalMode } => ({
+  ): { service?: string; pid?: number; view?: TerminalMode } => ({
     service: typeof search.service === "string" ? search.service : undefined,
+    pid:
+      typeof search.pid === "number"
+        ? search.pid
+        : typeof search.pid === "string" && search.pid !== ""
+          ? Number(search.pid)
+          : undefined,
     view:
       search.view === "terminal" || search.view === "logs"
         ? (search.view as TerminalMode)
@@ -43,16 +60,135 @@ export const Route = createFileRoute("/projects/$project/$branch")({
   component: BranchServicesPage,
 });
 
+/** Synthetic pid for directory-only services when no instance is reported. */
+const SYNTHETIC_PID = 0;
+
+/**
+ * Wraps docker-directory services into the instance view shape so the common
+ * rendering path (and the drawer) works even when `/api/status` yields no
+ * instances — controls are disabled for the synthetic instance.
+ */
+function legacyInstances(
+  bucket: WorktreeBucket,
+  project: string
+): InstanceView[] {
+  return [
+    {
+      pid: SYNTHETIC_PID,
+      script: "",
+      project,
+      worktree: bucket.worktree,
+      branch: null,
+      services: bucket.services
+        .slice()
+        .sort((a, b) => a.service.localeCompare(b.service))
+        .map((s) => ({
+          name: s.service,
+          running: s.status === "running",
+          health: s.health,
+          service: s,
+        })),
+    },
+  ];
+}
+
+/** One service row's action controls (disabled for the synthetic instance). */
+function RowActions({
+  inst,
+  svc,
+}: {
+  inst: InstanceView;
+  svc: InstanceServiceView;
+}) {
+  if (inst.pid <= 0) return null;
+  return (
+    <ServiceActions
+      pid={inst.pid}
+      name={svc.name}
+      running={svc.running}
+      className="flex flex-col items-start gap-1"
+    />
+  );
+}
+
 function BranchServicesPage() {
   const { project, branch } = Route.useParams();
   const search = Route.useSearch();
   const navigate = Route.useNavigate();
-  const { data } = useServices({ withInternal: true });
+  const { data: services } = useServices({ withInternal: true });
+  const { data: status } = useStatus();
 
-  const bucket = findProject(groupServices(data ?? []), project);
-  const worktree = bucket ? findWorktree(bucket, branch) : null;
+  const allBranches = groupByBranch(
+    buildInstanceViews(status?.instances ?? [], services ?? [])
+  );
+  const bucket = findBranch(allBranches, project, branch);
+  const projectBucket = findProject(groupServices(services ?? []), project);
+  const legacy =
+    bucket || !projectBucket ? null : findWorktree(projectBucket, branch);
 
-  if (!bucket || !worktree) {
+  const scoped =
+    bucket && search.pid != null
+      ? bucket.instances.filter((i) => i.pid === search.pid)
+      : bucket?.instances;
+  const instances: InstanceView[] = bucket
+    ? scoped && scoped.length > 0
+      ? scoped
+      : bucket.instances
+    : legacy
+      ? legacyInstances(legacy, projectBucket?.project ?? project)
+      : [];
+
+  const stats = bucket
+    ? branchStats(bucket)
+    : legacy
+      ? {
+          total: legacy.services.length,
+          running: legacy.services.filter((s) => s.status === "running").length,
+          ports: legacy.services.flatMap((s) => s.ports),
+        }
+      : { total: 0, running: 0, ports: [] };
+
+  const label = (bucket?.worktree ?? legacy?.worktree) || DEFAULT_WORKTREE;
+  const projectName = bucket?.project ?? projectBucket?.project ?? project;
+  const multi = (bucket?.instances.length ?? 0) > 1 || search.pid != null;
+
+  const selected = search.service
+    ? (instances
+        .flatMap((inst) => inst.services.map((svc) => ({ inst, svc })))
+        .find(
+          (x) =>
+            x.svc.name === search.service &&
+            (search.pid == null || x.inst.pid === search.pid)
+        ) ?? null)
+    : null;
+
+  const mode: TerminalMode = search.view ?? "logs";
+
+  const openService = (pid: number, name: string) => {
+    void navigate({
+      search: (prev) => ({ ...prev, service: name, pid }),
+      replace: true,
+    });
+  };
+
+  const closeDrawer = () => {
+    void navigate({
+      search: (prev) => ({ ...prev, service: undefined }),
+      replace: true,
+    });
+  };
+
+  const setMode = (next: TerminalMode) => {
+    void navigate({
+      search: (prev) => ({
+        ...prev,
+        view: next === "terminal" ? "terminal" : undefined,
+      }),
+      replace: true,
+    });
+  };
+
+  if (instances.length === 0) {
     return (
       <Card>
         <CardContent className="py-10 text-center">
@@ -76,125 +212,212 @@ function BranchServicesPage() {
     );
   }
 
-  const services = worktree.services;
-  const label = worktree.worktree || DEFAULT_WORKTREE;
-  const selected = search.service
-    ? (services.find((s) => s.container === search.service) ?? null)
-    : null;
-  const mode: TerminalMode = search.view ?? "logs";
-
-  const openService = (container: string) => {
-    void navigate({
-      search: (prev) => ({ ...prev, service: container }),
-      replace: true,
-    });
-  };
-
-  const closeDrawer = () => {
-    void navigate({
-      search: (prev) => ({ ...prev, service: undefined }),
-      replace: true,
-    });
-  };
-
-  const setMode = (next: TerminalMode) => {
-    void navigate({
-      search: (prev) => ({
-        ...prev,
-        view: next === "terminal" ? "terminal" : undefined,
-      }),
-      replace: true,
-    });
-  };
+  const containerOf = (svc: InstanceServiceView, pid: number) =>
+    svc.service?.container ?? `fog-${pid}-${svc.name}`;
 
   return (
     <div className="min-w-0 space-y-4">
       <PageHeader
         title={label}
-        description={`${services.length} ${services.length === 1 ? "service" : "services"} on ${bucket.project}. Tap a service to stream its logs or open a PTY.`}
+        description={`${stats.total} ${stats.total === 1 ? "service" : "services"} · ${stats.running} running on ${projectName}. Start, stop or restart, then tap a service to stream its logs or open a PTY.`}
       />
 
-      {/* Mobile: tap-friendly cards */}
-      <div className="space-y-2 lg:hidden">
-        {services.map((svc) => (
-          <div
-            key={svc.container}
-            onClick={() => openService(svc.container)}
+      {multi ? (
+        <div className="flex flex-wrap gap-1.5">
+          <button
+            type="button"
+            onClick={() =>
+              void navigate({
+                search: (prev) => ({
+                  ...prev,
+                  pid: undefined,
+                  service: undefined,
+                }),
+                replace: true,
+              })
+            }
             className={cn(
-              "border-border cursor-pointer rounded-lg border p-3 transition-colors",
-              selected?.container === svc.container && "border-primary/50"
+              buttonVariants({
+                variant: search.pid == null ? "default" : "outline",
+                size: "xs",
+              }),
+              "font-mono"
             )}
           >
-            <div className="flex items-center justify-between gap-2">
-              <span className="min-w-0 truncate font-mono text-sm font-medium">
-                {svc.service}
-              </span>
-              <StatusBadge status={svc.status} />
-            </div>
-            <div className="mt-2">
-              <ServiceUrl svc={svc} linkClassName="text-xs break-all" />
-            </div>
-            {svc.ports.length > 0 ? (
-              <div className="text-muted-foreground mt-1 font-mono text-xs break-all">
-                {svc.ports.join(", ")}
-              </div>
-            ) : null}
+            All instances
+          </button>
+          {bucket?.instances.map((inst) => (
             <button
+              key={inst.pid}
               type="button"
-              onClick={() => openService(svc.container)}
+              onClick={() =>
+                void navigate({
+                  search: (prev) => ({
+                    ...prev,
+                    pid: inst.pid,
+                    service: undefined,
+                  }),
+                  replace: true,
+                })
+              }
               className={cn(
-                buttonVariants({ variant: "outline", size: "sm" }),
-                "mt-3 w-full font-mono"
+                buttonVariants({
+                  variant: search.pid === inst.pid ? "default" : "outline",
+                  size: "xs",
+                }),
+                "font-mono"
               )}
             >
-              Logs / Terminal
+              {inst.script} · pid {inst.pid}
             </button>
-          </div>
-        ))}
-      </div>
-
-      {/* Desktop: dense, clickable table */}
-      <Card className="hidden overflow-hidden py-0 lg:block">
-        <div className="overflow-auto">
-          <Table className="min-w-[720px]">
-            <TableHeader className="[&_th]:bg-card sticky top-0 z-10 [&_th]:shadow-[inset_0_-1px_0_var(--color-border)]">
-              <TableRow>
-                <TableHead className="w-48">Service</TableHead>
-                <TableHead className="w-28">Status</TableHead>
-                <TableHead className="w-[38%]">URL</TableHead>
-                <TableHead>Ports</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {services.map((svc) => (
-                <TableRow
-                  key={svc.container}
-                  onClick={() => openService(svc.container)}
-                  aria-selected={selected?.container === svc.container}
-                  className={cn(
-                    "cursor-pointer",
-                    selected?.container === svc.container &&
-                      "bg-accent/60 hover:bg-accent/60"
-                  )}
-                >
-                  <TableCell className="font-mono font-medium">
-                    {svc.service}
-                  </TableCell>
-                  <TableCell>
-                    <StatusBadge status={svc.status} />
-                  </TableCell>
-                  <TableCell>
-                    <ServiceUrl svc={svc} />
-                  </TableCell>
-                  <TableCell className="text-muted-foreground font-mono">
-                    {svc.ports.length ? svc.ports.join(", ") : "—"}
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
+          ))}
         </div>
-      </Card>
+      ) : null}
+
+      {instances.map((inst) => (
+        <section key={inst.pid} className="space-y-2">
+          {multi && inst.script ? (
+            <div className="text-muted-foreground flex items-center gap-2 font-mono text-[11px]">
+              <span className="text-foreground font-semibold">
+                {inst.script}
+              </span>
+              <span>pid {inst.pid}</span>
+              <span className="text-muted-foreground/60">
+                {inst.services.filter((s) => s.running).length}/
+                {inst.services.length} running
+              </span>
+            </div>
+          ) : null}
+
+          {inst.services.length === 0 ? (
+            <Card>
+              <CardContent className="text-muted-foreground py-6 text-center font-mono text-xs">
+                No services in this instance.
+              </CardContent>
+            </Card>
+          ) : (
+            <>
+              {/* Mobile: tap-friendly cards */}
+              <div className="space-y-2 lg:hidden">
+                {inst.services.map((svc) => (
+                  <div
+                    key={svc.name}
+                    onClick={() => openService(inst.pid, svc.name)}
+                    className={cn(
+                      "border-border cursor-pointer rounded-lg border p-3 transition-colors",
+                      selected?.svc.name === svc.name &&
+                        selected?.inst.pid === inst.pid &&
+                        "border-primary/50"
+                    )}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="min-w-0 truncate font-mono text-sm font-medium">
+                        {svc.name}
+                      </span>
+                      <StatusBadge
+                        status={svc.running ? "running" : "stopped"}
+                      />
+                    </div>
+                    {svc.service ? (
+                      <div className="mt-2">
+                        <ServiceUrl
+                          svc={svc.service}
+                          linkClassName="text-xs break-all"
+                        />
+                      </div>
+                    ) : null}
+                    {svc.service && svc.service.ports.length > 0 ? (
+                      <div className="text-muted-foreground mt-1 font-mono text-xs break-all">
+                        {svc.service.ports.join(", ")}
+                      </div>
+                    ) : null}
+                    <div
+                      onClick={(e) => e.stopPropagation()}
+                      className="mt-3 flex flex-wrap items-center gap-2 border-t pt-3"
+                    >
+                      <RowActions inst={inst} svc={svc} />
+                      <button
+                        type="button"
+                        onClick={() => openService(inst.pid, svc.name)}
+                        className={cn(
+                          buttonVariants({ variant: "outline", size: "sm" }),
+                          "font-mono"
+                        )}
+                      >
+                        Logs / Terminal
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Desktop: dense, clickable table */}
+              <Card className="hidden overflow-hidden py-0 lg:block">
+                <div className="overflow-auto">
+                  <Table className="min-w-[820px]">
+                    <TableHeader className="[&_th]:bg-card sticky top-0 z-10 [&_th]:shadow-[inset_0_-1px_0_var(--color-border)]">
+                      <TableRow>
+                        <TableHead className="w-44">Service</TableHead>
+                        <TableHead className="w-24">Status</TableHead>
+                        <TableHead className="w-[30%]">URL</TableHead>
+                        <TableHead>Ports</TableHead>
+                        <TableHead className="text-right">Actions</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {inst.services.map((svc) => (
+                        <TableRow
+                          key={svc.name}
+                          onClick={() => openService(inst.pid, svc.name)}
+                          aria-selected={
+                            selected?.svc.name === svc.name &&
+                            selected?.inst.pid === inst.pid
+                          }
+                          className={cn(
+                            "cursor-pointer",
+                            selected?.svc.name === svc.name &&
+                              selected?.inst.pid === inst.pid &&
+                              "bg-accent/60 hover:bg-accent/60"
+                          )}
+                        >
+                          <TableCell className="font-mono font-medium">
+                            {svc.name}
+                          </TableCell>
+                          <TableCell>
+                            <StatusBadge
+                              status={svc.running ? "running" : "stopped"}
+                            />
+                          </TableCell>
+                          <TableCell>
+                            {svc.service ? (
+                              <ServiceUrl svc={svc.service} />
+                            ) : (
+                              "—"
+                            )}
+                          </TableCell>
+                          <TableCell className="text-muted-foreground font-mono">
+                            {svc.service && svc.service.ports.length
+                              ? svc.service.ports.join(", ")
+                              : "—"}
+                          </TableCell>
+                          <TableCell
+                            onClick={(e) => e.stopPropagation()}
+                            className="text-right"
+                          >
+                            <div className="flex justify-end">
+                              <RowActions inst={inst} svc={svc} />
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              </Card>
+            </>
+          )}
+        </section>
+      ))}
 
       {/* Bottom drawer: logs (SSE) with a PTY toggle */}
       <Sheet
@@ -218,20 +441,27 @@ function BranchServicesPage() {
                 <div className="flex min-w-0 flex-col">
                   <div className="flex min-w-0 items-center gap-2">
                     <SheetTitle className="truncate font-mono text-sm">
-                      {selected.service}
+                      {selected.svc.name}
                     </SheetTitle>
-                    <StatusBadge status={selected.status} />
+                    <StatusBadge
+                      status={selected.svc.running ? "running" : "stopped"}
+                    />
                   </div>
                   <span className="text-muted-foreground truncate font-mono text-[11px]">
-                    {bucket.project} @ {label}
+                    {projectName} @ {label}
+                    {selected.inst.script
+                      ? ` · ${selected.inst.script} pid ${selected.inst.pid}`
+                      : ""}
                   </span>
                 </div>
-                <div className="ml-auto flex shrink-0 items-center gap-1">
+                <div className="ml-auto flex shrink-0 flex-wrap items-center justify-end gap-1">
+                  <RowActions inst={selected.inst} svc={selected.svc} />
                   <Link
                     to="/logs"
                     search={{
-                      project: bucket.project,
-                      service: selected.container,
+                      project: projectName,
+                      service:
+                        selected.svc.service?.container ?? selected.svc.name,
                       view: search.view,
                     }}
                     title="Open full-page terminal"
@@ -257,15 +487,15 @@ function BranchServicesPage() {
               </SheetHeader>
               <div className="flex min-h-0 flex-1 flex-col p-3">
                 <ServiceTerminal
-                  key={selected.container}
+                  key={`${selected.inst.pid}:${selected.svc.name}`}
                   active={{
-                    container: selected.container,
-                    service: selected.service,
-                    pid: selected.pid ?? null,
+                    container: containerOf(selected.svc, selected.inst.pid),
+                    service: selected.svc.name,
+                    pid: selected.svc.service?.pid ?? null,
                   }}
                   mode={mode}
                   onModeChange={setMode}
-                  showModeToggle={selected.pid != null}
+                  showModeToggle={selected.svc.service?.pid != null}
                 />
               </div>
             </>

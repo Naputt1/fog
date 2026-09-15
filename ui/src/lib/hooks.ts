@@ -65,13 +65,14 @@ export function useServiceAction() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["status"] });
       queryClient.invalidateQueries({ queryKey: ["health"] });
+      queryClient.invalidateQueries({ queryKey: ["services"] });
     },
   });
 }
 
 /**
- * Kill an entire fog instance. On success invalidates `status` and `health`
- * so the table drops the terminated instance.
+ * Kill an entire fog instance. On success invalidates `status`, `health` and
+ * `services` so the tables drop the terminated instance and its containers.
  */
 export function useKillInstance() {
   const queryClient = useQueryClient();
@@ -80,6 +81,7 @@ export function useKillInstance() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["status"] });
       queryClient.invalidateQueries({ queryKey: ["health"] });
+      queryClient.invalidateQueries({ queryKey: ["services"] });
     },
   });
 }

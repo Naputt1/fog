@@ -1,28 +1,14 @@
 import { useId, useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
-import {
-  useKillInstance,
-  useLaunch,
-  useLaunchTargets,
-  useServiceAction,
-  useStatus,
-} from "@/lib/hooks";
+import { useLaunch, useLaunchTargets, useStatus } from "@/lib/hooks";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page-state";
 import { StatusBadge } from "@/components/status-badge";
+import { ServiceActions } from "@/components/service-actions";
+import { InstanceKillButton } from "@/components/instance-kill-button";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
 import {
   Table,
   TableBody,
@@ -31,11 +17,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import type {
-  InstanceServiceStatus,
-  InstanceStatus,
-  ServiceAction,
-} from "@/lib/api";
+import type { InstanceServiceStatus, InstanceStatus } from "@/lib/api";
 
 export const Route = createFileRoute("/status")({
   component: StatusPage,
@@ -58,102 +40,6 @@ function HealthBadge({ health }: { health: string | null }) {
   }
   const key = health.toLowerCase();
   return <StatusBadge status={KNOWN_HEALTH.includes(key) ? key : health} />;
-}
-
-/** Start/Stop/Restart controls for a single service row. */
-function ServiceActions({
-  pid,
-  svc,
-}: {
-  pid: number;
-  svc: InstanceServiceStatus;
-}) {
-  const [confirmAction, setConfirmAction] = useState<ServiceAction | null>(
-    null
-  );
-  const { mutate, isPending, error } = useServiceAction();
-
-  const running = svc.running;
-
-  const run = (action: ServiceAction) => {
-    if (action === "stop" || action === "restart") {
-      setConfirmAction(action);
-      return;
-    }
-    mutate({ pid, name: svc.name, action });
-  };
-
-  const confirm = () => {
-    if (!confirmAction) return;
-    const action = confirmAction;
-    setConfirmAction(null);
-    mutate({ pid, name: svc.name, action });
-  };
-
-  return (
-    <div className="flex flex-col items-start gap-1.5">
-      <div className="flex items-center gap-1.5">
-        <Button
-          size="xs"
-          variant="outline"
-          disabled={running || isPending}
-          onClick={() => run("start")}
-        >
-          Start
-        </Button>
-        <Button
-          size="xs"
-          variant="outline"
-          disabled={!running || isPending}
-          onClick={() => run("stop")}
-        >
-          Stop
-        </Button>
-        <Button
-          size="xs"
-          variant="outline"
-          disabled={isPending}
-          onClick={() => run("restart")}
-        >
-          Restart
-        </Button>
-      </div>
-      {error ? (
-        <span className="text-destructive font-mono text-[11px]">
-          {error.message}
-        </span>
-      ) : null}
-
-      <AlertDialog
-        open={confirmAction !== null}
-        onOpenChange={(open) => {
-          if (!open) setConfirmAction(null);
-        }}
-      >
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>
-              {confirmAction === "stop" ? "Stop" : "Restart"} service
-            </AlertDialogTitle>
-            <AlertDialogDescription>
-              {confirmAction === "stop"
-                ? `Stop "${svc.name}" (pid ${pid})?`
-                : `Restart "${svc.name}" (pid ${pid})?`}
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              variant={confirmAction === "stop" ? "destructive" : "default"}
-              onClick={confirm}
-            >
-              {confirmAction === "stop" ? "Stop" : "Restart"}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-    </div>
-  );
 }
 
 /**
@@ -199,7 +85,11 @@ function ServiceTable({
                 </TableCell>
                 <TableCell className="text-right">
                   <div className="flex justify-end">
-                    <ServiceActions pid={pid} svc={svc} />
+                    <ServiceActions
+                      pid={pid}
+                      name={svc.name}
+                      running={svc.running}
+                    />
                   </div>
                 </TableCell>
               </TableRow>
@@ -220,7 +110,7 @@ function ServiceTable({
               <HealthBadge health={svc.health} />
             </div>
             <div className="mt-3 border-t pt-3">
-              <ServiceActions pid={pid} svc={svc} />
+              <ServiceActions pid={pid} name={svc.name} running={svc.running} />
             </div>
           </div>
         ))}
@@ -490,13 +380,6 @@ function InstanceCard({
   inst: InstanceStatus;
   running: number;
 }) {
-  const [confirmKill, setConfirmKill] = useState(false);
-  const {
-    mutate: killInstance,
-    isPending: killPending,
-    error: killError,
-  } = useKillInstance();
-
   return (
     <Card className="gap-3 py-4">
       <CardHeader className="flex-row flex-wrap items-center justify-between gap-2 px-5">
@@ -516,14 +399,12 @@ function InstanceCard({
           <Badge variant="outline" className="font-mono">
             {running}/{inst.services.length} running
           </Badge>
-          <Button
-            size="xs"
-            variant="destructive"
-            disabled={killPending}
-            onClick={() => setConfirmKill(true)}
-          >
-            Kill
-          </Button>
+          <InstanceKillButton
+            pid={inst.pid}
+            script={inst.script}
+            project={inst.project}
+            branch={inst.branch}
+          />
         </div>
       </CardHeader>
       <CardContent className="px-5">
@@ -534,44 +415,7 @@ function InstanceCard({
         ) : (
           <ServiceTable pid={inst.pid} services={inst.services} />
         )}
-        {killError ? (
-          <p className="text-destructive font-mono text-[11px]">
-            {killError.message}
-          </p>
-        ) : null}
       </CardContent>
-
-      <AlertDialog
-        open={confirmKill}
-        onOpenChange={(open) => {
-          if (!open) setConfirmKill(false);
-        }}
-      >
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Kill instance</AlertDialogTitle>
-            <AlertDialogDescription>
-              Kill "{inst.script}" (pid {inst.pid})?
-              {inst.project
-                ? ` Project: ${inst.project}${inst.branch ? `@${inst.branch}` : ""}.`
-                : ""}{" "}
-              All services will be shut down gracefully.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              variant="destructive"
-              onClick={() => {
-                setConfirmKill(false);
-                killInstance({ pid: inst.pid });
-              }}
-            >
-              Kill
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
     </Card>
   );
 }

@@ -1,12 +1,18 @@
 import { describe, expect, it } from "vitest";
 
-import type { Service } from "@/lib/api";
+import type { InstanceStatus, Service } from "@/lib/api";
 import {
+  branchStats,
+  buildInstanceViews,
+  findBranch,
   findProject,
   findWorktree,
+  groupByBranch,
   groupServices,
+  instanceStats,
   projectServices,
   projectStats,
+  worktreeFromBranch,
   worktreeFromParam,
   worktreeParam,
   worktreeStats,
@@ -126,5 +132,110 @@ describe("stats", () => {
       ports: ["0.0.0.0:8080->80/tcp"],
     });
     expect(projectServices(fog)).toHaveLength(2);
+  });
+});
+
+describe("worktreeFromBranch", () => {
+  it("slugifies a branch the way the server does", () => {
+    expect(worktreeFromBranch("feat/mobile-web")).toBe("feat-mobile-web");
+    expect(worktreeFromBranch("main")).toBe("main");
+    // sanitize_hostname splits on dots before taking the first label.
+    expect(worktreeFromBranch("feat/x.y")).toBe("feat-x");
+  });
+
+  it("maps a missing branch to the default token", () => {
+    expect(worktreeFromBranch(null)).toBe("default");
+    expect(worktreeFromBranch("")).toBe("default");
+    expect(worktreeFromBranch(undefined)).toBe("default");
+  });
+});
+
+const INSTANCES: InstanceStatus[] = [
+  {
+    pid: 200,
+    script: "agent",
+    project: "fog",
+    branch: "feat/mobile-web",
+    services: [{ name: "api", running: true, health: "healthy" }],
+  },
+  {
+    pid: 100,
+    script: "dev",
+    project: "fog",
+    branch: "feat/mobile-web",
+    services: [
+      { name: "api", running: true, health: "healthy" },
+      { name: "worker", running: false, health: null },
+    ],
+  },
+];
+
+const DIRECTORY: Service[] = [
+  svc({
+    project: "fog",
+    worktree: "feat-mobile-web",
+    service: "api",
+    container: "fog-api-1",
+    ports: ["0.0.0.0:8080->80/tcp"],
+  }),
+];
+
+describe("buildInstanceViews", () => {
+  it("normalizes branch, sorts by script/pid and enriches services", () => {
+    const views = buildInstanceViews(INSTANCES, DIRECTORY);
+    expect(views.map((v) => [v.script, v.pid])).toEqual([
+      ["agent", 200],
+      ["dev", 100],
+    ]);
+    expect(views[0].worktree).toBe("feat-mobile-web");
+    expect(views[0].project).toBe("fog");
+
+    const dev = views[1];
+    expect(dev.services.map((s) => s.name)).toEqual(["api", "worker"]);
+    // api is running so it is enriched with the directory entry…
+    const api = dev.services.find((s) => s.name === "api")!;
+    expect(api.service?.container).toBe("fog-api-1");
+    expect(api.service?.ports).toEqual(["0.0.0.0:8080->80/tcp"]);
+    // …while the stopped worker has no directory entry.
+    const worker = dev.services.find((s) => s.name === "worker")!;
+    expect(worker.running).toBe(false);
+    expect(worker.service).toBeNull();
+  });
+});
+
+describe("groupByBranch / findBranch", () => {
+  const buckets = groupByBranch(buildInstanceViews(INSTANCES, DIRECTORY));
+
+  it("groups instances of a branch together", () => {
+    expect(buckets).toHaveLength(1);
+    expect(buckets[0].project).toBe("fog");
+    expect(buckets[0].worktree).toBe("feat-mobile-web");
+    expect(buckets[0].instances).toHaveLength(2);
+  });
+
+  it("looks a branch up case-insensitively", () => {
+    expect(findBranch(buckets, "FOG", "feat-mobile-web")).not.toBeNull();
+    expect(findBranch(buckets, "fog", "nope")).toBeNull();
+  });
+});
+
+describe("branchStats / instanceStats", () => {
+  const buckets = groupByBranch(buildInstanceViews(INSTANCES, DIRECTORY));
+
+  it("dedupes shared services and unions ports", () => {
+    // api is reported by both instances but counted once; worker is stopped.
+    expect(branchStats(buckets[0])).toEqual({
+      total: 2,
+      running: 1,
+      ports: ["0.0.0.0:8080->80/tcp"],
+    });
+  });
+
+  it("reports one instance's own services", () => {
+    expect(instanceStats(buckets[0].instances[1])).toEqual({
+      total: 2,
+      running: 1,
+      ports: ["0.0.0.0:8080->80/tcp"],
+    });
   });
 });

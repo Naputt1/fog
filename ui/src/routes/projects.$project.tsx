@@ -6,7 +6,7 @@ import {
 } from "@tanstack/react-router";
 import { ChevronRight } from "lucide-react";
 
-import { useServices } from "@/lib/hooks";
+import { useServices, useStatus } from "@/lib/hooks";
 import { findProject, groupServices } from "@/lib/services";
 import { ErrorState, LoadingState } from "@/components/page-state";
 import { Card, CardContent } from "@/components/ui/card";
@@ -32,7 +32,15 @@ function ProjectLayout() {
   const { data, isLoading, isError, error } = useServices({
     withInternal: true,
   });
+  const { data: status } = useStatus();
   const bucket = findProject(groupServices(data ?? []), project);
+  // A project also exists when a fog instance runs there but every service is
+  // stopped (docker discovery lists only running containers).
+  const hasInstances = (status?.instances ?? []).some(
+    (inst) =>
+      (inst.project ?? inst.script).toLowerCase() === project.toLowerCase()
+  );
+  const exists = bucket !== null || hasInstances;
 
   return (
     <div className="flex min-w-0 flex-col gap-4">
@@ -84,13 +92,16 @@ function ProjectLayout() {
         <LoadingState label="Loading project…" />
       ) : isError ? (
         <ErrorState message={error?.message} />
-      ) : !bucket ? (
+      ) : !exists ? (
         <Card>
           <CardContent className="py-10 text-center">
             <p className="font-mono text-sm">
               <span className="text-muted-foreground">project </span>
               <span className="text-foreground">{project}</span>
-              <span className="text-muted-foreground"> has no running services.</span>
+              <span className="text-muted-foreground">
+                {" "}
+                has no running services.
+              </span>
             </p>
             <Link
               to="/"
