@@ -267,18 +267,9 @@ function BranchesPage() {
 
   if (projectBuckets.length === 0 && !legacy) return null;
 
-  const instanceCount = projectBuckets.reduce(
-    (n, b) => n + b.instances.length,
-    0
-  );
-  const description =
-    projectBuckets.length > 0
-      ? `${projectBuckets.length} ${projectBuckets.length === 1 ? "branch" : "branches"} · ${instanceCount} instances. Pick a branch to control its services.`
-      : `${legacy!.worktrees.length} ${legacy!.worktrees.length === 1 ? "branch" : "branches"} · ${legacy!.total} services. Pick a branch to see its services and open a terminal.`;
-
   return (
     <div className="space-y-4">
-      <PageHeader title={project} description={description} />
+      <PageHeader title={project} />
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         {projectBuckets.length > 0
           ? projectBuckets.map((b) => (

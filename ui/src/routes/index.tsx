@@ -89,7 +89,6 @@ function ServicesPage() {
     <div className="min-w-0 space-y-6">
       <PageHeader
         title="Services"
-        description="Docker-discovered containers managed by fog, grouped by project. Pick a project to drill into its branches and services."
         actions={
           data && data.length > 0 ? (
             <div className="border-primary/30 bg-primary/10 text-primary flex items-center gap-1.5 rounded-full border px-3 py-1 font-mono text-xs whitespace-nowrap">

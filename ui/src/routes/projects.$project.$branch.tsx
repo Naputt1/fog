@@ -5,7 +5,6 @@ import { ExternalLink, X } from "lucide-react";
 import { useServices, useStatus } from "@/lib/hooks";
 import {
   DEFAULT_WORKTREE,
-  branchStats,
   buildInstanceViews,
   findBranch,
   findProject,
@@ -182,16 +181,6 @@ function BranchServicesPage() {
       ? legacyInstances(legacy, projectBucket?.project ?? project)
       : [];
 
-  const stats = bucket
-    ? branchStats(bucket)
-    : legacy
-      ? {
-          total: legacy.services.length,
-          running: legacy.services.filter((s) => s.status === "running").length,
-          ports: legacy.services.flatMap((s) => s.ports),
-        }
-      : { total: 0, running: 0, ports: [] };
-
   const label = (bucket?.worktree ?? legacy?.worktree) || DEFAULT_WORKTREE;
   const projectName = bucket?.project ?? projectBucket?.project ?? project;
   const multi = (bucket?.instances.length ?? 0) > 1 || search.pid != null;
@@ -261,10 +250,7 @@ function BranchServicesPage() {
 
   return (
     <div className="min-w-0 space-y-4">
-      <PageHeader
-        title={label}
-        description={`${stats.total} ${stats.total === 1 ? "service" : "services"} · ${stats.running} running on ${projectName}. Start, stop or restart, then tap a service to stream its logs or open a PTY.`}
-      />
+      <PageHeader title={label} />
 
       {multi ? (
         <div className="flex flex-wrap gap-1.5">
