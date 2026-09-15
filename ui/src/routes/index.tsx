@@ -1,14 +1,39 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { Boxes, ChevronRight } from "lucide-react";
+import { useState } from "react";
 
 import { useServices } from "@/lib/hooks";
-import { groupServices, projectStats, type ProjectBucket } from "@/lib/services";
+import {
+  groupServices,
+  projectStats,
+  type ProjectBucket,
+} from "@/lib/services";
 import { PageHeader, LoadingState, ErrorState } from "@/components/page-state";
 import { Card, CardContent } from "@/components/ui/card";
 
 export const Route = createFileRoute("/")({
   component: ServicesPage,
 });
+
+/**
+ * Project icon from config (`project.icon`). Renders the configured image and
+ * falls back to the default glyph when unset or if the image fails to load.
+ */
+function ProjectIcon({ icon }: { icon: string | null }) {
+  const [failed, setFailed] = useState(false);
+  if (icon && !failed) {
+    return (
+      <img
+        src={icon}
+        alt=""
+        aria-hidden
+        onError={() => setFailed(true)}
+        className="size-4 shrink-0 rounded-sm object-contain"
+      />
+    );
+  }
+  return <Boxes className="text-primary size-4 shrink-0" aria-hidden />;
+}
 
 /** Miniature counts + ports card that links into a project's branches. */
 function ProjectCard({ project }: { project: ProjectBucket }) {
@@ -25,7 +50,7 @@ function ProjectCard({ project }: { project: ProjectBucket }) {
         <CardContent className="flex flex-col gap-3 p-4">
           <div className="flex items-center justify-between gap-2">
             <span className="flex min-w-0 items-center gap-2">
-              <Boxes className="text-primary size-4 shrink-0" aria-hidden />
+              <ProjectIcon icon={project.icon} />
               <span className="truncate font-mono text-sm font-semibold">
                 {project.project}
               </span>

@@ -254,6 +254,15 @@ impl Default for TerminalConfig {
     }
 }
 
+/// UI metadata for this project shown in the index web UI.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct ProjectConfig {
+    /// Image URL (`http(s)://`) or `data:image/…` URI used as this project's
+    /// icon on the index project list page. Falls back to the built-in icon
+    /// when unset or when the scheme is not allowed.
+    pub icon: Option<String>,
+}
+
 /// A named script: a full set of services and optional proxy configuration.
 #[derive(Debug, Deserialize, Clone)]
 pub struct ScriptConfig {
@@ -380,6 +389,8 @@ pub struct Config {
     /// starting this project serves the index. Default `enabled: true`.
     #[serde(default)]
     pub index: Option<IndexConfig>,
+    /// Optional UI metadata for this project (e.g. the index list-page icon).
+    pub project: Option<ProjectConfig>,
 }
 
 impl Config {
@@ -551,6 +562,34 @@ mod tests {
         let config = load(&path).unwrap();
         let entries = config.scripts["dev"].service.as_ref().unwrap();
         assert!(entries[0].share);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_load_project_icon() {
+        let path =
+            std::env::temp_dir().join(format!("fog-config-icon-{}.json", std::process::id()));
+        std::fs::write(
+            &path,
+            r#"{"scripts":{},"project":{"icon":"https://example.com/logo.png"}}"#,
+        )
+        .unwrap();
+        let config = load(&path).unwrap();
+        let project = config.project.expect("project section present");
+        assert_eq!(
+            project.icon.as_deref(),
+            Some("https://example.com/logo.png")
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_load_project_icon_absent() {
+        let path =
+            std::env::temp_dir().join(format!("fog-config-icon-none-{}.json", std::process::id()));
+        std::fs::write(&path, r#"{"scripts":{}}"#).unwrap();
+        let config = load(&path).unwrap();
+        assert!(config.project.is_none(), "project section is optional");
         let _ = std::fs::remove_file(&path);
     }
 

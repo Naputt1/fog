@@ -27,9 +27,24 @@ function svc(overrides: Partial<Service>): Service {
 }
 
 const SERVICES: Service[] = [
-  svc({ project: "fog", worktree: "", service: "web", ports: ["0.0.0.0:8080->80/tcp"] }),
-  svc({ project: "fog", worktree: "feat-mobile-web", service: "api", status: "exited" }),
-  svc({ project: "gems", worktree: "main", service: "db", ports: ["0.0.0.0:5432->5432/tcp"] }),
+  svc({
+    project: "fog",
+    worktree: "",
+    service: "web",
+    ports: ["0.0.0.0:8080->80/tcp"],
+  }),
+  svc({
+    project: "fog",
+    worktree: "feat-mobile-web",
+    service: "api",
+    status: "exited",
+  }),
+  svc({
+    project: "gems",
+    worktree: "main",
+    service: "db",
+    ports: ["0.0.0.0:5432->5432/tcp"],
+  }),
 ];
 
 describe("groupServices", () => {
@@ -41,6 +56,23 @@ describe("groupServices", () => {
       "feat-mobile-web",
     ]);
     expect(groups[0].total).toBe(2);
+  });
+
+  it("hoists a project icon from any of its services", () => {
+    const groups = groupServices([
+      svc({ project: "fog", worktree: "", service: "web" }),
+      svc({
+        project: "fog",
+        worktree: "feat-mobile-web",
+        service: "api",
+        icon: "https://example.com/fog.png",
+      }),
+      svc({ project: "gems", worktree: "main", service: "db" }),
+    ]);
+    expect(findProject(groups, "fog")?.icon).toBe(
+      "https://example.com/fog.png"
+    );
+    expect(findProject(groups, "gems")?.icon).toBeNull();
   });
 });
 

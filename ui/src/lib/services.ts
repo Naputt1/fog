@@ -8,6 +8,8 @@ export interface WorktreeBucket {
 
 export interface ProjectBucket {
   project: string;
+  /** Configured project icon (image URL/data URI), or null when none. */
+  icon: string | null;
   worktrees: WorktreeBucket[];
   total: number;
 }
@@ -37,17 +39,19 @@ export function groupServices(services: Service[]): ProjectBucket[] {
   for (const [project, byWorktree] of byProject) {
     const worktrees: WorktreeBucket[] = [];
     let total = 0;
+    let icon: string | null = null;
     for (const [worktree, list] of byWorktree) {
       list.sort((a, b) => a.service.localeCompare(b.service));
       worktrees.push({ worktree, services: list });
       total += list.length;
+      icon ??= list.find((s) => s.icon)?.icon ?? null;
     }
     worktrees.sort((a, b) => {
       if (a.worktree === "") return -1;
       if (b.worktree === "") return 1;
       return a.worktree.localeCompare(b.worktree);
     });
-    projects.push({ project, worktrees, total });
+    projects.push({ project, icon, worktrees, total });
   }
   projects.sort((a, b) => a.project.localeCompare(b.project));
   return projects;
@@ -81,9 +85,7 @@ export function findWorktree(
   branchParam: string
 ): WorktreeBucket | null {
   const wanted = worktreeFromParam(branchParam);
-  return (
-    project.worktrees.find((w) => w.worktree === wanted) ?? null
-  );
+  return project.worktrees.find((w) => w.worktree === wanted) ?? null;
 }
 
 export interface BucketStats {

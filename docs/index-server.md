@@ -63,6 +63,11 @@ a small JSON API consumed by the SPA:
 - `POST /api/instances/{pid}/services/{name}/action` — start/stop/restart a service of a running instance (see below)
 - `/logs/stream` — SSE stream of a service's logs
 
+Each service also carries an optional `icon` field on `GET /api/services`, taken
+from the owning project's `fog.json` (`project.icon` — see
+[Project metadata](/configuration#project-metadata)). The SPA uses it as the
+project card image on the project list, falling back to the default glyph.
+
 Build the SPA with `cd ui && pnpm install && pnpm build`; `build.rs` embeds
 `ui/dist/` into the binary at compile time. Without a build the server falls
 back to the generated directory page above.

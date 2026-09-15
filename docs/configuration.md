@@ -33,6 +33,7 @@ See [`fog.schema.json`](https://github.com/Naputt1/fog/blob/main/fog.schema.json
 | `max_scrollback` | `integer` | `2000` | Maximum scrollback lines per terminal (min: 100) |
 | `sidebar` | `object` | `null` | Sidebar width constraints |
 | `theme` | `object` | `null` | Color theme overrides (see [Themes](/themes)) |
+| `project` | `object` | `null` | UI metadata for this project (e.g. `icon`) shown in the index web UI |
 | `index` | `object` | `{ enabled: true }` | Standalone index server (service directory + web UI); set `enabled:false` to opt this project out. See [Index Server](/index-server) |
 | `router` | `object` | `null` | Central Traefik router (host-global). See [Router & DNS](/router) |
 | `dnsmasq` | `object` | `null` | Wildcard DNS setup. See [Router & DNS](/router) |
@@ -296,6 +297,24 @@ For details on route matching, see the [Proxy docs](/proxy).
 | `max_width` | `integer` | `30` | Maximum sidebar width in columns (8–50) |
 
 The sidebar width is computed dynamically: `max(name_length + 5, min_width)` clamped to `max_width`.
+
+## Project metadata
+
+Optional UI metadata for this project, shown in the web UI.
+
+```json
+{
+  "project": {
+    "icon": "https://example.com/logo.png"
+  }
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `project.icon` | `string` | `null` | Image URL (`http://` / `https://`) or `data:image/…` URI shown as this project's icon on the index project list page. Ignored (falls back to the default glyph) when unset or the scheme is not allowed. |
+
+The icon is read from each project's own `fog.json`, so the [index server](/index-server) can show a distinct icon per project in the grouped project list.
 
 ## Host-global services
 

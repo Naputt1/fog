@@ -1686,6 +1686,10 @@ struct ApiService {
     /// streamed via `?pid=<pid>&service=<name>` (fog IPC) instead of docker.
     #[serde(skip_serializing_if = "Option::is_none")]
     pid: Option<u32>,
+    /// Optional project icon (image URL or data URI) from the owning project's
+    /// `fog.json` (`project.icon`). Omitted when unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    icon: Option<String>,
 }
 
 /// Converts a discovered [`IndexEntry`] into its JSON shape. Discovery only sees
@@ -1704,6 +1708,7 @@ fn api_service_from(e: IndexEntry) -> ApiService {
         ports,
         health: "unknown".to_string(),
         pid: None,
+        icon: None,
     }
 }
 
@@ -1864,6 +1869,52 @@ fn discover_compose_containers_filtered_scoped(
     entries
 }
 
+/// Validates a configured project icon and returns it when the scheme is
+/// allowed. Permits `http(s)://` URLs and `data:image/…` URIs; anything else
+/// (e.g. `javascript:`, `file:`) is ignored so it can never reach `<img src>`.
+fn allowed_project_icon(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("http://")
+        || lower.starts_with("https://")
+        || lower.starts_with("data:image/")
+    {
+        Some(trimmed.to_string())
+    } else {
+        None
+    }
+}
+
+/// Maps project name → configured icon by reading each running instance's
+/// `fog.json` (`project.icon`). Keys use the same name derivation as the
+/// service list so docker and native entries resolve the same icon.
+fn project_icons(instances: &[FogInstance]) -> std::collections::HashMap<String, String> {
+    let mut icons = std::collections::HashMap::new();
+    for inst in instances {
+        let Some(dir) = inst.config_dir.as_deref() else {
+            continue;
+        };
+        let Ok(cfg) = crate::config::load(std::path::Path::new(dir).join("fog.json").as_path())
+        else {
+            continue;
+        };
+        let Some(icon) = cfg
+            .project
+            .and_then(|p| p.icon)
+            .and_then(|raw| allowed_project_icon(&raw))
+        else {
+            continue;
+        };
+        let project = inst
+            .project
+            .as_deref()
+            .map(project_name_from_common_dir)
+            .unwrap_or_else(|| inst.script.clone());
+        icons.entry(project).or_insert(icon);
+    }
+    icons
+}
+
 /// `GET /api/services`: every running compose service as JSON, so the SPA logs
 /// picker can stream logs from any container. Native (non-docker) services
 /// started via `ports` + `native_routes` are synthesized from fog instances so
@@ -1885,6 +1936,7 @@ fn api_services_with_query(_network: &str, query: Option<&str>) -> Response<Resp
         .unwrap_or(false);
     // Collect running fog roots once and reuse for docker filtering and native synthesis
     let instances = discover_fog_instances();
+    let icons = project_icons(&instances);
     let allowed_roots: std::collections::HashSet<PathBuf> = instances
         .iter()
         .filter_map(|i| i.config_dir.as_deref().map(PathBuf::from))
@@ -1966,6 +2018,7 @@ fn api_services_with_query(_network: &str, query: Option<&str>) -> Response<Resp
                 ports: vec![format!("0.0.0.0:{}->{}/tcp", port, port)],
                 health: health.to_string(),
                 pid: Some(inst.pid),
+                icon: None,
             });
         }
         // Also include native services that have no native_route but have a port allocation
@@ -2005,7 +2058,15 @@ fn api_services_with_query(_network: &str, query: Option<&str>) -> Response<Resp
                 ports: Vec::new(),
                 health: health.to_string(),
                 pid: Some(inst.pid),
+                icon: None,
             });
+        }
+    }
+    // Attach each project's configured icon (if any) to every service in it, so
+    // the Services UI can group and show it once per project card.
+    for svc in &mut list {
+        if svc.icon.is_none() {
+            svc.icon = icons.get(&svc.project).cloned();
         }
     }
     json_response(&list)
@@ -2121,6 +2182,7 @@ pub fn load_runtime_config() -> crate::config::Config {
         dnsmasq: None,
         router: None,
         index: None,
+        project: None,
     }
 }
 
@@ -3163,6 +3225,22 @@ mod tests {
     fn test_resolve_serve_port_explicit_wins() {
         // Explicit --port always wins regardless of env/config.
         assert_eq!(resolve_serve_port(Some(18991)), 18991);
+    }
+
+    #[test]
+    fn test_allowed_project_icon_schemes() {
+        // http(s) and data:image URIs pass through (trimmed); anything else is rejected.
+        assert_eq!(
+            allowed_project_icon("https://example.com/logo.png").as_deref(),
+            Some("https://example.com/logo.png")
+        );
+        assert_eq!(
+            allowed_project_icon("  data:image/svg+xml;base64,PHN2Zw==").as_deref(),
+            Some("data:image/svg+xml;base64,PHN2Zw==")
+        );
+        assert_eq!(allowed_project_icon("javascript:alert(1)"), None);
+        assert_eq!(allowed_project_icon("file:///etc/passwd"), None);
+        assert_eq!(allowed_project_icon(""), None);
     }
 
     #[test]

@@ -45,6 +45,12 @@ export interface Service {
   health: string;
   /** Fog PID for native services; when present logs stream via `?pid=&service=` instead of docker. */
   pid?: number | null;
+  /**
+   * Optional project icon (image URL or `data:image/…` URI) sourced from the
+   * owning project's `fog.json` (`project.icon`). Absent when unset; the same
+   * value is repeated on every service of a project.
+   */
+  icon?: string;
 }
 
 /** Per-service health inside a GET /api/status instance. */

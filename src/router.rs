@@ -687,6 +687,7 @@ mod tests {
                 ..RouterConfig::default()
             }),
             index: None,
+            project: None,
         }
     }
 
