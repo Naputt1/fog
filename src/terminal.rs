@@ -1,4 +1,4 @@
-use crate::config::HealthCheckConfig;
+use crate::config::{EndpointConfig, HealthCheckConfig, HealthCheckSpec};
 use crate::process;
 use libc::{SIGKILL, SIGTERM};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize};
@@ -107,6 +107,34 @@ pub enum HealthStatus {
     Unhealthy,
 }
 
+/// Flattens a `endpoint` health check spec into concrete configs.
+pub(crate) fn endpoint_health_checks(spec: &Option<HealthCheckSpec>) -> Vec<HealthCheckConfig> {
+    match spec {
+        Some(HealthCheckSpec::Single(c)) => vec![c.clone()],
+        Some(HealthCheckSpec::Multiple(v)) => v.clone(),
+        None => Vec::new(),
+    }
+}
+
+/// Runtime state of one declared endpoint: its resolved declaration plus an
+/// independently-tracked health status (health threads are stopped on drop).
+pub struct Endpoint {
+    /// Resolved declaration (name/host/port/path_prefix/health_check).
+    pub config: EndpointConfig,
+    health_status: Arc<Mutex<HealthStatus>>,
+    health_stop: Arc<AtomicBool>,
+}
+
+impl Endpoint {
+    fn new(config: EndpointConfig) -> Self {
+        Self {
+            config,
+            health_status: Arc::new(Mutex::new(HealthStatus::Unknown)),
+            health_stop: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
 /// A pseudo-terminal managing a shell or command process.
 pub struct Terminal {
     /// How this terminal was initialized.
@@ -126,6 +154,8 @@ pub struct Terminal {
     pub scrollback: usize,
     /// Health check configurations (empty if none).
     pub health_checks: Vec<HealthCheckConfig>,
+    /// Declared endpoints of this service, each with its own health tracking.
+    pub endpoints: Vec<Endpoint>,
     /// Shell command to run on shutdown (e.g. "docker compose down").
     pub shutdown_cmd: Option<String>,
     /// Names of services this service depends on.
@@ -192,6 +222,7 @@ impl std::fmt::Debug for Terminal {
             .field("process_running", &self.process_running)
             .field("scrollback", &self.scrollback)
             .field("health_checks", &self.health_checks)
+            .field("endpoints", &self.endpoints.len())
             .field("log_dir", &self.log_dir)
             .field("shutdown_cmd", &self.shutdown_cmd)
             .field("reused", &self.reused)
@@ -354,6 +385,99 @@ pub fn health_checks_pass(configs: &[HealthCheckConfig], branch: Option<&str>) -
             .into_iter()
             .all(|h| h.join().unwrap_or(false))
     })
+}
+
+/// Runs the adaptive health-check loop for `configs` on a background thread,
+/// updating `status` until `stop` is set. Shared by a terminal's own health
+/// checks and each of its declared endpoints.
+fn spawn_health_loop(
+    configs: Vec<HealthCheckConfig>,
+    branch: Option<String>,
+    status: Arc<Mutex<HealthStatus>>,
+    stop: Arc<AtomicBool>,
+) {
+    if configs.is_empty() {
+        return;
+    }
+    thread::spawn(move || {
+        let start_interval = clamp_interval(
+            configs
+                .iter()
+                .filter_map(|c| c.start_interval_ms)
+                .min()
+                .unwrap_or(DEFAULT_START_INTERVAL.as_millis() as u64),
+        );
+        let interval = clamp_interval(
+            configs
+                .iter()
+                .filter_map(|c| c.interval_ms)
+                .min()
+                .unwrap_or(DEFAULT_HEALTH_INTERVAL.as_millis() as u64),
+        );
+        let start_period = Duration::from_millis(
+            configs
+                .iter()
+                .filter_map(|c| c.start_period_ms)
+                .max()
+                .unwrap_or(0),
+        );
+        let retries = configs
+            .iter()
+            .map(|c| c.retries.unwrap_or(DEFAULT_HEALTH_RETRIES))
+            .max()
+            .unwrap_or(DEFAULT_HEALTH_RETRIES)
+            .max(1);
+
+        let started = Instant::now();
+        let mut failures: u32 = 0;
+        let mut ever_healthy = false;
+        let mut last = HealthStatus::Unknown;
+
+        loop {
+            if stop.load(Ordering::SeqCst) {
+                return;
+            }
+            let pass = health_checks_pass(&configs, branch.as_deref());
+            let next = if pass {
+                failures = 0;
+                ever_healthy = true;
+                HealthStatus::Healthy
+            } else {
+                failures = failures.saturating_add(1);
+                if !ever_healthy && started.elapsed() < start_period {
+                    HealthStatus::Starting
+                } else if failures < retries {
+                    if last == HealthStatus::Healthy {
+                        HealthStatus::Healthy
+                    } else {
+                        HealthStatus::Starting
+                    }
+                } else {
+                    HealthStatus::Unhealthy
+                }
+            };
+
+            if next != last {
+                *status.lock().expect("health status mutex poisoned") = next;
+                last = next;
+                health_signal().notify();
+            }
+
+            let sleep_for = if ever_healthy {
+                interval
+            } else {
+                start_interval
+            };
+            let deadline = Instant::now() + sleep_for;
+            while Instant::now() < deadline {
+                if stop.load(Ordering::SeqCst) {
+                    return;
+                }
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                thread::sleep(remaining.min(Duration::from_millis(50)));
+            }
+        }
+    });
 }
 
 fn cell_style(cell: &vt100::Cell) -> Style {
@@ -616,6 +740,7 @@ impl Terminal {
             raw_fd: None,
             reused_since: None,
             reuse_grace: DEFAULT_REUSE_GRACE,
+            endpoints: Vec::new(),
             stop_w: Some(stop_w),
             handed_off: false,
             child_reaped: false,
@@ -693,6 +818,7 @@ impl Terminal {
             writer: None,
             child: None,
             master: None,
+            endpoints: Vec::new(),
         };
         t.spawn_into(path, cmd)?;
         Ok(t)
@@ -739,6 +865,7 @@ impl Terminal {
             handed_off: false,
             child_reaped: false,
             parser,
+            endpoints: Vec::new(),
             health_status: Arc::new(Mutex::new(HealthStatus::Unhealthy)),
             health_stop: Arc::new(AtomicBool::new(false)),
             screen_generation: Arc::new(AtomicUsize::new(0)),
@@ -795,6 +922,7 @@ impl Terminal {
             handed_off: false,
             child_reaped: false,
             parser,
+            endpoints: Vec::new(),
             health_status: Arc::new(Mutex::new(HealthStatus::Pending)),
             health_stop: Arc::new(AtomicBool::new(false)),
             screen_generation: Arc::new(AtomicUsize::new(0)),
@@ -846,6 +974,7 @@ impl Terminal {
             owned_pid: None,
             raw_fd: None,
             reused_since: Some(Instant::now()),
+            endpoints: Vec::new(),
             reuse_grace: DEFAULT_REUSE_GRACE,
             stop_w: None,
             handed_off: false,
@@ -963,6 +1092,7 @@ impl Terminal {
             reused: true,
             shared: false,
             owned_pid: Some(pid),
+            endpoints: Vec::new(),
             raw_fd: Some(fd),
             reused_since: None,
             reuse_grace: DEFAULT_REUSE_GRACE,
@@ -1558,96 +1688,49 @@ impl Terminal {
     /// Starts a background thread that periodically runs all configured health checks.
     /// The service is considered healthy only when ALL checks pass.
     pub fn start_health_checks(&self) {
-        let configs: Vec<HealthCheckConfig> = self.health_checks.clone();
-        if configs.is_empty() {
-            return;
-        }
-        let status = self.health_status.clone();
-        let stop = self.health_stop.clone();
+        spawn_health_loop(
+            self.health_checks.clone(),
+            self.branch.clone(),
+            self.health_status.clone(),
+            self.health_stop.clone(),
+        );
+    }
+
+    /// Replaces this terminal's declared endpoints (endpoints) with
+    /// `subs`, seeding each at `Unknown`.
+    ///
+    /// Endpoints carry their own health checks; call
+    /// [`start_endpoint_health_checks`](Self::start_endpoint_health_checks)
+    /// afterwards to begin polling them.
+    pub fn set_endpoints(&mut self, subs: Vec<EndpointConfig>) {
+        self.endpoints = subs.into_iter().map(Endpoint::new).collect();
+    }
+
+    /// Starts one background health thread per declared endpoint that has
+    /// health checks configured. Idempotent-ish: call once per terminal build.
+    pub fn start_endpoint_health_checks(&self) {
         let branch = self.branch.clone();
-
-        thread::spawn(move || {
-            let start_interval = clamp_interval(
-                configs
-                    .iter()
-                    .filter_map(|c| c.start_interval_ms)
-                    .min()
-                    .unwrap_or(DEFAULT_START_INTERVAL.as_millis() as u64),
+        for sub in &self.endpoints {
+            let checks = endpoint_health_checks(&sub.config.health_check);
+            spawn_health_loop(
+                checks,
+                branch.clone(),
+                sub.health_status.clone(),
+                sub.health_stop.clone(),
             );
-            let interval = clamp_interval(
-                configs
-                    .iter()
-                    .filter_map(|c| c.interval_ms)
-                    .min()
-                    .unwrap_or(DEFAULT_HEALTH_INTERVAL.as_millis() as u64),
-            );
-            let start_period = Duration::from_millis(
-                configs
-                    .iter()
-                    .filter_map(|c| c.start_period_ms)
-                    .max()
-                    .unwrap_or(0),
-            );
-            let retries = configs
-                .iter()
-                .map(|c| c.retries.unwrap_or(DEFAULT_HEALTH_RETRIES))
-                .max()
-                .unwrap_or(DEFAULT_HEALTH_RETRIES)
-                .max(1);
+        }
+    }
 
-            let started = Instant::now();
-            let mut failures: u32 = 0;
-            let mut ever_healthy = false;
-            let mut last = HealthStatus::Unknown;
-
-            loop {
-                if stop.load(Ordering::SeqCst) {
-                    return;
-                }
-                let pass = health_checks_pass(&configs, branch.as_deref());
-                let next = if pass {
-                    failures = 0;
-                    ever_healthy = true;
-                    HealthStatus::Healthy
-                } else {
-                    failures = failures.saturating_add(1);
-                    if !ever_healthy && started.elapsed() < start_period {
-                        HealthStatus::Starting
-                    } else if failures < retries {
-                        // Not enough consecutive failures yet: hold the previous
-                        // reading so a single blip does not flap the indicator.
-                        if last == HealthStatus::Healthy {
-                            HealthStatus::Healthy
-                        } else {
-                            HealthStatus::Starting
-                        }
-                    } else {
-                        HealthStatus::Unhealthy
-                    }
-                };
-
-                if next != last {
-                    *status.lock().expect("health status mutex poisoned") = next;
-                    last = next;
-                    health_signal().notify();
-                }
-
-                let sleep_for = if ever_healthy {
-                    interval
-                } else {
-                    start_interval
-                };
-                // Sleep in short slices so shutdown stays responsive.
-                let deadline = Instant::now() + sleep_for;
-                while Instant::now() < deadline {
-                    if stop.load(Ordering::SeqCst) {
-                        return;
-                    }
-                    let remaining = deadline.saturating_duration_since(Instant::now());
-                    thread::sleep(remaining.min(Duration::from_millis(50)));
-                }
-            }
-        });
+    /// Current health reading for each declared endpoint, in declared order.
+    pub fn endpoint_statuses(&self) -> Vec<crate::ipc::EndpointStatus> {
+        self.endpoints
+            .iter()
+            .map(|s| crate::ipc::EndpointStatus {
+                name: s.config.name.clone(),
+                health: format!("{:?}", s.health_status.lock().expect("mutex poisoned"))
+                    .to_lowercase(),
+            })
+            .collect()
     }
 
     /// Returns `true` if the child process is still running.
@@ -1833,6 +1916,9 @@ impl Drop for Terminal {
         // Stop the health-check thread so it does not outlive this terminal
         // (relevant when services are replaced by an in-place worktree switch).
         self.health_stop.store(true, Ordering::SeqCst);
+        for sub in &self.endpoints {
+            sub.health_stop.store(true, Ordering::SeqCst);
+        }
         if self.save_logs
             && let Init::Command { .. } = &self.init
         {
@@ -1883,6 +1969,22 @@ mod tests {
         assert!(t.is_ready());
         t.refresh_status();
         assert!(!t.stopped);
+    }
+
+    #[test]
+    fn test_endpoint_statuses_seed_unknown() {
+        let mut t = Terminal::spawn_reused("infra".into(), ".".into(), "true".into(), 10);
+        t.set_endpoints(vec![EndpointConfig {
+            name: "web".into(),
+            host: None,
+            port: None,
+            path_prefix: None,
+            health_check: None,
+        }]);
+        let statuses = t.endpoint_statuses();
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].name, "web");
+        assert_eq!(statuses[0].health, "unknown");
     }
 
     #[test]

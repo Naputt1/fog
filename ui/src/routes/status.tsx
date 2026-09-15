@@ -42,6 +42,26 @@ function HealthBadge({ health }: { health: string | null }) {
   return <StatusBadge status={KNOWN_HEALTH.includes(key) ? key : health} />;
 }
 
+/** Declared endpoints of one service, as a compact health list. */
+function Endpoints({ svc }: { svc: InstanceServiceStatus }) {
+  const endpoints = svc.endpoints ?? [];
+  if (endpoints.length === 0) return null;
+  return (
+    <ul className="mt-1 space-y-0.5">
+      {endpoints.map((endpoint) => (
+        <li
+          key={endpoint.name}
+          className="flex items-center gap-1.5 font-mono text-xs"
+        >
+          <span className="text-muted-foreground">↳</span>
+          <span>{endpoint.name}</span>
+          <StatusBadge status={endpoint.health} />
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 /**
  * Nested table of the services spawned by one IPC instance.
  *
@@ -76,6 +96,7 @@ function ServiceTable({
               <TableRow key={svc.name}>
                 <TableCell className="font-mono font-medium">
                   {svc.name}
+                  <Endpoints svc={svc} />
                 </TableCell>
                 <TableCell>
                   <StatusBadge status={svc.running ? "running" : "stopped"} />
@@ -106,6 +127,7 @@ function ServiceTable({
               <span className="font-mono text-sm font-medium">{svc.name}</span>
               <StatusBadge status={svc.running ? "running" : "stopped"} />
             </div>
+            <Endpoints svc={svc} />
             <div className="mt-2">
               <HealthBadge health={svc.health} />
             </div>

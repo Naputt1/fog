@@ -5,6 +5,15 @@ use std::os::unix::io::RawFd;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
+/// Health reading of one declared endpoint (endpoint) of a service.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EndpointStatus {
+    /// Endpoint display name.
+    pub name: String,
+    /// Health state: `pending`, `unknown`, `starting`, `healthy`, `unhealthy`.
+    pub health: String,
+}
+
 /// Status snapshot of a single service.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceStatus {
@@ -14,6 +23,11 @@ pub struct ServiceStatus {
     pub running: bool,
     /// Health check state: `pending`, `unknown`, `healthy`, or `unhealthy`.
     pub health: String,
+    /// Declared endpoints (endpoints) and their health. Empty for the
+    /// common case of a service with a single implicit endpoint. Omitted from
+    /// the wire form when empty so older readers are unaffected.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub endpoints: Vec<EndpointStatus>,
 }
 
 /// Allocated port map for an instance (symbolic name -> host port).
@@ -27,6 +41,11 @@ pub struct NativeRouteInfo {
     pub port: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path_prefix: Option<String>,
+    /// When set, this route targets a declared `endpoint` of `service`
+    /// (by name) rather than the service itself. The index server nests these
+    /// under the parent service instead of listing them separately.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
 }
 
 /// Status snapshot of the reverse proxy.

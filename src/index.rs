@@ -1685,8 +1685,25 @@ fn entry_url(e: &IndexEntry) -> String {
     }
 }
 
+/// One declared endpoint (endpoint) of an [`ApiService`].
+#[derive(serde::Serialize, Clone)]
+struct ApiEndpoint {
+    /// Endpoint display name.
+    name: String,
+    /// Externally reachable URL for this endpoint, empty when it declares no
+    /// routable `host`.
+    url: String,
+    /// Host-published port, empty when not declared.
+    port: String,
+    /// Optional PathPrefix the route combines with the host.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path_prefix: Option<String>,
+    /// Per-endpoint health state (`healthy`/`unhealthy`/...).
+    health: String,
+}
+
 /// A single service as reported by `GET /api/services`.
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, Clone)]
 struct ApiService {
     project: String,
     worktree: String,
@@ -1707,6 +1724,10 @@ struct ApiService {
     /// `fog.json` (`project.icon`). Omitted when unset.
     #[serde(skip_serializing_if = "Option::is_none")]
     icon: Option<String>,
+    /// Declared endpoint endpoints of this service. Omitted when the
+    /// service exposes a single implicit endpoint (the common case).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    endpoints: Vec<ApiEndpoint>,
 }
 
 /// Converts a discovered [`IndexEntry`] into its JSON shape. Discovery only sees
@@ -1726,7 +1747,89 @@ fn api_service_from(e: IndexEntry) -> ApiService {
         health: "unknown".to_string(),
         pid: None,
         icon: None,
+        endpoints: Vec::new(),
     }
+}
+
+/// Builds the declared endpoint list for one instance service.
+///
+/// Resolves each tagged endpoint route's host/port into a URL. When a
+/// endpoint declares no route, the matching docker-discovered entry (matched
+/// by project/worktree/name) supplies its URL and published ports — so a
+/// compose service that routes itself via Traefik labels (or exposes raw TCP
+/// via `fog.expose`) keeps its link after being nested under the parent.
+///
+/// Health comes from the instance's per-endpoint reading when it is known,
+/// otherwise from the parent service's health (a endpoint without its own
+/// `health_check` inherits the parent's).
+fn api_endpoints_for(
+    inst: &FogInstance,
+    service: &str,
+    docker: &[ApiService],
+    project: &str,
+    worktree: &str,
+) -> Vec<ApiEndpoint> {
+    let svc_status = inst.services.iter().find(|s| s.name == service);
+    let parent_health = svc_status
+        .map(|s| s.health.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+    let mut out = Vec::new();
+    for route in &inst.native_routes {
+        let Some(endpoint_name) = route.endpoint.as_deref() else {
+            continue;
+        };
+        if route.service != service {
+            continue;
+        }
+        // Resolve host/port templates with this instance's PortMap+branch. A
+        // endpoint may declare neither (display + health only): url/port
+        // stay empty.
+        let host = crate::ports::resolve_template(&route.host, &inst.ports, inst.branch.as_deref())
+            .map(|h| crate::ports::sanitize_hostname(&h))
+            .unwrap_or_default();
+        let mut port =
+            crate::ports::resolve_template(&route.port, &inst.ports, inst.branch.as_deref())
+                .unwrap_or_default();
+        let mut url = if host.is_empty() {
+            String::new()
+        } else {
+            format!("https://{}/", host)
+        };
+        // No fog-generated route: inherit the matching docker entry's URL/ports
+        // (e.g. a compose service already routed by its own Traefik labels).
+        // Prefer an exact worktree match; fall back to the sole entry for this
+        // project+service (covers branch-agnostic/shared compose projects).
+        if url.is_empty() {
+            let matches: Vec<&ApiService> = docker
+                .iter()
+                .filter(|d| d.project.eq_ignore_ascii_case(project) && d.service == endpoint_name)
+                .collect();
+            let chosen = matches
+                .iter()
+                .find(|d| d.worktree == worktree)
+                .copied()
+                .or_else(|| (matches.len() == 1).then(|| matches[0]));
+            if let Some(d) = chosen {
+                url = d.url.clone();
+                if port.is_empty() && !d.ports.is_empty() {
+                    port = d.ports.join(", ");
+                }
+            }
+        }
+        let health = svc_status
+            .and_then(|s| s.endpoints.iter().find(|ss| ss.name == endpoint_name))
+            .map(|ss| ss.health.clone())
+            .filter(|h| h != "unknown")
+            .unwrap_or_else(|| parent_health.clone());
+        out.push(ApiEndpoint {
+            name: endpoint_name.to_string(),
+            url,
+            port,
+            path_prefix: route.path_prefix.clone(),
+            health,
+        });
+    }
+    out
 }
 
 /// Discovers every running compose-managed container. `/api/services` uses this
@@ -2145,10 +2248,57 @@ fn api_services_with_query(_network: &str, query: Option<&str>) -> Response<Resp
         .map(|p| p.canonicalize().unwrap_or(p))
         .collect();
     let docker_entries = discover_compose_containers_filtered_scoped(with_internal, &allowed_roots);
-    let mut list: Vec<ApiService> = docker_entries
+    // Every docker-discovered service, before suppression. Used both for the
+    // top-level list and to let a declared endpoint inherit the URL/ports of
+    // a matching compose service that manages its own routing.
+    let all_docker: Vec<ApiService> = docker_entries
         .iter()
         .cloned()
         .map(api_service_from)
+        .collect();
+    // Suppress docker entries whose (project, worktree, service) matches a
+    // declared endpoint: those are nested under their parent service below
+    // instead of appearing as separate top-level rows.
+    //
+    // A branch-agnostic compose project (e.g. a bare `gems-infra` with no
+    // branch suffix) is grouped by docker under the `shared` worktree even
+    // though its owning instance reports a real branch. For those, match on
+    // project+service alone so they are still nested.
+    let mut declared_endpoints: std::collections::HashSet<(String, String, String)> =
+        std::collections::HashSet::new();
+    let mut declared_endpoints_shared: std::collections::HashSet<(String, String)> =
+        std::collections::HashSet::new();
+    for inst in &instances {
+        let project = inst
+            .project
+            .as_deref()
+            .map(project_name_from_common_dir)
+            .unwrap_or_else(|| inst.script.clone())
+            .to_lowercase();
+        let raw_worktree = inst.branch.clone().unwrap_or_else(|| "default".to_string());
+        let worktree = crate::ports::sanitize_hostname(&raw_worktree)
+            .split('.')
+            .next()
+            .unwrap_or("default")
+            .to_string();
+        for route in &inst.native_routes {
+            if let Some(sub) = &route.endpoint {
+                declared_endpoints.insert((project.clone(), worktree.clone(), sub.clone()));
+                declared_endpoints_shared.insert((project.clone(), sub.clone()));
+            }
+        }
+    }
+    let mut list: Vec<ApiService> = all_docker
+        .iter()
+        .filter(|e| {
+            let proj = e.project.to_lowercase();
+            let exact =
+                declared_endpoints.contains(&(proj.clone(), e.worktree.clone(), e.service.clone()));
+            let shared_match = e.worktree == "shared"
+                && declared_endpoints_shared.contains(&(proj, e.service.clone()));
+            !(exact || shared_match)
+        })
+        .cloned()
         .collect();
     // Add native services from fog instances (reuse already-fetched `instances`).
     for inst in &instances {
@@ -2170,6 +2320,11 @@ fn api_services_with_query(_network: &str, query: Option<&str>) -> Response<Resp
             .map(|s| (s.name.as_str(), s.health.as_str()))
             .collect();
         for route in &inst.native_routes {
+            // Endpoint routes are nested under their parent (below), never
+            // listed as separate top-level services.
+            if route.endpoint.is_some() {
+                continue;
+            }
             let Some(svc_status) = inst.services.iter().find(|s| s.name == route.service) else {
                 continue;
             };
@@ -2221,15 +2376,44 @@ fn api_services_with_query(_network: &str, query: Option<&str>) -> Response<Resp
                 health: health.to_string(),
                 pid: Some(inst.pid),
                 icon: None,
+                endpoints: Vec::new(),
             });
         }
-        // Also include native services that have no native_route but have a port allocation
-        // (e.g. a service with health_check but no Traefik route) — show them with no URL
-        // so they still appear in the directory.
+        // Attach declared endpoints to their parent service's entry, creating
+        // the parent entry when docker/native discovery did not list it (e.g. a
+        // compose-stack launcher that is not itself a container).
         for svc in &inst.services {
             if !svc.running {
                 continue;
             }
+            let subs = api_endpoints_for(inst, &svc.name, &all_docker, &project, &worktree);
+            if !subs.is_empty() {
+                if let Some(existing) = list.iter_mut().find(|e| {
+                    e.service == svc.name && e.worktree == worktree && e.project == project
+                }) {
+                    if existing.endpoints.is_empty() {
+                        existing.endpoints = subs;
+                    }
+                } else {
+                    list.push(ApiService {
+                        project: project.clone(),
+                        worktree: worktree.clone(),
+                        service: svc.name.clone(),
+                        container: format!("fog-{}-{}", inst.pid, svc.name),
+                        status: "running".to_string(),
+                        url: String::new(),
+                        ports: Vec::new(),
+                        health: svc.health.clone(),
+                        pid: Some(inst.pid),
+                        icon: None,
+                        endpoints: subs,
+                    });
+                }
+                continue;
+            }
+            // Also include native services that have no native_route but have a port allocation
+            // (e.g. a service with health_check but no Traefik route) — show them with no URL
+            // so they still appear in the directory.
             if inst.native_routes.iter().any(|r| r.service == svc.name) {
                 continue;
             }
@@ -2261,6 +2445,7 @@ fn api_services_with_query(_network: &str, query: Option<&str>) -> Response<Resp
                 health: health.to_string(),
                 pid: Some(inst.pid),
                 icon: None,
+                endpoints: Vec::new(),
             });
         }
     }

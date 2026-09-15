@@ -64,6 +64,14 @@ a small JSON API consumed by the SPA:
 - `POST /api/instances/{pid}/services/{name}/action` — start/stop/restart a service of a running instance (see below)
 - `/logs/stream` — SSE stream of a service's logs
 
+Each service may also carry an optional `endpoints` array on
+`GET /api/services` — the declared [`endpoint`](/configuration#endpoints)
+entries of that service, each with its own `name`, `url`, `port` and
+`health`. It is omitted when the service exposes a single implicit endpoint.
+Matching `/api/status` services report the same names with their live health
+under `services[].endpoints[]`. The UI nests endpoints under their parent
+service row on the project/branch and status pages.
+
 Each service also carries an optional `icon` field on `GET /api/services`, taken
 from the owning project's `fog.json` (`project.icon` — see
 [Project metadata](/configuration#project-metadata)). For a URL/data URI it is

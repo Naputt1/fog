@@ -1,3 +1,4 @@
+import { Fragment } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { ExternalLink, X } from "lucide-react";
 
@@ -11,6 +12,7 @@ import {
   findWorktree,
   groupByBranch,
   groupServices,
+  endpointViews,
   type InstanceServiceView,
   type InstanceView,
   type WorktreeBucket,
@@ -87,6 +89,7 @@ function legacyInstances(
           running: s.status === "running",
           health: s.health,
           service: s,
+          endpoints: [],
         })),
     },
   ];
@@ -108,6 +111,43 @@ function RowActions({
       running={svc.running}
       className="flex flex-col items-start gap-1"
     />
+  );
+}
+
+/**
+ * Declared endpoints of a parent service, rendered as a nested
+ * list with per-endpoint health and links. Renders nothing for the common case
+ * of a service with a single implicit endpoint.
+ */
+function EndpointList({ svc }: { svc: InstanceServiceView }) {
+  const endpoints = endpointViews(svc);
+  if (endpoints.length === 0) return null;
+  return (
+    <ul className="space-y-1.5">
+      {endpoints.map((endpoint) => (
+        <li
+          key={endpoint.name}
+          className="flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-xs"
+        >
+          <span className="text-muted-foreground">↳</span>
+          <span className="text-foreground">{endpoint.name}</span>
+          <StatusBadge status={endpoint.health} />
+          {endpoint.url ? (
+            <a
+              href={endpoint.url}
+              target="_blank"
+              rel="noreferrer"
+              onClick={(e) => e.stopPropagation()}
+              className="text-primary min-w-0 truncate underline-offset-4 hover:underline"
+            >
+              {endpoint.url}
+            </a>
+          ) : endpoint.port ? (
+            <span className="text-muted-foreground">:{endpoint.port}</span>
+          ) : null}
+        </li>
+      ))}
+    </ul>
   );
 }
 
@@ -331,6 +371,7 @@ function BranchServicesPage() {
                         {svc.service.ports.join(", ")}
                       </div>
                     ) : null}
+                    <EndpointList svc={svc} />
                     <div
                       onClick={(e) => e.stopPropagation()}
                       className="mt-3 flex flex-wrap items-center gap-2 border-t pt-3"
@@ -365,51 +406,62 @@ function BranchServicesPage() {
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {inst.services.map((svc) => (
-                        <TableRow
-                          key={svc.name}
-                          onClick={() => openService(inst.pid, svc.name)}
-                          aria-selected={
-                            selected?.svc.name === svc.name &&
-                            selected?.inst.pid === inst.pid
-                          }
-                          className={cn(
-                            "cursor-pointer",
-                            selected?.svc.name === svc.name &&
-                              selected?.inst.pid === inst.pid &&
-                              "bg-accent/60 hover:bg-accent/60"
-                          )}
-                        >
-                          <TableCell className="font-mono font-medium">
-                            {svc.name}
-                          </TableCell>
-                          <TableCell>
-                            <StatusBadge
-                              status={svc.running ? "running" : "stopped"}
-                            />
-                          </TableCell>
-                          <TableCell>
-                            {svc.service ? (
-                              <ServiceUrl svc={svc.service} />
-                            ) : (
-                              "—"
-                            )}
-                          </TableCell>
-                          <TableCell className="text-muted-foreground font-mono">
-                            {svc.service && svc.service.ports.length
-                              ? svc.service.ports.join(", ")
-                              : "—"}
-                          </TableCell>
-                          <TableCell
-                            onClick={(e) => e.stopPropagation()}
-                            className="text-right"
-                          >
-                            <div className="flex justify-end">
-                              <RowActions inst={inst} svc={svc} />
-                            </div>
-                          </TableCell>
-                        </TableRow>
-                      ))}
+                      {inst.services.map((svc) => {
+                        const endpoints = endpointViews(svc);
+                        return (
+                          <Fragment key={svc.name}>
+                            <TableRow
+                              onClick={() => openService(inst.pid, svc.name)}
+                              aria-selected={
+                                selected?.svc.name === svc.name &&
+                                selected?.inst.pid === inst.pid
+                              }
+                              className={cn(
+                                "cursor-pointer",
+                                selected?.svc.name === svc.name &&
+                                  selected?.inst.pid === inst.pid &&
+                                  "bg-accent/60 hover:bg-accent/60"
+                              )}
+                            >
+                              <TableCell className="font-mono font-medium">
+                                {svc.name}
+                              </TableCell>
+                              <TableCell>
+                                <StatusBadge
+                                  status={svc.running ? "running" : "stopped"}
+                                />
+                              </TableCell>
+                              <TableCell>
+                                {svc.service ? (
+                                  <ServiceUrl svc={svc.service} />
+                                ) : (
+                                  "—"
+                                )}
+                              </TableCell>
+                              <TableCell className="text-muted-foreground font-mono">
+                                {svc.service && svc.service.ports.length
+                                  ? svc.service.ports.join(", ")
+                                  : "—"}
+                              </TableCell>
+                              <TableCell
+                                onClick={(e) => e.stopPropagation()}
+                                className="text-right"
+                              >
+                                <div className="flex justify-end">
+                                  <RowActions inst={inst} svc={svc} />
+                                </div>
+                              </TableCell>
+                            </TableRow>
+                            {endpoints.length > 0 ? (
+                              <TableRow className="hover:bg-transparent">
+                                <TableCell colSpan={5} className="pt-0">
+                                  <EndpointList svc={svc} />
+                                </TableCell>
+                              </TableRow>
+                            ) : null}
+                          </Fragment>
+                        );
+                      })}
                     </TableBody>
                   </Table>
                 </div>

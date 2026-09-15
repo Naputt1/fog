@@ -1,4 +1,9 @@
-import type { InstanceStatus, Service } from "@/lib/api";
+import type {
+  InstanceStatus,
+  Service,
+  Endpoint,
+  EndpointStatus,
+} from "@/lib/api";
 
 export interface WorktreeBucket {
   /** Git worktree name; "" means services started in the default checkout. */
@@ -147,6 +152,57 @@ export interface InstanceServiceView {
    * for a stopped/native-less service that docker discovery does not list.
    */
   service: Service | null;
+  /** Declared endpoints and their health, from the IPC status snapshot. */
+  endpoints: EndpointStatus[];
+}
+
+/**
+ * One endpoint rendered in the UI: its IPC health reading merged with the
+ * directory's URL/port (when docker/native discovery listed the parent).
+ */
+export interface EndpointView {
+  name: string;
+  health: string;
+  /** Routable URL from `/api/services`, empty when none. */
+  url: string;
+  /** Host-published port, empty when none. */
+  port: string;
+  pathPrefix?: string;
+}
+
+/**
+ * Merges an instance service's IPC endpoint health with the directory
+ * entry's URLs/ports (matched by name). Names from the directory that the IPC
+ * snapshot did not report are still included, and vice versa.
+ */
+export function endpointViews(svc: InstanceServiceView): EndpointView[] {
+  const dir: Endpoint[] = svc.service?.endpoints ?? [];
+  const byName = new Map<string, EndpointView>();
+  for (const s of svc.endpoints) {
+    byName.set(s.name, {
+      name: s.name,
+      health: s.health,
+      url: "",
+      port: "",
+    });
+  }
+  for (const s of dir) {
+    const existing = byName.get(s.name);
+    if (existing) {
+      existing.url = s.url;
+      existing.port = s.port;
+      existing.pathPrefix = s.path_prefix;
+    } else {
+      byName.set(s.name, {
+        name: s.name,
+        health: s.health,
+        url: s.url,
+        port: s.port,
+        pathPrefix: s.path_prefix,
+      });
+    }
+  }
+  return [...byName.values()];
 }
 
 /** A running fog instance and the services it manages. */
@@ -262,6 +318,7 @@ export function buildInstanceViews(
         running: s.running,
         health: s.health,
         service: lookup(project, worktree, s.name),
+        endpoints: s.endpoints ?? [],
       }))
       .sort((a, b) => a.name.localeCompare(b.name));
     return {

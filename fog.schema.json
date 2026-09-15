@@ -111,6 +111,11 @@
                       }
                     }
                   ]
+                },
+                "endpoint": {
+                  "type": "array",
+                  "description": "Endpoints this service actually exposes. Omit for the common case of a single implicit endpoint; declare one entry per exposed endpoint for a stack that exposes several (e.g. a docker compose project). Entries that set `host` (and a resolvable `port`) get a generated Traefik route; every entry is shown with its own health, and the service's health is the AND of all endpoint checks.",
+                  "items": { "$ref": "#/definitions/endpoint" }
                 }
               }
             }
@@ -301,6 +306,75 @@
         "status_400": { "type": "string" },
         "status_500": { "type": "string" },
         "scrollbar": { "type": "string" }
+      }
+    }
+  },
+  "definitions": {
+    "healthCheck": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["kind", "target"],
+          "properties": {
+            "kind": { "type": "string", "enum": ["tcp", "http", "docker"] },
+            "target": { "type": "string" },
+            "compose_file": {
+              "type": "string",
+              "description": "Compose file used by the `docker` health kind, relative to the service path (default: docker-compose.yml)"
+            },
+            "interval_ms": { "type": "integer", "minimum": 100, "default": 5000 },
+            "timeout_ms": { "type": "integer", "minimum": 100, "default": 2000 },
+            "start_interval_ms": {
+              "type": "integer",
+              "minimum": 100,
+              "default": 500,
+              "description": "Fast check interval used until the first successful check; then interval_ms takes over."
+            },
+            "start_period_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "description": "Grace window after start during which failed checks report 'starting' instead of 'unhealthy'."
+            },
+            "retries": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 3,
+              "description": "Consecutive failed checks before the service is reported unhealthy."
+            }
+          }
+        },
+        {
+          "type": "array",
+          "items": { "$ref": "#/definitions/healthCheck" }
+        }
+      ]
+    },
+    "endpoint": {
+      "type": "object",
+      "required": ["name"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Display name for this endpoint (e.g. the compose service name). Must be unique within the owning service."
+        },
+        "host": {
+          "type": "string",
+          "description": "Host rule to route to this endpoint (e.g. \"web.${branch}.acme\"). When omitted, no route is generated (display + health only). May contain ${ports.*} and ${branch} templates."
+        },
+        "port": {
+          "type": "string",
+          "description": "Host-published port template (e.g. \"${ports.web}\") or literal port. Generated routes target host.docker.internal:<port>."
+        },
+        "path_prefix": {
+          "type": "string",
+          "description": "Optional PathPrefix to combine with the host."
+        },
+        "health_check": {
+          "$ref": "#/definitions/healthCheck",
+          "description": "Health check for this endpoint, tracked independently (preferred location for health). The service's own health is the AND of all its endpoints' health checks plus any service-level health_check."
+        }
       }
     }
   }

@@ -106,12 +106,51 @@ A script bundles a set of services and an optional proxy under a name. Run it wi
 | `name` | No | `string` | Display name for the tab. Defaults to the directory name. |
 | `path` | **Yes** | `string` | Working directory for the command (relative to the config file). |
 | `cmd` | **Yes** | `string` | Shell command to execute (e.g. `cargo run`, `npm run dev`, `air`). |
-| `health_check` | No | `object` | Health check configuration (see below). |
+| `health_check` | No | `object` | Service-level health check. Shorthand/aggregate — prefer per-[endpoint](#endpoints) checks. |
+| `endpoint` | No | `array` | Endpoints this service exposes (see [Endpoints](#endpoints)). Omit for a single implicit endpoint. |
 | `shutdown_cmd` | No | `string` | Shell command to run on shutdown (e.g. `docker compose down`). |
 | `reuse` | No | `boolean` | Reuse this service across worktree switches (only honored in single-instance mode, see below). |
 | `share` | No | `boolean` | Share this service between multiple concurrent instances (only honored in concurrent mode, see below). |
 
 The command is executed inside a shell (`$SHELL` or `bash`) using `cd <path> && <cmd>`.
+
+## Endpoints
+
+A `service` entry is the process fog runs; an **endpoint** is one thing that process actually exposes. Most services expose a single endpoint, so `endpoint` is optional and omitting it preserves the existing behavior (the service itself is the endpoint). A stack that exposes several — e.g. `docker compose up` bringing up `web`, `api` and `db` — declares one entry per exposed endpoint.
+
+```json
+{
+  "name": "infra",
+  "path": "./infra",
+  "cmd": "docker compose up -d",
+  "shutdown_cmd": "docker compose down",
+  "endpoint": [
+    { "name": "web", "host": "web.${branch}.acme", "port": "${ports.web}",
+      "health_check": { "kind": "tcp", "target": "localhost:${ports.web}" } },
+    { "name": "api", "host": "api.${branch}.acme", "port": "${ports.api}",
+      "path_prefix": "/v1",
+      "health_check": { "kind": "tcp", "target": "localhost:${ports.api}" } },
+    { "name": "db", "host": "${branch}.db.acme", "port": "${ports.db}" }
+  ]
+}
+```
+
+| Field | Required | Type | Description |
+|-------|----------|------|-------------|
+| `name` | **Yes** | `string` | Display name for the endpoint (e.g. the compose service name). Unique within the owning service. |
+| `host` | No | `string` | Host rule to route to this endpoint (e.g. `"web.${branch}.acme"`). When omitted, no route is generated (display + health only). |
+| `port` | No | `string` | Host-published port template (`"${ports.web}"`) or literal port. Required for a generated route. |
+| `path_prefix` | No | `string` | Optional PathPrefix to combine with `host`. |
+| `health_check` | No | `object` \| `array` | Health check for this endpoint (same shape as the service-level one). This is the preferred place for health checks. |
+
+Behavior:
+
+- **Health is per endpoint.** Each endpoint with a `health_check` is probed on its own adaptive cadence and reported separately. The service's own health (the tab indicator, `depends_on` gating, `share`/`reuse` probing) is the **AND of all endpoints' checks plus any service-level `health_check`** — so a compose stack shows per-endpoint health while still gating its dependents on the whole stack. Because of this, a service-level `health_check` is only needed as a shorthand for a single-endpoint service or for a check that is not tied to an endpoint.
+- **Routing.** Entries with both `host` and a resolvable `port` get a generated Traefik route (`Host(<host>)` → `http://host.docker.internal:<port>`) written as a file-provider config, exactly like [`native_routes`](/router#native-routes). Routes are named `ep-<branch>-<service>-<name>-<host>` and removed on shutdown. Because the target is a host-published port, `port` must be a port the process (or a compose service) publishes to the host.
+- **Display.** The index web UI nests each endpoint under its parent service with its own health badge and link. If a docker-discovered container's name matches a declared endpoint name, it is nested under the parent instead of listed separately, and inherits that container's routed URL/published ports.
+- **No per-endpoint controls.** Endpoints are display/routing/health only: `start`/`stop`/`restart` still act on the parent service.
+
+Endpoint `host`/`port`/`path_prefix`/`health_check.target` support the same `${ports.*}`, `${branch}` and `${branch_raw}` templates as the rest of the config.
 
 ## Worktree-aware runs & service reuse
 

@@ -1291,6 +1291,16 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
             format!("error: {e}"),
         ));
     }
+    if let Err(e) = fog::ports::validate_endpoints(script, &port_map, branch_for_ports.as_deref()) {
+        if !detached {
+            let _ = execute!(stdout(), LeaveAlternateScreen, DisableMouseCapture);
+            let _ = disable_raw_mode();
+        }
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("error: {e}"),
+        ));
+    }
     // Publish allocated ports + native routes to IPC so the index server can synthesize
     // native ApiService entries for the Services UI (which otherwise only sees docker).
     {
@@ -1305,6 +1315,7 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
                 service: r.service,
                 port: r.port,
                 path_prefix: r.path_prefix,
+                endpoint: r.endpoint,
             })
             .collect();
         *ipc_state.native_routes.lock().expect("mutex poisoned") = routes;
@@ -1342,6 +1353,30 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
         }
         io::Error::new(io::ErrorKind::InvalidData, format!("error: {}", e))
     })?;
+    // Declared endpoint routes: flatten from the built terminals, publish
+    // them to IPC (the index server nests them under their parent service) and
+    // bring up their Traefik routes.
+    {
+        let infos = fog::runtime::endpoint_route_infos(&runtime.items);
+        if !infos.is_empty() {
+            ipc_state
+                .native_routes
+                .lock()
+                .expect("mutex poisoned")
+                .extend(infos);
+        }
+        let sub_routes = fog::runtime::endpoint_routes(&runtime.items);
+        if !sub_routes.is_empty() {
+            let messages = fog::router::ensure_native_routes(
+                &sub_routes,
+                &port_map,
+                branch_for_ports.as_deref(),
+                &config,
+                cli.verbose,
+            );
+            fog::log::emit(&messages, cli.verbose);
+        }
+    }
     // Log allocated ports for visibility (also useful for `fog logs`)
     if cli.verbose && !port_map.is_empty() {
         let mut names: Vec<&String> = port_map.keys().collect();
@@ -1771,6 +1806,7 @@ mod tests {
             name: name.to_string(),
             running,
             health: health.to_string(),
+            endpoints: Vec::new(),
         }
     }
 

@@ -152,3 +152,7 @@ For non-container services you can declare explicit file-provider routes:
 Each entry maps a `Host` rule to a service's allocated port via `host.docker.internal`. See [Configuration](/configuration) for the full `native_routes` schema.
 
 Route files are rewritten on every start (ports allocated with `0` are random and the files are removed on shutdown), so the wiring lines (`native route … -> host.docker.internal:…`) are only printed with `fog <script> --verbose` / `-v`. Warnings always print.
+
+### Endpoint routes
+
+[`endpoint`](/configuration#endpoints) entries that set both `host` and `port` generate the same file-provider routes automatically, without repeating an entry in `native_routes`. They are named `ep-<branch>-<service>-<name>-<host>` (distinct from `native-*`, so both can coexist) and are cleaned up with the branch's native routes on shutdown. An endpoint with no `host` is display + health only and produces no route.

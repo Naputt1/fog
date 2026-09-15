@@ -282,34 +282,34 @@ fn resolve_service_templates(
         }
         e.env = Some(resolved);
     }
+    let resolve_one = |c: &HealthCheckConfig| -> Result<HealthCheckConfig, String> {
+        let mut nc = c.clone();
+        if crate::ports::has_template(&nc.target) {
+            nc.target =
+                crate::ports::resolve_template(&nc.target, ports, branch).map_err(|err| {
+                    format!(
+                        "service '{}' health_check.target template error: {}",
+                        e.name.as_deref().unwrap_or("?"),
+                        err
+                    )
+                })?;
+        }
+        if let Some(f) = &nc.compose_file
+            && crate::ports::has_template(f)
+        {
+            nc.compose_file = Some(crate::ports::resolve_template(f, ports, branch).map_err(
+                |err| {
+                    format!(
+                        "service '{}' health_check.compose_file template error: {}",
+                        e.name.as_deref().unwrap_or("?"),
+                        err
+                    )
+                },
+            )?);
+        }
+        Ok(nc)
+    };
     if let Some(hc) = &e.health_check {
-        let resolve_one = |c: &HealthCheckConfig| -> Result<HealthCheckConfig, String> {
-            let mut nc = c.clone();
-            if crate::ports::has_template(&nc.target) {
-                nc.target =
-                    crate::ports::resolve_template(&nc.target, ports, branch).map_err(|err| {
-                        format!(
-                            "service '{}' health_check.target template error: {}",
-                            e.name.as_deref().unwrap_or("?"),
-                            err
-                        )
-                    })?;
-            }
-            if let Some(f) = &nc.compose_file
-                && crate::ports::has_template(f)
-            {
-                nc.compose_file = Some(crate::ports::resolve_template(f, ports, branch).map_err(
-                    |err| {
-                        format!(
-                            "service '{}' health_check.compose_file template error: {}",
-                            e.name.as_deref().unwrap_or("?"),
-                            err
-                        )
-                    },
-                )?);
-            }
-            Ok(nc)
-        };
         e.health_check = Some(match hc {
             HealthCheckSpec::Single(c) => HealthCheckSpec::Single(resolve_one(c)?),
             HealthCheckSpec::Multiple(v) => {
@@ -321,7 +321,148 @@ fn resolve_service_templates(
             }
         });
     }
+    if let Some(subs) = &e.endpoint {
+        let mut resolved = Vec::with_capacity(subs.len());
+        for sub in subs {
+            let mut s = sub.clone();
+            if let Some(host) = &s.host
+                && crate::ports::has_template(host)
+            {
+                s.host = Some(crate::ports::resolve_template(host, ports, branch).map_err(
+                    |err| {
+                        format!(
+                            "service '{}' endpoint '{}' host template error: {}",
+                            e.name.as_deref().unwrap_or("?"),
+                            s.name,
+                            err
+                        )
+                    },
+                )?);
+            }
+            if let Some(port) = &s.port
+                && crate::ports::has_template(port)
+            {
+                s.port = Some(crate::ports::resolve_template(port, ports, branch).map_err(
+                    |err| {
+                        format!(
+                            "service '{}' endpoint '{}' port template error: {}",
+                            e.name.as_deref().unwrap_or("?"),
+                            s.name,
+                            err
+                        )
+                    },
+                )?);
+            }
+            if let Some(prefix) = &s.path_prefix
+                && crate::ports::has_template(prefix)
+            {
+                s.path_prefix = Some(
+                    crate::ports::resolve_template(prefix, ports, branch).map_err(|err| {
+                        format!(
+                            "service '{}' endpoint '{}' path_prefix template error: {}",
+                            e.name.as_deref().unwrap_or("?"),
+                            s.name,
+                            err
+                        )
+                    })?,
+                );
+            }
+            if let Some(hc) = &s.health_check {
+                s.health_check = Some(match hc {
+                    HealthCheckSpec::Single(c) => HealthCheckSpec::Single(resolve_one(c)?),
+                    HealthCheckSpec::Multiple(v) => {
+                        let mut out = Vec::new();
+                        for c in v {
+                            out.push(resolve_one(c)?);
+                        }
+                        HealthCheckSpec::Multiple(out)
+                    }
+                });
+            }
+            resolved.push(s);
+        }
+        e.endpoint = Some(resolved);
+    }
     Ok(e)
+}
+
+/// Resolves each endpoint's `docker`-kind health checks against the service
+/// directory (so `compose_file` is absolute for the background check thread),
+/// returning the endpoints with their checks rewritten in place.
+fn resolve_endpoint_compose_paths(
+    entry: &ConfigEntry,
+    service_path: &Path,
+) -> Vec<crate::config::EndpointConfig> {
+    entry
+        .endpoint
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|mut e| {
+            if let Some(hc) = e.health_check.take() {
+                e.health_check = Some(match hc {
+                    HealthCheckSpec::Single(c) => HealthCheckSpec::Single(
+                        resolve_docker_compose_paths(vec![c], service_path)
+                            .into_iter()
+                            .next()
+                            .expect("one check in, one check out"),
+                    ),
+                    HealthCheckSpec::Multiple(v) => {
+                        HealthCheckSpec::Multiple(resolve_docker_compose_paths(v, service_path))
+                    }
+                });
+            }
+            e
+        })
+        .collect()
+}
+
+/// Flattens every terminal's declared endpoints into tagged native routes.
+///
+/// Only entries that resolve to both a `host` and a `port` produce a route;
+/// the rest are display + health only. `service` is the parent service's
+/// display name and `endpoint` is the endpoint name, so route generation
+/// and the index server can attribute each route back to its endpoint.
+pub fn endpoint_routes(items: &[Terminal]) -> Vec<crate::config::NativeRouteConfig> {
+    let mut routes = Vec::new();
+    for item in items {
+        for sub in &item.endpoints {
+            let (Some(host), Some(port)) = (sub.config.host.clone(), sub.config.port.clone())
+            else {
+                continue;
+            };
+            routes.push(crate::config::NativeRouteConfig {
+                host,
+                service: item.name.clone(),
+                port,
+                path_prefix: sub.config.path_prefix.clone(),
+                endpoint: Some(sub.config.name.clone()),
+            });
+        }
+    }
+    routes
+}
+
+/// Builds the IPC route-info list for `items`' declared endpoints.
+///
+/// Unlike [`endpoint_routes`] this includes *every* declared endpoint,
+/// even those without a route (`host`/`port` empty) — the index server uses it
+/// to nest and health-label all of them, and to suppress the matching docker
+/// entries. Route generation still uses [`endpoint_routes`].
+pub fn endpoint_route_infos(items: &[Terminal]) -> Vec<crate::ipc::NativeRouteInfo> {
+    let mut out = Vec::new();
+    for item in items {
+        for sub in &item.endpoints {
+            out.push(crate::ipc::NativeRouteInfo {
+                host: sub.config.host.clone().unwrap_or_default(),
+                service: item.name.clone(),
+                port: sub.config.port.clone().unwrap_or_default(),
+                path_prefix: sub.config.path_prefix.clone(),
+                endpoint: Some(sub.config.name.clone()),
+            });
+        }
+    }
+    out
 }
 
 /// Spawns the terminals and (optional) proxy for a script, honoring dependency
@@ -492,6 +633,19 @@ pub fn build_with_opts(opts: BuildOpts) -> Result<Runtime, String> {
             Some(HealthCheckSpec::Multiple(v)) => v.clone(),
             None => vec![],
         };
+        // Endpoints carry their own checks. Fold them into the service's
+        // aggregate so `depends_on` gating and `share`/`reuse` probing account
+        // for every exposed endpoint, while each endpoint keeps its own status
+        // thread for display. Duplicate checks are collapsed.
+        let endpoints = resolve_endpoint_compose_paths(entry, &service_path);
+        let mut health_checks = health_checks;
+        for endpoint in &endpoints {
+            for check in crate::terminal::endpoint_health_checks(&endpoint.health_check) {
+                if !health_checks.contains(&check) {
+                    health_checks.push(check);
+                }
+            }
+        }
         // The `docker` health kind needs an absolute compose path so the
         // background check thread (which has no working-directory context) can
         // find the file. Resolve it against the service's directory now.
@@ -682,6 +836,12 @@ pub fn build_with_opts(opts: BuildOpts) -> Result<Runtime, String> {
         if shared {
             terminal.shared = true;
         }
+        // Declared endpoint endpoints (health tracked independently of the
+        // parent). Started immediately so the index/UI has readings as soon as
+        // the service appears; a pending service's endpoints simply report
+        // unhealthy until it starts.
+        terminal.set_endpoints(endpoints);
+        terminal.start_endpoint_health_checks();
         items[idx] = Some(terminal);
     }
 
@@ -760,6 +920,7 @@ mod tests {
             path: ".".to_string(),
             cmd: "true".to_string(),
             health_check: None,
+            endpoint: None,
             depends_on: deps.map(|d| d.into_iter().map(String::from).collect()),
             shutdown_cmd: None,
             env: None,
@@ -818,6 +979,7 @@ mod tests {
             path: ".".to_string(),
             cmd: "true".to_string(),
             health_check: health,
+            endpoint: None,
             depends_on: None,
             shutdown_cmd: None,
             env: None,
@@ -832,6 +994,7 @@ mod tests {
             path: ".".to_string(),
             cmd: "true".to_string(),
             health_check: health,
+            endpoint: None,
             depends_on: None,
             shutdown_cmd: None,
             env: None,
@@ -1107,6 +1270,86 @@ mod tests {
             "--no-share must not borrow an up reused resource"
         );
         assert!(!rt.items[0].shared);
+    }
+
+    fn sub(name: &str, host: Option<&str>, port: Option<&str>) -> crate::config::EndpointConfig {
+        crate::config::EndpointConfig {
+            name: name.to_string(),
+            host: host.map(String::from),
+            port: port.map(String::from),
+            path_prefix: None,
+            health_check: None,
+        }
+    }
+
+    #[test]
+    fn test_resolve_endpoint_templates() {
+        let mut e = entry("infra", None);
+        e.endpoint = Some(vec![crate::config::EndpointConfig {
+            name: "web".to_string(),
+            host: Some("web.${branch}.acme".to_string()),
+            port: Some("${ports.web}".to_string()),
+            path_prefix: Some("/v1".to_string()),
+            health_check: None,
+        }]);
+        let pm: crate::ports::PortMap = [("web".to_string(), 8080u16)].into_iter().collect();
+        let resolved = resolve_service_templates(&e, &pm, Some("main")).unwrap();
+        let sub = &resolved.endpoint.as_ref().unwrap()[0];
+        assert_eq!(sub.host.as_deref(), Some("web.main.acme"));
+        assert_eq!(sub.port.as_deref(), Some("8080"));
+        assert_eq!(sub.path_prefix.as_deref(), Some("/v1"));
+    }
+
+    #[test]
+    fn test_build_folds_endpoint_checks_into_service_health() {
+        let l1 = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let a1 = l1.local_addr().unwrap();
+        let l2 = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let a2 = l2.local_addr().unwrap();
+        // Service-level check duplicates the first endpoint's check.
+        let mut entry = share_entry("db", Some(tcp_health(&a1.to_string())));
+        let mut e1 = sub("one", None, None);
+        e1.health_check = Some(tcp_health(&a1.to_string()));
+        let mut e2 = sub("two", None, None);
+        e2.health_check = Some(tcp_health(&a2.to_string()));
+        entry.endpoint = Some(vec![e1, e2]);
+
+        let script = script_with_concurrent(vec![entry]);
+        let mut adopted = HashMap::new();
+        let rt = build(
+            &script,
+            "dev",
+            Path::new("."),
+            None,
+            false,
+            100,
+            None,
+            &mut adopted,
+        )
+        .unwrap();
+        assert!(rt.items[0].reused, "an up shared resource is borrowed");
+        assert_eq!(rt.items[0].endpoints.len(), 2);
+        assert_eq!(
+            rt.items[0].health_checks.len(),
+            2,
+            "service + endpoint checks are folded and deduplicated"
+        );
+    }
+
+    #[test]
+    fn test_endpoint_routes_flatten_host_and_port() {
+        let mut t = Terminal::spawn_reused("infra".into(), ".".into(), "true".into(), 10);
+        t.set_endpoints(vec![
+            sub("web", Some("web.acme"), Some("8080")),
+            // No host: display/health only, no route.
+            sub("db", None, Some("5432")),
+        ]);
+        let routes = endpoint_routes(&[t]);
+        assert_eq!(routes.len(), 1, "only entries with host+port become routes");
+        assert_eq!(routes[0].service, "infra");
+        assert_eq!(routes[0].endpoint.as_deref(), Some("web"));
+        assert_eq!(routes[0].host, "web.acme");
+        assert_eq!(routes[0].port, "8080");
     }
 
     #[test]

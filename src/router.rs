@@ -244,7 +244,19 @@ pub fn ensure_native_routes(
         let branch_slug = sanitize_name(branch.unwrap_or("default"));
         let svc_slug = sanitize_name(&r.service);
         let host_slug = sanitize_name(&host);
-        let name = format!("native-{}-{}-{}", branch_slug, svc_slug, host_slug);
+        // Endpoint routes get a distinct `ep-` prefix (both in the router
+        // name and the file name) so they never collide with a top-level
+        // `native_routes` entry for the same service.
+        let name = match &r.endpoint {
+            Some(endpoint) => format!(
+                "ep-{}-{}-{}-{}",
+                branch_slug,
+                svc_slug,
+                sanitize_name(endpoint),
+                host_slug
+            ),
+            None => format!("native-{}-{}-{}", branch_slug, svc_slug, host_slug),
+        };
         let rule = if let Some(p) = &r.path_prefix {
             format!("Host(`{}`) && PathPrefix(`{}`)", host, p)
         } else {
@@ -283,10 +295,16 @@ pub fn ensure_native_routes(
                 continue;
             }
             if verbose {
-                messages.push(format!(
-                    "native route {} -> host.docker.internal:{} (Host: {})",
-                    r.service, port, host
-                ));
+                match &r.endpoint {
+                    Some(endpoint) => messages.push(format!(
+                        "endpoint route {}.{} -> host.docker.internal:{} (Host: {})",
+                        r.service, endpoint, port, host
+                    )),
+                    None => messages.push(format!(
+                        "native route {} -> host.docker.internal:{} (Host: {})",
+                        r.service, port, host
+                    )),
+                }
             }
         }
     }
@@ -297,15 +315,30 @@ pub fn ensure_native_routes(
 /// Removes native route files for a given branch (or all when `branch` is None).
 pub fn cleanup_native_routes(branch: Option<&str>, cfg: &crate::config::Config) {
     let dynamic_dir = default_dynamic_dir_for_config(cfg);
-    let prefix = branch
-        .map(|b| format!("native-{}-", sanitize_name(b)))
-        .unwrap_or_else(|| "native-".to_string());
+    let branch_slug = branch.map(sanitize_name);
+    // Top-level `native-` routes and `ep-` endpoint routes belong to the
+    // branch, so remove either prefix (`sub-` is the legacy endpoint prefix).
+    let matches = |name: &str| -> bool {
+        if !name.ends_with(".toml") {
+            return false;
+        }
+        match &branch_slug {
+            Some(b) => {
+                name.starts_with(&format!("native-{b}-"))
+                    || name.starts_with(&format!("ep-{b}-"))
+                    || name.starts_with(&format!("sub-{b}-"))
+            }
+            None => {
+                name.starts_with("native-") || name.starts_with("ep-") || name.starts_with("sub-")
+            }
+        }
+    };
     let Ok(entries) = fs::read_dir(&dynamic_dir) else {
         return;
     };
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with(&prefix) && name.ends_with(".toml") {
+        if matches(&name) {
             let _ = fs::remove_file(entry.path());
         }
     }
@@ -697,6 +730,7 @@ mod tests {
             service: "frontend".to_string(),
             port: "${ports.frontend}".to_string(),
             path_prefix: None,
+            endpoint: None,
         }]
     }
 
@@ -727,6 +761,35 @@ mod tests {
                     .to_string()
             ]
         );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_endpoint_route_uses_ep_prefix_and_cleans_up() {
+        let base = std::env::temp_dir().join(format!("fog-ep-route-{}", std::process::id()));
+        let cfg = native_cfg(&base);
+        let mut routes = native_routes();
+        routes[0].host = "${branch}.acme".to_string();
+        routes[0].endpoint = Some("web".to_string());
+        let msgs = ensure_native_routes(&routes, &ports(), Some("main"), &cfg, true);
+        assert!(msgs[0].contains("endpoint route frontend.web"), "{msgs:?}");
+        let dir = default_dynamic_dir_for_config(&cfg);
+        let files: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            files.iter().any(|f| f.starts_with("ep-main-")),
+            "expected an ep- route file, got {files:?}"
+        );
+        cleanup_native_routes(Some("main"), &cfg);
+        let remaining: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(remaining.is_empty(), "cleanup left {remaining:?}");
         let _ = std::fs::remove_dir_all(&base);
     }
 }

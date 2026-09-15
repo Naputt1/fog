@@ -308,6 +308,70 @@ pub fn validate_native_routes(
     Ok(())
 }
 
+/// Whether a declared endpoint uses any `${...}` template.
+fn endpoint_has_template(s: &crate::config::EndpointConfig) -> bool {
+    s.host.as_ref().is_some_and(|h| has_template(h))
+        || s.port.as_ref().is_some_and(|p| has_template(p))
+        || s.path_prefix.as_ref().is_some_and(|p| has_template(p))
+        || s.health_check.as_ref().is_some_and(|hc| match hc {
+            crate::config::HealthCheckSpec::Single(c) => has_template(&c.target),
+            crate::config::HealthCheckSpec::Multiple(v) => {
+                v.iter().any(|c| has_template(&c.target))
+            }
+        })
+}
+
+/// Validates declared `endpoint` entries: names must be non-empty and
+/// unique within their owning service, and `port` (when present) must be a
+/// resolvable `${ports.<name>}` template or a literal port. Mirrors
+/// [`validate_native_routes`] for the nested form.
+pub fn validate_endpoints(
+    script: &crate::config::ScriptConfig,
+    port_map: &PortMap,
+    branch: Option<&str>,
+) -> Result<(), String> {
+    let Some(entries) = script.service.as_ref() else {
+        return Ok(());
+    };
+    for entry in entries {
+        let Some(subs) = entry.endpoint.as_ref() else {
+            continue;
+        };
+        let service = entry.name.as_deref().unwrap_or("?");
+        let mut seen = std::collections::HashSet::new();
+        for sub in subs {
+            if sub.name.trim().is_empty() {
+                return Err(format!(
+                    "service '{service}' has a endpoint with an empty name"
+                ));
+            }
+            if !seen.insert(sub.name.clone()) {
+                return Err(format!(
+                    "service '{service}' has duplicate endpoint name '{}'",
+                    sub.name
+                ));
+            }
+            let Some(port) = sub.port.as_deref() else {
+                continue;
+            };
+            if has_template(port) {
+                resolve_template(port, port_map, branch).map_err(|e| {
+                    format!(
+                        "service '{service}' endpoint '{}' port template error: {e}",
+                        sub.name
+                    )
+                })?;
+            } else if port.parse::<u16>().is_err() {
+                return Err(format!(
+                    "service '{service}' endpoint '{}' port '{}' must be a '${{ports.<name>}}' template or literal port",
+                    sub.name, port
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Ensures `ports` top-level is defined when any template references `${ports.*}`.
 /// Checks service `cmd`/`shutdown_cmd`/`env`/`health_check`, proxy routes, and
 /// native routes. Returns `Err` with the same message previously duplicated in
@@ -333,6 +397,9 @@ pub fn ensure_ports_defined(
                         v.iter().any(|c| has_template(&c.target))
                     }
                 })
+                || e.endpoint
+                    .as_ref()
+                    .is_some_and(|subs| subs.iter().any(endpoint_has_template))
         })
     }) || script.proxy.as_ref().is_some_and(|p| {
         p.routes
@@ -445,6 +512,78 @@ mod tests {
     fn test_resolve_branch_missing_errors() {
         let m = pm(&[]);
         assert!(resolve_template("${branch}", &m, None).is_err());
+    }
+
+    fn script_with_subs(subs: Vec<crate::config::EndpointConfig>) -> crate::config::ScriptConfig {
+        crate::config::ScriptConfig {
+            service: Some(vec![crate::config::ConfigEntry {
+                name: Some("infra".to_string()),
+                path: ".".to_string(),
+                cmd: "true".to_string(),
+                health_check: None,
+                endpoint: Some(subs),
+                depends_on: None,
+                shutdown_cmd: None,
+                env: None,
+                reuse: false,
+                share: false,
+            }]),
+            proxy: None,
+            terminal: None,
+            concurrent: true,
+        }
+    }
+
+    fn sub(name: &str, host: Option<&str>, port: Option<&str>) -> crate::config::EndpointConfig {
+        crate::config::EndpointConfig {
+            name: name.to_string(),
+            host: host.map(String::from),
+            port: port.map(String::from),
+            path_prefix: None,
+            health_check: None,
+        }
+    }
+
+    #[test]
+    fn test_validate_endpoints_ok() {
+        let script = script_with_subs(vec![sub(
+            "web",
+            Some("web.${branch}.acme"),
+            Some("${ports.web}"),
+        )]);
+        let pm = pm(&[("web", 8080)]);
+        assert!(validate_endpoints(&script, &pm, Some("main")).is_ok());
+    }
+
+    #[test]
+    fn test_validate_endpoints_duplicate_name_errors() {
+        let script = script_with_subs(vec![sub("web", None, None), sub("web", None, None)]);
+        let err = validate_endpoints(&script, &pm(&[]), None).unwrap_err();
+        assert!(err.contains("duplicate"), "{err}");
+    }
+
+    #[test]
+    fn test_validate_endpoints_bad_port_errors() {
+        let script = script_with_subs(vec![sub("web", Some("web.acme"), Some("nope"))]);
+        let err = validate_endpoints(&script, &pm(&[]), None).unwrap_err();
+        assert!(err.contains("literal port"), "{err}");
+    }
+
+    #[test]
+    fn test_validate_endpoints_unknown_port_template_errors() {
+        let script = script_with_subs(vec![sub("web", None, Some("${ports.missing}"))]);
+        let err = validate_endpoints(&script, &pm(&[("web", 1)]), None).unwrap_err();
+        assert!(err.contains("unknown port"), "{err}");
+    }
+
+    #[test]
+    fn test_ensure_ports_defined_detects_endpoint_template() {
+        let script = script_with_subs(vec![sub("web", None, Some("${ports.web}"))]);
+        let err = ensure_ports_defined(None, &script, None).unwrap_err();
+        assert!(err.contains("'ports' is not defined"), "{err}");
+        // With a ports map present it passes.
+        let ports = std::collections::HashMap::from([("web".to_string(), 8080u16)]);
+        assert!(ensure_ports_defined(Some(&ports), &script, None).is_ok());
     }
 
     #[test]

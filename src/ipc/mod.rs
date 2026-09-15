@@ -91,6 +91,7 @@ mod tests {
             name: "web".into(),
             running: true,
             health: "healthy".into(),
+            endpoints: Vec::new(),
         });
         state.proxy.lock().unwrap().replace(ProxyStatus {
             running: true,

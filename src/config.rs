@@ -2,7 +2,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum HealthCheckKind {
     Tcp,
@@ -12,7 +12,7 @@ pub enum HealthCheckKind {
     Docker,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, PartialEq)]
 pub struct HealthCheckConfig {
     pub kind: HealthCheckKind,
     /// For `tcp`/`http`: the address to check (e.g. `localhost:8080`).
@@ -72,6 +72,42 @@ pub struct NativeRouteConfig {
     pub port: String,
     /// Optional PathPrefix to combine with the host.
     pub path_prefix: Option<String>,
+    /// Internal: when set, this route targets a declared `endpoint` of
+    /// `service` (by name) rather than the service itself. Fog fills this in
+    /// when flattening `service[].endpoint` into routes; users do not set
+    /// it on top-level `native_routes`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+}
+
+/// One declared endpoint of a [`ConfigEntry`]: an endpoint the service
+/// actually exposes.
+///
+/// A service usually exposes a single endpoint, so `endpoint` is optional
+/// and omitting it preserves the existing behavior (the service itself is the
+/// endpoint). A stack that exposes several endpoints — e.g. `docker compose up`
+/// bringing up `web`, `api` and `db` — declares one entry per exposed service.
+///
+/// `host`/`port`/`path_prefix` may contain `${ports.*}` and
+/// `${branch}`/`${FOG_BRANCH}` templates, exactly like [`NativeRouteConfig`].
+/// A route is generated only for entries that set `host` (and a resolvable
+/// `port`); the rest are display + health only. `port` is a host-published
+/// port because generated routes target `host.docker.internal:<port>`.
+#[derive(Debug, Deserialize, Clone)]
+pub struct EndpointConfig {
+    /// Display name for this endpoint (e.g. the compose service name).
+    /// Must be unique within the owning service.
+    pub name: String,
+    /// Host rule to route to this endpoint (e.g. `"web.${branch}.acme"`).
+    /// When omitted, no route is generated for this endpoint.
+    pub host: Option<String>,
+    /// Port template (e.g. `"${ports.web}"`) or literal host port.
+    pub port: Option<String>,
+    /// Optional PathPrefix to combine with `host`.
+    pub path_prefix: Option<String>,
+    /// Optional health check for this endpoint (single object or array),
+    /// tracked independently of the parent service's health.
+    pub health_check: Option<HealthCheckSpec>,
 }
 
 /// A single service entry in the config file.
@@ -85,6 +121,11 @@ pub struct ConfigEntry {
     pub cmd: String,
     /// Optional health check configuration (single object or array).
     pub health_check: Option<HealthCheckSpec>,
+    /// Endpoints this service actually exposes. Omit for the common case of a
+    /// single implicit endpoint; declare one entry per exposed service for a
+    /// stack that exposes several (e.g. a docker compose project).
+    #[serde(default)]
+    pub endpoint: Option<Vec<EndpointConfig>>,
     /// Names of services this service depends on.
     pub depends_on: Option<Vec<String>>,
     /// Shell command to run when fog shuts down (e.g. "docker compose down").
@@ -562,6 +603,50 @@ mod tests {
         let config = load(&path).unwrap();
         let entries = config.scripts["dev"].service.as_ref().unwrap();
         assert!(entries[0].share);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_load_endpoint_absent_defaults_to_none() {
+        let path =
+            std::env::temp_dir().join(format!("fog-config-sub-none-{}.json", std::process::id()));
+        std::fs::write(
+            &path,
+            r#"{"scripts":{"dev":{"service":[{"path":".","cmd":"true"}]}}}"#,
+        )
+        .unwrap();
+        let config = load(&path).unwrap();
+        let entries = config.scripts["dev"].service.as_ref().unwrap();
+        assert!(entries[0].endpoint.is_none());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_load_endpoint_parses_fields() {
+        let path =
+            std::env::temp_dir().join(format!("fog-config-sub-parses-{}.json", std::process::id()));
+        std::fs::write(
+            &path,
+            r#"{"scripts":{"dev":{"service":[{"path":".","cmd":"docker compose up -d","endpoint":[
+                {"name":"web","host":"web.${branch}.acme","port":"${ports.web}","path_prefix":"/app",
+                 "health_check":{"kind":"tcp","target":"localhost:${ports.web}"}},
+                {"name":"db","port":"${ports.db}"}
+            ]}]}}}"#,
+        )
+        .unwrap();
+        let config = load(&path).unwrap();
+        let subs = config.scripts["dev"].service.as_ref().unwrap()[0]
+            .endpoint
+            .as_ref()
+            .unwrap();
+        assert_eq!(subs.len(), 2);
+        assert_eq!(subs[0].name, "web");
+        assert_eq!(subs[0].host.as_deref(), Some("web.${branch}.acme"));
+        assert_eq!(subs[0].path_prefix.as_deref(), Some("/app"));
+        assert!(subs[0].health_check.is_some());
+        assert_eq!(subs[1].name, "db");
+        assert!(subs[1].host.is_none());
+        assert!(subs[1].port.is_some());
         let _ = std::fs::remove_file(&path);
     }
 

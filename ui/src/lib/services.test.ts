@@ -12,6 +12,7 @@ import {
   instanceStats,
   projectServices,
   projectStats,
+  endpointViews,
   worktreeFromBranch,
   worktreeFromParam,
   worktreeParam,
@@ -237,5 +238,55 @@ describe("branchStats / instanceStats", () => {
       running: 1,
       ports: ["0.0.0.0:8080->80/tcp"],
     });
+  });
+});
+
+describe("endpointViews", () => {
+  it("merges IPC health with directory URLs by name", () => {
+    const view = {
+      name: "infra",
+      running: true,
+      health: "healthy" as string | null,
+      endpoints: [
+        { name: "web", health: "healthy" },
+        { name: "api", health: "unhealthy" },
+      ],
+      service: svc({
+        service: "infra",
+        endpoints: [
+          {
+            name: "web",
+            url: "https://web.main.acme/",
+            port: "8080",
+            health: "healthy",
+          },
+          { name: "api", url: "", port: "9000", health: "unhealthy" },
+        ],
+      }),
+    };
+    const merged = endpointViews(view);
+    expect(merged.map((s) => s.name)).toEqual(["web", "api"]);
+    expect(merged[0]).toMatchObject({
+      name: "web",
+      health: "healthy",
+      url: "https://web.main.acme/",
+      port: "8080",
+    });
+    expect(merged[1]).toMatchObject({
+      name: "api",
+      health: "unhealthy",
+      port: "9000",
+    });
+  });
+
+  it("is empty for a service with no declared endpoints", () => {
+    const view = {
+      name: "api",
+      running: true,
+      health: "healthy" as string | null,
+      endpoints: [],
+      service: svc({ service: "api" }),
+    };
+    expect(endpointViews(view)).toEqual([]);
   });
 });

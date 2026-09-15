@@ -31,6 +31,7 @@ AI agents changed how we develop, but dev tooling still assumes one human per en
 - **One command per service.** Each service in its own PTY with color and scrollback. `health_check`, `depends_on`, restart with `R`.
 - **Built-in proxy.** Reverse proxy with request log, filter, and WebSocket support.
 - **Simple config.** One `fog.json` with named scripts (`fog dev`). Ports templating, native_routes, worktree-aware sharing.
+- **Endpoints.** Declare what each service exposes (`endpoint`) — one for most, several for a compose stack — and get generated routes plus per-endpoint health in the web UI.
 
 Full docs: [configuration](https://naputt1.github.io/fog/configuration), [agentic guide](https://naputt1.github.io/fog/agentic), [index server](https://naputt1.github.io/fog/index-server).
 

@@ -1082,7 +1082,7 @@ impl App {
         // can synthesize native entries for the Services page.
         {
             *self.ipc_state.ports.lock().expect("mutex poisoned") = port_map.clone();
-            let routes: Vec<crate::ipc::NativeRouteInfo> = config
+            let mut routes: Vec<crate::ipc::NativeRouteInfo> = config
                 .native_routes
                 .clone()
                 .unwrap_or_default()
@@ -1092,8 +1092,12 @@ impl App {
                     service: r.service,
                     port: r.port,
                     path_prefix: r.path_prefix,
+                    endpoint: r.endpoint,
                 })
                 .collect();
+            // Declared endpoint routes, flattened from the freshly built
+            // terminals (resolved against the new ports/branch).
+            routes.extend(runtime::endpoint_route_infos(&built.items));
             *self.ipc_state.native_routes.lock().expect("mutex poisoned") = routes;
         }
         // Clean up stale native routes from the previous branch before ensuring the new ones
@@ -1115,6 +1119,16 @@ impl App {
             ) {
                 self.errors.push(msg);
             }
+        }
+        // Declared endpoint routes for the new branch.
+        for msg in crate::router::ensure_native_routes(
+            &runtime::endpoint_routes(&built.items),
+            &port_map,
+            branch_for_ports.as_deref(),
+            &config,
+            self.verbose,
+        ) {
+            self.errors.push(msg);
         }
 
         let (tabs, proxy_tab_index) = Self::build_tabs(
@@ -1625,6 +1639,7 @@ impl App {
                 name: item.name.clone(),
                 running: !item.stopped && item.process_running,
                 health: format!("{:?}", item.get_health_status()).to_lowercase(),
+                endpoints: item.endpoint_statuses(),
             });
         }
         let mut proxy = self.ipc_state.proxy.lock().expect("mutex poisoned");

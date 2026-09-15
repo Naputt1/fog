@@ -20,6 +20,28 @@
 /** Status as reported by docker for a listed service (always "running"). */
 export type ServiceStatus = "running" | (string & {});
 
+/** One declared endpoint of a service, from GET /api/services. */
+export interface Endpoint {
+  /** Sub-service display name. */
+  name: string;
+  /** Externally reachable URL, empty string when it declares no routable host. */
+  url: string;
+  /** Host-published port, empty string when not declared. */
+  port: string;
+  /** Optional PathPrefix combined with the host. */
+  path_prefix?: string;
+  /** Per-endpoint health state. */
+  health: string;
+}
+
+/** Health reading of one endpoint, from GET /api/status. */
+export interface EndpointStatus {
+  /** Sub-service display name. */
+  name: string;
+  /** Health state (`healthy`/`unhealthy`/`starting`/...). */
+  health: string;
+}
+
 /** One entry of GET /api/services. */
 export interface Service {
   /** Project / script name the service belongs to. */
@@ -52,6 +74,12 @@ export interface Service {
    * filesystem path. Absent when unset; repeated on every service of a project.
    */
   icon?: string;
+  /**
+   * Declared endpoints of this service, omitted when the service
+   * exposes a single implicit endpoint (the common case). Each carries its own
+   * URL/port/health; the parent still has its own row.
+   */
+  endpoints?: Endpoint[];
 }
 
 /** Per-service health inside a GET /api/status instance. */
@@ -62,6 +90,8 @@ export interface InstanceServiceStatus {
   running: boolean;
   /** Health detail, null when unset. */
   health: string | null;
+  /** Declared endpoints and their health; omitted when none. */
+  endpoints?: EndpointStatus[];
 }
 
 /** One IPC instance in the GET /api/status snapshot. */
