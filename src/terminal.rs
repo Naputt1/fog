@@ -34,6 +34,11 @@ const DEFAULT_HEALTH_RETRIES: u32 = 3;
 /// Health check intervals are clamped to at least this (matches the schema).
 const MIN_HEALTH_INTERVAL: Duration = Duration::from_millis(100);
 
+/// How long a restart waits for `shutdown_cmd` to finish before spawning the
+/// replacement command. After this the shutdown process is killed so a wedged
+/// `docker compose down` cannot block the restart forever.
+const SHUTDOWN_CMD_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Fires a wake-up ping to the app loop whenever any service's health status
 /// changes, so dependents gated by `depends_on` start the moment a dependency
 /// becomes ready instead of waiting for the next poll tick.
@@ -1605,9 +1610,10 @@ impl Terminal {
             }
         };
         self.kill_inner();
-        // Tear down the previous incarnation (e.g. `docker compose down`) so
-        // the fresh start does not silently attach to leftover containers.
-        self.run_shutdown_cmd();
+        // Tear down the previous incarnation (e.g. `docker compose down`) and
+        // wait for it to finish so the fresh start does not race it or silently
+        // attach to leftover containers.
+        self.run_shutdown_cmd_blocking(SHUTDOWN_CMD_TIMEOUT);
         // A health-checked reuse service (e.g. a one-shot `docker compose up -d`)
         // stays health-driven after restart: its command exits after bringing
         // the resource up, so liveness comes from the health checks. Without
@@ -1873,13 +1879,11 @@ impl Terminal {
 }
 
 impl Terminal {
-    /// Runs the service's `shutdown_cmd` in a fresh session, in the service's
-    /// working directory. Used both at teardown (`Drop`) and on restart so a
-    /// restarted compose-style service does not leave its old containers up.
-    fn run_shutdown_cmd(&self) {
-        let Some(ref shutdown_cmd) = self.shutdown_cmd else {
-            return;
-        };
+    /// Builds the service's `shutdown_cmd` as a process in a fresh session, in
+    /// the service's working directory. Returns `None` when no `shutdown_cmd`
+    /// is configured.
+    fn shutdown_cmd_process(&self) -> Option<std::process::Command> {
+        let shutdown_cmd = self.shutdown_cmd.as_ref()?;
         let cwd = match &self.init {
             Init::Command { path, .. } if !path.is_empty() => Some(path.as_str()),
             _ => None,
@@ -1907,7 +1911,41 @@ impl Terminal {
                 Ok(())
             });
         }
-        let _ = cmd.spawn();
+        Some(cmd)
+    }
+
+    /// Runs the service's `shutdown_cmd` without waiting for it. Used at
+    /// teardown (`Drop`) and on `stop`, where blocking would delay quit or a
+    /// worktree switch; `restart` uses `run_shutdown_cmd_blocking`.
+    fn run_shutdown_cmd(&self) {
+        if let Some(mut cmd) = self.shutdown_cmd_process() {
+            let _ = cmd.spawn();
+        }
+    }
+
+    /// Runs the service's `shutdown_cmd` and waits up to `timeout` for it to
+    /// exit, escalating to SIGKILL on the process tree if it does not. Returns
+    /// `true` if the command exited within the timeout, `false` if it was
+    /// killed (or there was nothing to run).
+    ///
+    /// Used by restart so the replacement command starts only after the old
+    /// incarnation is actually torn down (e.g. `docker compose down` finished),
+    /// instead of racing it.
+    fn run_shutdown_cmd_blocking(&self, timeout: Duration) -> bool {
+        let Some(mut cmd) = self.shutdown_cmd_process() else {
+            return false;
+        };
+        self.notice("running shutdown command…\n");
+        let Ok(child) = cmd.spawn() else {
+            return false;
+        };
+        let pid = child.id();
+        let exited = wait_reaped(pid, timeout);
+        if !exited {
+            process::signal_tree(pid, SIGKILL);
+            wait_reaped(pid, Duration::from_secs(2));
+        }
+        exited
     }
 }
 
@@ -2451,6 +2489,59 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         false
+    }
+
+    #[test]
+    fn test_shutdown_cmd_blocking_waits_for_completion() {
+        let marker = std::env::temp_dir().join(format!(
+            "fog-test-shutdown-blocking-{}.marker",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&marker);
+        let mut t = Terminal::spawn_reused("db".into(), ".".into(), "true".into(), 100);
+        t.shutdown_cmd = Some(format!("sleep 0.3 && touch {}", marker.display()));
+
+        let start = std::time::Instant::now();
+        let exited = t.run_shutdown_cmd_blocking(Duration::from_secs(5));
+        let elapsed = start.elapsed();
+
+        let seen = marker.exists();
+        let _ = fs::remove_file(&marker);
+        assert!(exited, "shutdown_cmd should exit within the timeout");
+        assert!(seen, "restart must wait for shutdown_cmd to finish");
+        assert!(
+            elapsed >= Duration::from_millis(300),
+            "blocking shutdown must not return before the command exits (took {elapsed:?})"
+        );
+    }
+
+    #[test]
+    fn test_shutdown_cmd_blocking_noop_when_unset() {
+        let t = Terminal::spawn_reused("db".into(), ".".into(), "true".into(), 100);
+        let start = std::time::Instant::now();
+        let exited = t.run_shutdown_cmd_blocking(Duration::from_secs(5));
+        assert!(!exited);
+        assert!(
+            start.elapsed() < Duration::from_millis(500),
+            "a service without shutdown_cmd must not block"
+        );
+    }
+
+    #[test]
+    fn test_shutdown_cmd_blocking_kills_on_timeout() {
+        let mut t = Terminal::spawn_reused("db".into(), ".".into(), "true".into(), 100);
+        t.shutdown_cmd = Some("sleep 30".to_string());
+
+        let start = std::time::Instant::now();
+        let exited = t.run_shutdown_cmd_blocking(Duration::from_millis(300));
+        assert!(
+            !exited,
+            "a shutdown_cmd that outlives the timeout is killed"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "the timeout must bound the wait, not the command's own duration"
+        );
     }
 
     #[test]
