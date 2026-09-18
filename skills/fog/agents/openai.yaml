@@ -1,0 +1,3 @@
+interface:
+  display_name: "Using fog"
+  short_description: "Run and inspect fog dev environments headlessly"
