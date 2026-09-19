@@ -105,7 +105,9 @@ function LogsPage() {
   // All services in the effective project (flattened)
   const projectServices = useMemo(() => {
     if (!filteredGroups.length) return [];
-    return filteredGroups.flatMap((g) => g.worktrees.flatMap((w) => w.services));
+    return filteredGroups.flatMap((g) =>
+      g.worktrees.flatMap((w) => w.services)
+    );
   }, [filteredGroups]);
 
   const active = useMemo(() => {

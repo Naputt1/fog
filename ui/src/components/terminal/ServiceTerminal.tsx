@@ -80,10 +80,7 @@ export function ServiceTerminal({
 
   return (
     <div
-      className={cn(
-        "flex min-h-0 min-w-0 flex-1 flex-col gap-3",
-        className
-      )}
+      className={cn("flex min-h-0 min-w-0 flex-1 flex-col gap-3", className)}
     >
       {showModeToggle ? (
         <div className="flex shrink-0 flex-wrap items-center gap-2">
