@@ -179,10 +179,9 @@ async function parseErrorResponse(
 async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
   let res: Response;
   try {
-    res = await fetch(path, {
-      headers: { Accept: "application/json", ...init?.headers },
-      ...init,
-    });
+    const headers = new Headers(init?.headers);
+    headers.set("Accept", "application/json");
+    res = await fetch(path, { ...init, headers });
   } catch (cause) {
     throw new Error(`Network error fetching ${path}: ${String(cause)}`);
   }
