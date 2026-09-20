@@ -63,9 +63,9 @@ export function useServiceAction() {
       action: ServiceAction;
     }) => postServiceAction(pid, name, action),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["status"] });
-      queryClient.invalidateQueries({ queryKey: ["health"] });
-      queryClient.invalidateQueries({ queryKey: ["services"] });
+      void queryClient.invalidateQueries({ queryKey: ["status"] });
+      void queryClient.invalidateQueries({ queryKey: ["health"] });
+      void queryClient.invalidateQueries({ queryKey: ["services"] });
     },
   });
 }
@@ -79,9 +79,9 @@ export function useKillInstance() {
   return useMutation({
     mutationFn: ({ pid }: { pid: number }) => postKillInstance(pid),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["status"] });
-      queryClient.invalidateQueries({ queryKey: ["health"] });
-      queryClient.invalidateQueries({ queryKey: ["services"] });
+      void queryClient.invalidateQueries({ queryKey: ["status"] });
+      void queryClient.invalidateQueries({ queryKey: ["health"] });
+      void queryClient.invalidateQueries({ queryKey: ["services"] });
     },
   });
 }
@@ -113,8 +113,8 @@ export function useLaunch() {
       branch?: string | null;
     }) => postLaunch(configDir, script, branch),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["status"] });
-      queryClient.invalidateQueries({ queryKey: ["health"] });
+      void queryClient.invalidateQueries({ queryKey: ["status"] });
+      void queryClient.invalidateQueries({ queryKey: ["health"] });
     },
   });
 }
