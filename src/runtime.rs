@@ -28,6 +28,12 @@ pub struct BuildOpts<'a> {
     pub ports: &'a crate::ports::PortMap,
     pub branch_override: Option<String>,
     pub no_share: bool,
+    /// Names of shared services a same-branch sibling already owns (their live
+    /// ports were adopted by [`adopt_shared_ports`]). A templated shared service
+    /// is only borrowed when it is listed here, so a borrower never hands its
+    /// dependents a freshly allocated port while the real container listens on
+    /// the owner's port.
+    pub owned_shared: &'a std::collections::HashSet<String>,
 }
 
 /// Options for spawning a checked terminal.
@@ -199,7 +205,8 @@ fn entry_health_checks(entry: &ConfigEntry, service_path: &Path) -> Vec<HealthCh
 }
 
 /// Adopts the live ports of an already-running sibling for any `share` (or
-/// `reuse`) service this instance is about to borrow.
+/// `reuse`) service this instance is about to borrow, and reports which shared
+/// services are owned by a same-branch sibling.
 ///
 /// `ports` is allocated per instance, so without this a borrower hands its
 /// dependents a fresh random port while the borrowed container keeps listening
@@ -207,8 +214,15 @@ fn entry_health_checks(entry: &ConfigEntry, service_path: &Path) -> Vec<HealthCh
 /// Postgres port. Called before templates are resolved so `${ports.*}` in
 /// dependent services resolves to the borrowed resource's real port.
 ///
+/// Adoption is intentionally independent of the health probe: the ports of a
+/// shared resource belong to whichever sibling started it, and a transient
+/// probe result must not change which ports dependents resolve to. The health
+/// probe still decides *whether* the `cmd` runs (in [`build_with_opts`]); this
+/// function only decides *which ports* that resource uses.
+///
 /// Only same-branch siblings are considered (shared resources are
-/// branch-scoped, e.g. `red-fox-infra-${FOG_BRANCH}`).
+/// branch-scoped, e.g. `red-fox-infra-${FOG_BRANCH}`). Returns the names of
+/// shared services whose ports were adopted from a sibling.
 pub fn adopt_shared_ports(
     script: &ScriptConfig,
     script_name: &str,
@@ -217,19 +231,20 @@ pub fn adopt_shared_ports(
     branch: Option<&str>,
     ports: &mut crate::ports::PortMap,
     no_share: bool,
-) {
+) -> std::collections::HashSet<String> {
+    let mut owned: std::collections::HashSet<String> = std::collections::HashSet::new();
     if no_share {
-        return;
+        return owned;
     }
     let Some(project) = project else {
-        return;
+        return owned;
     };
     let siblings = crate::ipc::find_instances_with_status(project, script_name, branch);
     // Mirror the borrow decision: a sibling started with --no-share owns the
     // resource without yielding it, so nothing is borrowed (and nothing is
     // adopted) while one is alive.
     if siblings.is_empty() || siblings.iter().any(|(_, _, s)| s.no_share) {
-        return;
+        return owned;
     }
     let raw = script.service.clone().unwrap_or_default();
     for entry in &raw {
@@ -241,32 +256,34 @@ pub fn adopt_shared_ports(
         if !shared {
             continue;
         }
-        let service_path = config_dir.join(&entry.path);
-        let resolved = match resolve_service_templates(entry, ports, branch) {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        let health_checks = entry_health_checks(&resolved, &service_path);
-        if health_checks.is_empty() || !health_checks_pass(&health_checks, branch) {
-            continue;
-        }
-        // Scan the *raw* entry: `resolved` has already substituted the
-        // templates, so it no longer names the ports to adopt.
+        // Scan the *raw* entry: templates name the symbolic ports to adopt.
         let names = crate::ports::entry_referenced_ports(entry);
         if names.is_empty() {
+            // Fixed-port shared service: nothing to adopt (its address is
+            // deterministic, so dependents already agree).
             continue;
         }
+        let name = entry.name.clone().unwrap_or_else(|| {
+            config_dir
+                .join(&entry.path)
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned()
+        });
         for (_, _, status) in &siblings {
             if names.iter().all(|n| status.ports.contains_key(n)) {
-                for name in &names {
-                    if let Some(port) = status.ports.get(name) {
-                        ports.insert(name.clone(), *port);
+                for n in &names {
+                    if let Some(port) = status.ports.get(n) {
+                        ports.insert(n.clone(), *port);
                     }
                 }
+                owned.insert(name);
                 break;
             }
         }
     }
+    owned
 }
 
 /// Spawns a terminal that runs `cmd` and wires up its health checks and
@@ -580,6 +597,7 @@ pub fn build(
     log_dir: Option<std::path::PathBuf>,
     adopted: &mut HashMap<String, HandoffItem>,
 ) -> Result<Runtime, String> {
+    let owned_shared = std::collections::HashSet::new();
     build_with_ports(
         script,
         script_name,
@@ -591,6 +609,7 @@ pub fn build(
         adopted,
         &HashMap::new(),
         None,
+        &owned_shared,
     )
 }
 
@@ -612,6 +631,7 @@ pub fn build_with_ports(
     adopted: &mut HashMap<String, HandoffItem>,
     ports: &crate::ports::PortMap,
     branch_override: Option<String>,
+    owned_shared: &std::collections::HashSet<String>,
 ) -> Result<Runtime, String> {
     build_with_opts(BuildOpts {
         script,
@@ -625,6 +645,7 @@ pub fn build_with_ports(
         ports,
         branch_override,
         no_share: false,
+        owned_shared,
     })
 }
 
@@ -642,6 +663,7 @@ pub fn build_with_ports_no_share(
     ports: &crate::ports::PortMap,
     branch_override: Option<String>,
     no_share: bool,
+    owned_shared: &std::collections::HashSet<String>,
 ) -> Result<Runtime, String> {
     build_with_opts(BuildOpts {
         script,
@@ -655,6 +677,7 @@ pub fn build_with_ports_no_share(
         ports,
         branch_override,
         no_share,
+        owned_shared,
     })
 }
 
@@ -672,6 +695,7 @@ pub fn build_with_opts(opts: BuildOpts) -> Result<Runtime, String> {
         ports,
         branch_override,
         no_share,
+        owned_shared,
     } = opts;
     // Resolve branch: override from caller (allocated ports context) wins,
     // otherwise infer from git worktree.
@@ -694,6 +718,15 @@ pub fn build_with_opts(opts: BuildOpts) -> Result<Runtime, String> {
 
     // Clone and template-resolve entries when ports non-empty or branch present.
     let raw_entries = script.service.clone().unwrap_or_default();
+    // Which services reference a `${ports.*}` name. Such a service can only be
+    // safely borrowed when its live ports were adopted from the owning sibling
+    // (`owned_shared`); otherwise dependents would resolve to our own fresh
+    // allocation while the real resource listens elsewhere. Fixed-port services
+    // are deterministic and need no adoption.
+    let templated_ports: Vec<bool> = raw_entries
+        .iter()
+        .map(|e| !crate::ports::entry_referenced_ports(e).is_empty())
+        .collect();
     let entries: Vec<ConfigEntry> = if ports.is_empty() && branch.is_none() {
         raw_entries
     } else {
@@ -743,6 +776,13 @@ pub fn build_with_opts(opts: BuildOpts) -> Result<Runtime, String> {
             entry.reuse
         };
         let share_flag = if script.concurrent { "share" } else { "reuse" };
+
+        // A templated shared service is only borrowable when its live ports were
+        // adopted from the owning sibling. Without that, borrowing would point
+        // this instance's dependents at its own freshly allocated ports while
+        // the real container listens on the owner's port.
+        let borrowable =
+            !templated_ports.get(idx).copied().unwrap_or(false) || owned_shared.contains(&name);
 
         // Identity metadata carried on every terminal so reuse teardown can ask
         // "are any other instances still serving this (project, script)?".
@@ -797,7 +837,7 @@ pub fn build_with_opts(opts: BuildOpts) -> Result<Runtime, String> {
                      fog cannot verify it is already running, starting it\n"
                 ));
                 t
-            } else if health_checks_pass(&health_checks, branch.as_deref()) {
+            } else if borrowable && health_checks_pass(&health_checks, branch.as_deref()) {
                 // Check if any existing instance on this branch has --no-share
                 // set; if so, don't borrow from it — start fresh instead. A
                 // sibling on another branch owns different (branch-suffixed)
@@ -1170,7 +1210,7 @@ mod tests {
         let script = script_with_concurrent(vec![db]);
         let mut ports: crate::ports::PortMap = [("db".to_string(), 12345u16)].into_iter().collect();
 
-        adopt_shared_ports(
+        let owned = adopt_shared_ports(
             &script,
             "dev",
             Path::new("."),
@@ -1185,6 +1225,57 @@ mod tests {
             ports["db"], 55555,
             "a borrowed shared service must adopt the owner's live port"
         );
+        assert!(
+            owned.contains("db"),
+            "the owner's shared service is reported as sibling-owned"
+        );
+    }
+
+    #[test]
+    fn test_adopt_shared_ports_adopts_when_health_down() {
+        // Regression: the owner's resource can be mid-start (health probe not
+        // yet passing) when this instance queries it. Adoption must not depend
+        // on that transient probe, or the borrower keeps its own random port
+        // while the real container listens on the owner's port.
+        let project = format!("fog-test-adopt-health-{}", std::process::id());
+        let sibling = spawn_status_instance(
+            std::process::id().wrapping_add(24),
+            &project,
+            "dev",
+            Some("mine"),
+            false,
+            [("db".to_string(), 55555u16)].into_iter().collect(),
+        );
+
+        // Health check points at a closed port, so `health_checks_pass` fails.
+        let mut db = share_entry("db", Some(tcp_health("127.0.0.1:1")));
+        db.env = Some(
+            [(
+                "DATABASE_URL".to_string(),
+                "postgres://x@127.0.0.1:${ports.db}/x".to_string(),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let script = script_with_concurrent(vec![db]);
+        let mut ports: crate::ports::PortMap = [("db".to_string(), 12345u16)].into_iter().collect();
+
+        let owned = adopt_shared_ports(
+            &script,
+            "dev",
+            Path::new("."),
+            Some(&project),
+            Some("mine"),
+            &mut ports,
+            false,
+        );
+
+        let _ = std::fs::remove_file(&sibling);
+        assert_eq!(
+            ports["db"], 55555,
+            "adoption must not depend on the owner's transient health probe"
+        );
+        assert!(owned.contains("db"));
     }
 
     #[test]
@@ -1201,11 +1292,19 @@ mod tests {
             [("db".to_string(), 55555u16)].into_iter().collect(),
         );
 
-        let db = share_entry("db", Some(tcp_health(&addr.to_string())));
+        let mut db = share_entry("db", Some(tcp_health(&addr.to_string())));
+        db.env = Some(
+            [(
+                "DATABASE_URL".to_string(),
+                "postgres://x@127.0.0.1:${ports.db}/x".to_string(),
+            )]
+            .into_iter()
+            .collect(),
+        );
         let script = script_with_concurrent(vec![db]);
         let mut ports: crate::ports::PortMap = [("db".to_string(), 12345u16)].into_iter().collect();
 
-        adopt_shared_ports(
+        let owned = adopt_shared_ports(
             &script,
             "dev",
             Path::new("."),
@@ -1220,6 +1319,7 @@ mod tests {
             ports["db"], 12345,
             "another branch owns different resources and must not be adopted"
         );
+        assert!(owned.is_empty(), "another branch yields no owned service");
     }
 
     #[test]
@@ -1236,11 +1336,19 @@ mod tests {
             [("db".to_string(), 55555u16)].into_iter().collect(),
         );
 
-        let db = share_entry("db", Some(tcp_health(&addr.to_string())));
+        let mut db = share_entry("db", Some(tcp_health(&addr.to_string())));
+        db.env = Some(
+            [(
+                "DATABASE_URL".to_string(),
+                "postgres://x@127.0.0.1:${ports.db}/x".to_string(),
+            )]
+            .into_iter()
+            .collect(),
+        );
         let script = script_with_concurrent(vec![db]);
         let mut ports: crate::ports::PortMap = [("db".to_string(), 12345u16)].into_iter().collect();
 
-        adopt_shared_ports(
+        let owned = adopt_shared_ports(
             &script,
             "dev",
             Path::new("."),
@@ -1254,6 +1362,10 @@ mod tests {
         assert_eq!(
             ports["db"], 12345,
             "a --no-share sibling yields nothing to adopt"
+        );
+        assert!(
+            owned.is_empty(),
+            "a --no-share sibling yields no owned service"
         );
     }
 
@@ -1349,6 +1461,86 @@ mod tests {
         assert!(
             rt.items[0].shared,
             "a borrowed shared resource must stay marked shared for teardown"
+        );
+    }
+
+    #[test]
+    fn test_build_templated_share_without_owner_starts() {
+        // A templated shared service whose live ports were not adopted (no
+        // owning sibling) must not be borrowed: its dependents would resolve to
+        // our own fresh allocation while the real container listens elsewhere.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut db = share_entry("db", Some(tcp_health(&addr.to_string())));
+        db.env = Some(
+            [(
+                "DATABASE_URL".to_string(),
+                "postgres://x@127.0.0.1:${ports.db}/x".to_string(),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let script = script_with_concurrent(vec![db]);
+        let mut adopted = HashMap::new();
+        let ports: crate::ports::PortMap = [("db".to_string(), 12345u16)].into_iter().collect();
+        let rt = build_with_ports_no_share(
+            &script,
+            "dev",
+            Path::new("."),
+            None,
+            false,
+            100,
+            None,
+            &mut adopted,
+            &ports,
+            None,
+            false,
+            &std::collections::HashSet::new(),
+        )
+        .unwrap();
+        assert!(
+            !rt.items[0].reused,
+            "a templated shared service without an owner must be started, not borrowed"
+        );
+    }
+
+    #[test]
+    fn test_build_templated_share_with_owner_borrows() {
+        // Same service, but its ports were adopted from the owning sibling, so
+        // borrowing is safe: dependents resolve to the owner's live port.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut db = share_entry("db", Some(tcp_health(&addr.to_string())));
+        db.env = Some(
+            [(
+                "DATABASE_URL".to_string(),
+                "postgres://x@127.0.0.1:${ports.db}/x".to_string(),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let script = script_with_concurrent(vec![db]);
+        let mut adopted = HashMap::new();
+        let ports: crate::ports::PortMap = [("db".to_string(), 55555u16)].into_iter().collect();
+        let owned: std::collections::HashSet<String> = ["db".to_string()].into_iter().collect();
+        let rt = build_with_ports_no_share(
+            &script,
+            "dev",
+            Path::new("."),
+            None,
+            false,
+            100,
+            None,
+            &mut adopted,
+            &ports,
+            None,
+            false,
+            &owned,
+        )
+        .unwrap();
+        assert!(
+            rt.items[0].reused,
+            "a templated shared service with an owner is borrowed on the owner's ports"
         );
     }
 
@@ -1453,6 +1645,7 @@ mod tests {
             &HashMap::new(),
             None,
             true,
+            &std::collections::HashSet::new(),
         )
         .unwrap();
         assert!(
@@ -1486,6 +1679,7 @@ mod tests {
             &HashMap::new(),
             None,
             true,
+            &std::collections::HashSet::new(),
         )
         .unwrap();
         assert!(

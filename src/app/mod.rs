@@ -1031,7 +1031,7 @@ impl App {
         // Adopt the live ports of a sibling that already owns a shared service
         // on the target branch, so its dependents resolve to the real port.
         let mut port_map = port_map;
-        runtime::adopt_shared_ports(
+        let owned_shared = runtime::adopt_shared_ports(
             script,
             &script_name,
             &config_dir,
@@ -1067,6 +1067,7 @@ impl App {
             &port_map,
             branch_for_ports.clone(),
             self.no_share,
+            &owned_shared,
         ) {
             Ok(b) => b,
             Err(e) => {

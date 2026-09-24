@@ -112,11 +112,11 @@ No — at minimum, fog needs a config file to know what services to run.
 
 ### Why does `share: true` still start a duplicate DB?
 
-`share` requires a `health_check` to probe. Without one fog warns and starts the `cmd` anyway — concurrent instances can race. Add a `tcp` or `docker` probe. Also, a shared service templated with `${ports.*}` where the port is `0` (random) will diverge per instance — use a fixed port for shared resources.
+`share` requires a `health_check` to probe. Without one fog warns and starts the `cmd` anyway — concurrent instances can race. Add a `tcp` or `docker` probe. A shared service templated with `${ports.*}` is fine even when the port is `0` (random): the first instance to start owns the port and every concurrent instance adopts it. Port adoption no longer depends on the health probe, so a sibling that is still starting cannot cause a borrower to keep its own port. If no instance owns the resource (e.g. its owner exited but containers linger), fog starts the `cmd` on its own ports rather than borrowing an address it cannot determine.
 
 ### My shared DB port conflicts with `ports: { api: 0 }`
 
-Don't template a shared service's port with a random `ports` entry. Shared resources must use a stable address checked by `health_check`; per-instance services should use `ports:0`.
+Use separate symbolic port names for the shared resource and the per-instance services (e.g. `ports: { db: 0, api: 0 }`). The first instance to start owns the shared resource's port and concurrent instances adopt it, so a shared `0` (random) port is safe — it does not have to be fixed. Per-instance services use their own `ports:0` entries.
 
 ## Getting help
 

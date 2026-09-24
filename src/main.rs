@@ -1216,7 +1216,6 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
     );
     ipc_state.config_dir = Some(config_dir.to_string_lossy().into_owned());
     let ipc_state = Arc::new(ipc_state);
-    ipc::spawn_server(ipc_state.clone())?;
 
     if !detached {
         enable_raw_mode()?;
@@ -1246,6 +1245,31 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
         .branch
         .clone()
         .or_else(|| fog::runtime::resolve_branch(&config_dir));
+
+    // Concurrent starts must agree on a shared resource's ports. Serialize the
+    // allocate -> adopt -> publish -> serve critical section under the
+    // per-(project, script, branch) owner lock so a racing sibling adopts the
+    // winner's ports instead of allocating divergent ones. Single-instance mode
+    // already holds this lock (from reclaim) and is released after startup.
+    let has_shared = script
+        .service
+        .as_ref()
+        .is_some_and(|s| s.iter().any(|e| e.share));
+    let startup_lock = if script.concurrent && !cli.no_share && has_shared {
+        project.as_ref().and_then(|p| {
+            fog::lock::OwnerLock::acquire_with_timeout(
+                p,
+                name,
+                branch_for_ports.as_deref(),
+                std::time::Duration::from_secs(5),
+            )
+            .ok()
+            .flatten()
+        })
+    } else {
+        None
+    };
+
     let mut port_map = if let Some(specs) = &config.ports {
         match fog::ports::allocate_ports(specs) {
             Ok(m) => m,
@@ -1304,7 +1328,7 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
     // Adopt the live ports of a sibling that already owns a shared service, so
     // dependent services resolve `${ports.*}` to the borrowed resource's real
     // port instead of this instance's freshly allocated one.
-    fog::runtime::adopt_shared_ports(
+    let owned_shared = fog::runtime::adopt_shared_ports(
         script,
         name,
         &config_dir,
@@ -1332,6 +1356,17 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
             .collect();
         *ipc_state.native_routes.lock().expect("mutex poisoned") = routes;
     }
+    // Only now make this instance discoverable over IPC, so a sibling can never
+    // observe it without its allocated ports and adopt a wrong one.
+    if let Err(e) = ipc::spawn_server(ipc_state.clone()) {
+        if !detached {
+            let _ = execute!(stdout(), LeaveAlternateScreen, DisableMouseCapture);
+            let _ = disable_raw_mode();
+        }
+        return Err(e);
+    }
+    // Port assignment is settled; let a racing sibling proceed.
+    drop(startup_lock);
     // Bring up native Traefik routes for allocated ports (explicit only)
     if let Some(routes) = &config.native_routes {
         let messages = fog::router::ensure_native_routes(
@@ -1356,6 +1391,7 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
         &port_map,
         branch_for_ports.clone(),
         cli.no_share,
+        &owned_shared,
     )
     .map_err(|e| {
         // Restore the terminal before reporting so it is usable again.
