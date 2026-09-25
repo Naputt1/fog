@@ -17,6 +17,9 @@ import {
 } from "@/lib/services";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page-state";
 import { InstanceKillButton } from "@/components/instance-kill-button";
+import { InstanceKillingBadge } from "@/components/instance-killing-badge";
+import { useInstanceKillState } from "@/lib/hooks";
+import { cn } from "@/lib/utils";
 import { Card, CardContent } from "@/components/ui/card";
 
 export const Route = createFileRoute("/projects/$project/$branch/")({
@@ -64,37 +67,66 @@ function ScriptCard({
         </div>
 
         <div className="border-border space-y-1.5 border-t pt-3">
-          {instances.map((inst) => {
-            const running = inst.services.filter((s) => s.running).length;
-            return (
-              <div key={inst.pid} className="flex items-center gap-2">
-                <Link
-                  to="/projects/$project/$branch/$script"
-                  params={{ project, branch, script }}
-                  search={{ pid: inst.pid }}
-                  className="focus-visible:ring-ring/60 flex min-w-0 flex-1 items-center gap-2 rounded outline-none focus-visible:ring-2"
-                >
-                  <span className="text-muted-foreground shrink-0 font-mono text-[11px]">
-                    pid {inst.pid}
-                  </span>
-                  <span className="text-muted-foreground ml-auto shrink-0 font-mono text-[11px]">
-                    {running}/{inst.services.length}
-                  </span>
-                </Link>
-                {inst.pid > 0 ? (
-                  <InstanceKillButton
-                    pid={inst.pid}
-                    script={inst.script}
-                    project={inst.project}
-                    branch={inst.branch}
-                  />
-                ) : null}
-              </div>
-            );
-          })}
+          {instances.map((inst) => (
+            <ScriptInstanceRow
+              key={inst.pid}
+              project={project}
+              branch={branch}
+              script={script}
+              inst={inst}
+            />
+          ))}
         </div>
       </CardContent>
     </Card>
+  );
+}
+
+/** One instance row inside a script card: pid + counts + Kill. */
+function ScriptInstanceRow({
+  project,
+  branch,
+  script,
+  inst,
+}: {
+  project: string;
+  branch: string;
+  script: string;
+  inst: InstanceView;
+}) {
+  const { killing } = useInstanceKillState(inst.pid, inst.script);
+  const running = inst.services.filter((s) => s.running).length;
+
+  return (
+    <div
+      className={cn(
+        "flex items-center gap-2 transition-opacity",
+        killing && "opacity-60"
+      )}
+    >
+      <Link
+        to="/projects/$project/$branch/$script"
+        params={{ project, branch, script }}
+        search={{ pid: inst.pid }}
+        className="focus-visible:ring-ring/60 flex min-w-0 flex-1 items-center gap-2 rounded outline-none focus-visible:ring-2"
+      >
+        <span className="text-muted-foreground shrink-0 font-mono text-[11px]">
+          pid {inst.pid}
+        </span>
+        <span className="text-muted-foreground ml-auto shrink-0 font-mono text-[11px]">
+          {killing ? "killing…" : `${running}/${inst.services.length}`}
+        </span>
+      </Link>
+      <InstanceKillingBadge pid={inst.pid} script={inst.script} />
+      {inst.pid > 0 ? (
+        <InstanceKillButton
+          pid={inst.pid}
+          script={inst.script}
+          project={inst.project}
+          branch={inst.branch}
+        />
+      ) : null}
+    </div>
   );
 }
 

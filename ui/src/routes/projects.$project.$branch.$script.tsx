@@ -2,7 +2,7 @@ import { Fragment } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { ExternalLink, X } from "lucide-react";
 
-import { useServices, useStatus } from "@/lib/hooks";
+import { useInstanceKillState, useServices, useStatus } from "@/lib/hooks";
 import {
   DEFAULT_WORKTREE,
   branchInstances,
@@ -70,12 +70,14 @@ function RowActions({
   inst: InstanceView;
   svc: InstanceServiceView;
 }) {
+  const { killing } = useInstanceKillState(inst.pid, inst.script);
   if (inst.pid <= 0) return null;
   return (
     <ServiceActions
       pid={inst.pid}
       name={svc.name}
       running={svc.running}
+      killing={killing}
       className="flex flex-col items-start gap-1"
     />
   );

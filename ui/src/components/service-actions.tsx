@@ -1,6 +1,6 @@
 import { useState } from "react";
 
-import { useServiceAction } from "@/lib/hooks";
+import { useServiceAction, useServiceActionState } from "@/lib/hooks";
 import type { ServiceAction } from "@/lib/api";
 import type { VariantProps } from "class-variance-authority";
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -17,6 +17,12 @@ import {
 
 type ButtonSize = VariantProps<typeof buttonVariants>["size"];
 
+const GERUND: Record<ServiceAction, string> = {
+  start: "Starting…",
+  stop: "Stopping…",
+  restart: "Restarting…",
+};
+
 /**
  * Start/Stop/Restart controls for a single instance service.
  *
@@ -24,24 +30,34 @@ type ButtonSize = VariantProps<typeof buttonVariants>["size"];
  * service drawer. Stop and Restart open a confirm dialog (they interrupt a
  * running process); Start is immediate. The instance `pid` is the fog
  * process owning the service, not a service pid.
+ *
+ * Feedback: the active action's button shows a spinner + gerund label while
+ * the request is in flight, the status badge flips immediately via the hook's
+ * optimistic patch, and the other controls stay disabled until it settles.
+ * `killing` disables everything once the owning instance is shutting down.
+ * The pending state is read from the shared mutation cache, so a second copy
+ * of the same service (desktop table vs. drawer) stays in lockstep.
  */
 export function ServiceActions({
   pid,
   name,
   running,
+  killing = false,
   size = "xs",
   className,
 }: {
   pid: number;
   name: string;
   running: boolean;
+  killing?: boolean;
   size?: ButtonSize;
   className?: string;
 }) {
   const [confirmAction, setConfirmAction] = useState<ServiceAction | null>(
     null
   );
-  const { mutate, isPending, error } = useServiceAction();
+  const { mutate, error, data } = useServiceAction();
+  const { pendingAction, isPending } = useServiceActionState(pid, name);
 
   const run = (action: ServiceAction) => {
     if (action === "stop" || action === "restart") {
@@ -58,13 +74,18 @@ export function ServiceActions({
     mutate({ pid, name, action });
   };
 
+  const disabled = killing || isPending;
+  const refused = !error && data && !data.ok ? data.reason : null;
+
   return (
     <div className={className}>
       <div className="flex items-center gap-1.5">
         <Button
           size={size}
           variant="outline"
-          disabled={running || isPending}
+          loading={pendingAction === "start"}
+          loadingLabel={GERUND.start}
+          disabled={disabled || running}
           onClick={() => run("start")}
         >
           Start
@@ -72,7 +93,9 @@ export function ServiceActions({
         <Button
           size={size}
           variant="outline"
-          disabled={!running || isPending}
+          loading={pendingAction === "stop"}
+          loadingLabel={GERUND.stop}
+          disabled={disabled || !running}
           onClick={() => run("stop")}
         >
           Stop
@@ -80,15 +103,22 @@ export function ServiceActions({
         <Button
           size={size}
           variant="outline"
-          disabled={isPending}
+          loading={pendingAction === "restart"}
+          loadingLabel={GERUND.restart}
+          disabled={disabled}
           onClick={() => run("restart")}
         >
           Restart
         </Button>
       </div>
-      {error ? (
+      {killing ? (
+        <span className="text-warning mt-1 block font-mono text-[11px]">
+          instance is shutting down…
+        </span>
+      ) : null}
+      {error || refused ? (
         <span className="text-destructive mt-1 block font-mono text-[11px]">
-          {error.message}
+          {error?.message ?? refused}
         </span>
       ) : null}
 
