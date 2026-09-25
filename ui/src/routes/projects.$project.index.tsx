@@ -17,8 +17,10 @@ import {
   type ProjectBucket,
   type WorktreeBucket,
 } from "@/lib/services";
+import { useInstanceKillState } from "@/lib/hooks";
 import { PageHeader } from "@/components/page-state";
 import { InstanceKillButton } from "@/components/instance-kill-button";
+import { InstanceKillingBadge } from "@/components/instance-killing-badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 
@@ -53,8 +55,15 @@ function InstanceRow({
   inst: InstanceView;
   running: number;
 }) {
+  const { killing } = useInstanceKillState(inst.pid, inst.script);
+
   return (
-    <div className="border-border flex items-center gap-2 rounded-md border px-2.5 py-1.5">
+    <div
+      className={cn(
+        "border-border flex items-center gap-2 rounded-md border px-2.5 py-1.5",
+        killing && "opacity-60"
+      )}
+    >
       <Link
         to="/projects/$project/$branch/$script"
         params={{ project, branch, script: inst.script }}
@@ -72,7 +81,7 @@ function InstanceRow({
           pid {inst.pid}
         </span>
         <span className="text-muted-foreground ml-auto shrink-0 font-mono text-[11px]">
-          {running}/{inst.services.length}
+          {killing ? "killing…" : `${running}/${inst.services.length}`}
         </span>
       </Link>
       <InstanceKillButton
@@ -114,12 +123,15 @@ function BranchCard({ bucket }: { bucket: BranchBucket }) {
             />
           </Link>
           {!multi && only ? (
-            <InstanceKillButton
-              pid={only.pid}
-              script={only.script}
-              project={only.project}
-              branch={only.branch}
-            />
+            <div className="flex shrink-0 items-center gap-2">
+              <InstanceKillingBadge pid={only.pid} script={only.script} />
+              <InstanceKillButton
+                pid={only.pid}
+                script={only.script}
+                project={only.project}
+                branch={only.branch}
+              />
+            </div>
           ) : null}
         </div>
 

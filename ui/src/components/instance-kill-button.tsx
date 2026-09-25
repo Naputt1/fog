@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Trash2 } from "lucide-react";
 
-import { useKillInstance } from "@/lib/hooks";
+import { useKillInstance, useInstanceKillState } from "@/lib/hooks";
 import type { VariantProps } from "class-variance-authority";
 import { Button, buttonVariants } from "@/components/ui/button";
 import {
@@ -22,6 +22,12 @@ type ButtonSize = VariantProps<typeof buttonVariants>["size"];
  * the `/status` page and the branch list page. Renders the confirm dialog
  * itself; keep it a sibling of any surrounding link so the click never
  * navigates.
+ *
+ * The kill POST resolves as soon as the signal is delivered, but the instance
+ * lingers in `status` while it shuts down. The button therefore stays in a
+ * spinner + "Killing…" state for that whole window (see `useInstanceKillState`)
+ * rather than only while the request is in flight, so the click never looks
+ * like a no-op.
  */
 export function InstanceKillButton({
   pid,
@@ -41,14 +47,17 @@ export function InstanceKillButton({
   className?: string;
 }) {
   const [confirmKill, setConfirmKill] = useState(false);
-  const { mutate: killInstance, isPending, error } = useKillInstance();
+  const { mutate, error } = useKillInstance();
+  const { killing } = useInstanceKillState(pid, script);
 
   return (
     <div className={className}>
       <Button
         size={size}
         variant="destructive"
-        disabled={isPending}
+        loading={killing}
+        loadingLabel="Killing…"
+        disabled={killing}
         onClick={() => setConfirmKill(true)}
       >
         {withIcon ? <Trash2 aria-hidden /> : null}
@@ -83,7 +92,7 @@ export function InstanceKillButton({
               variant="destructive"
               onClick={() => {
                 setConfirmKill(false);
-                killInstance({ pid });
+                mutate({ pid, script });
               }}
             >
               Kill

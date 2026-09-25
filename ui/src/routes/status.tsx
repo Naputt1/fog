@@ -1,6 +1,11 @@
 import { useId, useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
-import { useLaunch, useLaunchTargets, useStatus } from "@/lib/hooks";
+import {
+  useLaunch,
+  useLaunchTargets,
+  useStatus,
+  useInstanceKillState,
+} from "@/lib/hooks";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page-state";
 import { StatusBadge } from "@/components/status-badge";
 import { ServiceActions } from "@/components/service-actions";
@@ -18,6 +23,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import type { InstanceServiceStatus, InstanceStatus } from "@/lib/api";
+import { cn } from "@/lib/utils";
 
 export const Route = createFileRoute("/status")({
   component: StatusPage,
@@ -74,9 +80,11 @@ function Endpoints({ svc }: { svc: InstanceServiceStatus }) {
 function ServiceTable({
   pid,
   services,
+  killing = false,
 }: {
   pid: number;
   services: InstanceServiceStatus[];
+  killing?: boolean;
 }) {
   return (
     <>
@@ -110,6 +118,7 @@ function ServiceTable({
                       pid={pid}
                       name={svc.name}
                       running={svc.running}
+                      killing={killing}
                     />
                   </div>
                 </TableCell>
@@ -132,7 +141,12 @@ function ServiceTable({
               <HealthBadge health={svc.health} />
             </div>
             <div className="mt-3 border-t pt-3">
-              <ServiceActions pid={pid} name={svc.name} running={svc.running} />
+              <ServiceActions
+                pid={pid}
+                name={svc.name}
+                running={svc.running}
+                killing={killing}
+              />
             </div>
           </div>
         ))}
@@ -312,10 +326,12 @@ function LaunchCard() {
               </div>
               <Button
                 variant="default"
-                disabled={!knownReady || isPending}
+                loading={isPending}
+                loadingLabel="Starting…"
+                disabled={!knownReady}
                 onClick={startKnown}
               >
-                {isPending ? "Starting…" : "Start"}
+                Start
               </Button>
             </div>
           )}
@@ -366,10 +382,12 @@ function LaunchCard() {
             </div>
             <Button
               variant="default"
-              disabled={!newReady || isPending}
+              loading={isPending}
+              loadingLabel="Starting…"
+              disabled={!newReady}
               onClick={startNew}
             >
-              {isPending ? "Starting…" : "Start"}
+              Start
             </Button>
           </div>
         </div>
@@ -402,8 +420,10 @@ function InstanceCard({
   inst: InstanceStatus;
   running: number;
 }) {
+  const { killing } = useInstanceKillState(inst.pid, inst.script);
+
   return (
-    <Card className="gap-3 py-4">
+    <Card className={cn("gap-3 py-4", killing && "opacity-60")}>
       <CardHeader className="flex-row flex-wrap items-center justify-between gap-2 px-5">
         <CardTitle className="flex flex-wrap items-baseline gap-x-2 font-mono text-sm">
           {inst.script}
@@ -418,9 +438,13 @@ function InstanceCard({
           ) : null}
         </CardTitle>
         <div className="flex shrink-0 items-center gap-2">
-          <Badge variant="outline" className="font-mono">
-            {running}/{inst.services.length} running
-          </Badge>
+          {killing ? (
+            <StatusBadge status="killing" />
+          ) : (
+            <Badge variant="outline" className="font-mono">
+              {running}/{inst.services.length} running
+            </Badge>
+          )}
           <InstanceKillButton
             pid={inst.pid}
             script={inst.script}
@@ -435,7 +459,11 @@ function InstanceCard({
             No services in this instance.
           </p>
         ) : (
-          <ServiceTable pid={inst.pid} services={inst.services} />
+          <ServiceTable
+            pid={inst.pid}
+            services={inst.services}
+            killing={killing}
+          />
         )}
       </CardContent>
     </Card>

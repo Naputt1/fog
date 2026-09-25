@@ -7,6 +7,8 @@ const STATUS_STYLE: Record<string, string> = {
   healthy: "bg-success/15 text-success border-success/30",
   starting: "bg-info/15 text-info border-info/30",
   stopped: "bg-muted text-muted-foreground border-border",
+  stopping: "bg-warning/15 text-warning border-warning/30",
+  killing: "bg-warning/15 text-warning border-warning/30",
   unhealthy: "bg-destructive/15 text-destructive border-destructive/30",
 };
 
@@ -15,6 +17,8 @@ const STATUS_DOT: Record<string, string> = {
   healthy: "bg-success",
   starting: "bg-info",
   stopped: "bg-muted-foreground",
+  stopping: "bg-warning",
+  killing: "bg-warning",
   unhealthy: "bg-destructive",
 };
 
