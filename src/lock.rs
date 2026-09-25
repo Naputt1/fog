@@ -56,6 +56,29 @@ fn unlock(file: &File) -> io::Result<()> {
     }
 }
 
+/// Byte range used to represent the owner lock on Windows, placed far beyond
+/// any holder metadata the file stores.
+///
+/// Windows byte-range locks are mandatory (unlike Unix `flock`), so locking
+/// offset 0 — where the holder JSON lives — would make the metadata unreadable
+/// to other processes, breaking `HeldBy(Some(..))`. Locking a byte past the
+/// payload keeps the exclusive claim while leaving the payload readable
+/// (locking beyond EOF is allowed).
+#[cfg(windows)]
+const LOCK_BYTE_OFFSET: u64 = 1 << 40;
+
+/// Builds the `OVERLAPPED` identifying the lock byte. `LockFileEx` and
+/// `UnlockFileEx` must reference the same range, so both go through here.
+#[cfg(windows)]
+fn lock_overlapped() -> windows_sys::Win32::System::IO::OVERLAPPED {
+    use windows_sys::Win32::System::IO::OVERLAPPED;
+    let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+    // Writing union fields is safe (only reads are not), so no `unsafe` here.
+    overlapped.Anonymous.Anonymous.Offset = (LOCK_BYTE_OFFSET & 0xffff_ffff) as u32;
+    overlapped.Anonymous.Anonymous.OffsetHigh = (LOCK_BYTE_OFFSET >> 32) as u32;
+    overlapped
+}
+
 /// Attempts to take an exclusive, non-blocking lock on `file`.
 ///
 /// Windows file locks are released automatically when the owning handle is
@@ -67,9 +90,9 @@ fn try_lock_exclusive(file: &File) -> io::Result<bool> {
     use windows_sys::Win32::Storage::FileSystem::{
         LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx,
     };
-    use windows_sys::Win32::System::IO::OVERLAPPED;
-    let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
-    // SAFETY: the handle is owned by `file` and `overlapped` is fully zeroed.
+    let mut overlapped = lock_overlapped();
+    // SAFETY: the handle is owned by `file` and `overlapped` is fully zeroed
+    // except for the lock offset.
     let ok = unsafe {
         LockFileEx(
             file.as_raw_handle() as _,
@@ -96,9 +119,9 @@ fn try_lock_exclusive(file: &File) -> io::Result<bool> {
 fn unlock(file: &File) -> io::Result<()> {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Storage::FileSystem::UnlockFileEx;
-    use windows_sys::Win32::System::IO::OVERLAPPED;
-    let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
-    // SAFETY: the handle is owned by `file` and `overlapped` is fully zeroed.
+    let mut overlapped = lock_overlapped();
+    // SAFETY: the handle is owned by `file` and `overlapped` is fully zeroed
+    // except for the lock offset.
     let ok = unsafe { UnlockFileEx(file.as_raw_handle() as _, 0, 1, 0, &mut overlapped) };
     if ok != 0 {
         Ok(())

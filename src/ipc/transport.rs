@@ -94,8 +94,9 @@ mod imp {
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
     use windows_sys::Win32::Foundation::{
-        CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY,
-        ERROR_PIPE_CONNECTED, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
+        CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_BROKEN_PIPE,
+        ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, ERROR_PIPE_NOT_CONNECTED,
+        GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
     };
     use windows_sys::Win32::Storage::FileSystem::{
         CreateFileW, FILE_ATTRIBUTE_NORMAL, FlushFileBuffers, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
@@ -314,6 +315,16 @@ mod imp {
         }
     }
 
+    /// Whether a Windows error means the pipe's peer has closed. Named pipes
+    /// report this as `ERROR_BROKEN_PIPE`/`ERROR_PIPE_NOT_CONNECTED` where Unix
+    /// sockets report a clean EOF, so reads must map it to `Ok(0)`.
+    fn is_pipe_eof(err: &io::Error) -> bool {
+        matches!(
+            err.raw_os_error(),
+            Some(c) if c == ERROR_BROKEN_PIPE as i32 || c == ERROR_PIPE_NOT_CONNECTED as i32
+        )
+    }
+
     impl Read for Stream {
         fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
             if let Some(timeout) = self.read_timeout {
@@ -334,7 +345,11 @@ mod imp {
                         )
                     };
                     if ok == 0 {
-                        return Err(io::Error::last_os_error());
+                        let err = io::Error::last_os_error();
+                        if is_pipe_eof(&err) {
+                            return Ok(0);
+                        }
+                        return Err(err);
                     }
                     if avail > 0 {
                         break;
@@ -362,7 +377,11 @@ mod imp {
             if ok != 0 {
                 Ok(read as usize)
             } else {
-                Err(io::Error::last_os_error())
+                let err = io::Error::last_os_error();
+                if is_pipe_eof(&err) {
+                    return Ok(0);
+                }
+                Err(err)
             }
         }
     }
