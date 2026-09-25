@@ -112,11 +112,17 @@ To serve `https://<branch>.<domain>` (no browser warnings), enable TLS:
 | `enabled` | No | `boolean` | `false` | Enable HTTPS on the central router |
 | `cert_dir` | No | `string` | `~/.config/fog/certs` | Where wildcard certificates are stored |
 
-When TLS is enabled, fog generates a **local-CA wildcard certificate** (via
+When TLS is enabled, fog generates a **local-CA certificate** (via
 [mkcert](https://github.com/FiloSottile/mkcert)) for each `dnsmasq` domain plus
 the router hostname and `localhost`, stores it under `cert_dir`, and writes a
-Traefik file-provider config that Traefik hot-reloads. Traefik then terminates
-HTTPS on a `:443` `websecure` entrypoint while HTTP on `:80` keeps working.
+Traefik file-provider config that Traefik hot-reloads. Each domain certificate
+covers `<domain>` and every hostname routed beneath it (e.g.
+`<branch>.<domain>`), plus `*.<service>.<domain>` for any nested service
+subdomain currently routed (so `<branch>.<service>.<domain>` is valid too).
+Because browsers reject a wildcard whose suffix is a single label (such as
+`*.shutterbooth`), single-label domains list exact hostnames instead of a
+wildcard. Traefik then terminates HTTPS on a `:443` `websecure` entrypoint while
+HTTP on `:80` keeps working.
 
 Prerequisites (one-time):
 

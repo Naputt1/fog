@@ -309,6 +309,23 @@ pub fn ensure_native_routes(
         }
     }
 
+    // A routed hostname may sit one level deeper than `*.<domain>` matches
+    // (e.g. `<branch>.<service>.<domain>`). Refresh the TLS certificates so the
+    // domain cert gains the needed `*.<service>.<domain>` SANs. Best-effort: a
+    // certificate problem must never fail route setup.
+    if let Some(router) = &cfg.router
+        && router.tls.enabled
+    {
+        let domains = cfg
+            .dnsmasq
+            .as_ref()
+            .map(|d| d.domains.clone())
+            .unwrap_or_default();
+        if let Err(e) = ensure_tls(router, &domains, &mut messages) {
+            messages.push(format!("⚠ could not refresh TLS certificates: {e}"));
+        }
+    }
+
     messages
 }
 
@@ -344,9 +361,165 @@ pub fn cleanup_native_routes(branch: Option<&str>, cfg: &crate::config::Config) 
     }
 }
 
-/// Generates (idempotently) the mkcert wildcard certificates and the Traefik
+/// Extracts the hostnames from a Traefik `Host(...)` rule fragment.
+///
+/// Only `Host(...)` is matched (not `HostRegexp(...)`), and only the
+/// backtick-quoted argument immediately following it, so unrelated
+/// backtick-quoted content such as a dotted `PathPrefix` is ignored.
+fn host_rule_hosts(rule: &str) -> Vec<String> {
+    let mut hosts = Vec::new();
+    let mut rest = rule;
+    while let Some(start) = rest.find("Host(`") {
+        let after = &rest[start + "Host(`".len()..];
+        let Some(end) = after.find('`') else { break };
+        let host = after[..end].trim();
+        if !host.is_empty() {
+            hosts.push(host.to_string());
+        }
+        rest = &after[end + 1..];
+    }
+    hosts
+}
+
+/// Collects every hostname routed through the Traefik file provider by reading
+/// the `*.toml` route files in `dynamic_dir`.
+fn discover_route_hosts(dynamic_dir: &Path) -> Vec<String> {
+    let mut hosts = Vec::new();
+    let Ok(entries) = fs::read_dir(dynamic_dir) else {
+        return hosts;
+    };
+    for entry in entries.flatten() {
+        if !entry.file_name().to_string_lossy().ends_with(".toml") {
+            continue;
+        }
+        let Ok(content) = fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        for line in content.lines() {
+            if !line.contains("Host(`") {
+                continue;
+            }
+            for host in host_rule_hosts(line) {
+                if !hosts.contains(&host) {
+                    hosts.push(host);
+                }
+            }
+        }
+    }
+    hosts
+}
+
+/// Computes the full SAN list for the certificate named `name`.
+///
+/// Every certificate covers the bare name. A wildcard `*.<name>` is added only
+/// when `name` has more than one label, because verifiers reject a wildcard
+/// whose suffix is a single label (e.g. `*.shutterbooth`). For a dnsmasq domain,
+/// routed hostnames are added as exact SANs — a bare `*.<domain>` is invalid for
+/// the single-label domains fog uses — while `<branch>.<service>.<domain>` hosts
+/// also get `*.<service>.<domain>`, which is valid and covers future branches
+/// under that service. Names deeper still are added verbatim.
+fn desired_sans(name: &str, domains: &[String], route_hosts: &[String]) -> Vec<String> {
+    let mut sans = vec![name.to_string()];
+    if name.contains('.') {
+        sans.push(format!("*.{name}"));
+    }
+    if domains.iter().any(|d| d == name) {
+        let suffix = format!(".{name}");
+        for host in route_hosts {
+            let Some(prefix) = host.strip_suffix(&suffix) else {
+                continue;
+            };
+            let labels: Vec<&str> = prefix.split('.').filter(|l| !l.is_empty()).collect();
+            match labels.len() {
+                // Bare `<domain>` is already covered.
+                0 => {}
+                // A one-label prefix (`<branch>.<domain>`) cannot use a
+                // wildcard, so list the hostname exactly.
+                1 => sans.push(host.clone()),
+                2 => sans.push(format!("*.{}.{}", labels[1], name)),
+                _ => sans.push(host.clone()),
+            }
+        }
+    }
+    sans.sort();
+    sans.dedup();
+    sans
+}
+
+/// Generates (idempotently) one certificate with the given SANs.
+///
+/// Regeneration is driven by a `.sans` sidecar recording the names baked into
+/// the current cert: the certificate is rewritten whenever the required SAN set
+/// changes, and the Traefik dynamic config is rewritten so the new cert is
+/// picked up on hot reload.
+fn ensure_named_cert(
+    name: &str,
+    sans: &[String],
+    cert_dir: &Path,
+    dynamic_dir: &Path,
+    messages: &mut Vec<String>,
+) -> Result<(), String> {
+    let cert_file = cert_dir.join(format!("{name}.pem"));
+    let key_file = cert_dir.join(format!("{name}-key.pem"));
+    let sans_file = cert_dir.join(format!("{name}.sans"));
+    let desired = sans.join("\n");
+
+    let dyn_file = dynamic_dir.join(format!("{name}.toml"));
+    let content = format!(
+        "[[tls.certificates]]\n  certFile = \"/certs/{name}.pem\"\n  \
+         keyFile = \"/certs/{name}-key.pem\"\n"
+    );
+
+    let up_to_date = cert_file.exists()
+        && key_file.exists()
+        && fs::read_to_string(&sans_file).is_ok_and(|c| c == desired);
+    if up_to_date {
+        // Certificate already covers the required names; still make sure
+        // Traefik has a config pointing at it (e.g. after a manual cleanup).
+        if fs::read_to_string(&dyn_file)
+            .map(|c| c != content)
+            .unwrap_or(true)
+        {
+            fs::write(&dyn_file, &content)
+                .map_err(|e| format!("could not write {}: {}", dyn_file.display(), e))?;
+        }
+        return Ok(());
+    }
+
+    messages.push(format!("  + generating certificate for {name}"));
+    let status = Command::new("mkcert")
+        .current_dir(cert_dir)
+        .arg("-cert-file")
+        .arg(&cert_file)
+        .arg("-key-file")
+        .arg(&key_file)
+        .args(sans)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    match status {
+        Ok(s) if s.success() => {}
+        Ok(_) | Err(_) => {
+            return Err(format!("mkcert failed for {name}"));
+        }
+    }
+
+    fs::write(&sans_file, &desired)
+        .map_err(|e| format!("could not write {}: {}", sans_file.display(), e))?;
+    // Rewrite (touch) the dynamic config so Traefik hot-reloads the new cert.
+    fs::write(&dyn_file, &content)
+        .map_err(|e| format!("could not write {}: {}", dyn_file.display(), e))?;
+    Ok(())
+}
+
+/// Generates (idempotently) the mkcert certificates and the Traefik
 /// file-provider dynamic config for every domain, returning the host paths of
 /// the cert dir and the dynamic dir mounted into the container.
+///
+/// Each certificate covers its name plus any hostnames already routed through
+/// the file provider: exact `<branch>.<domain>` SANs for single-label domains,
+/// and `*.<service>.<domain>` wildcards for nested service subdomains, so routed
+/// hosts are served without browser warnings.
 fn ensure_tls(
     cfg: &RouterConfig,
     domains: &[String],
@@ -368,6 +541,10 @@ fn ensure_tls(
     fs::create_dir_all(&dynamic_dir)
         .map_err(|e| format!("could not create {}: {}", dynamic_dir.display(), e))?;
 
+    // Hostnames already routed through the file provider, used to discover
+    // nested service subdomains that need their own wildcard SAN.
+    let route_hosts = discover_route_hosts(&dynamic_dir);
+
     // Names covered by the certificates: every wildcard domain, the dashboard
     // hostname, and localhost.
     let mut names: Vec<String> = domains.to_vec();
@@ -380,44 +557,9 @@ fn ensure_tls(
     names.push("127.0.0.1".to_string());
     names.dedup();
 
-    for domain in &names {
-        // One certificate per name: `*.name` + `name` (mkcert generates a SAN
-        // cert covering all the given hostnames).
-        let wildcard = format!("*.{domain}");
-        let hostnames = [domain.clone(), wildcard];
-        let cert_file = cert_dir.join(format!("{domain}.pem"));
-        let key_file = cert_dir.join(format!("{domain}-key.pem"));
-        if cert_file.exists() && key_file.exists() {
-            continue;
-        }
-        messages.push(format!(
-            "  + generating wildcard certificate for *.{domain}"
-        ));
-        let status = Command::new("mkcert")
-            .current_dir(&cert_dir)
-            .arg("-cert-file")
-            .arg(&cert_file)
-            .arg("-key-file")
-            .arg(&key_file)
-            .args(&hostnames)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-        match status {
-            Ok(s) if s.success() => {}
-            Ok(_) | Err(_) => {
-                return Err(format!("mkcert failed for {domain}"));
-            }
-        }
-
-        // File-provider dynamic config so Traefik serves this cert over TLS.
-        let dyn_file = dynamic_dir.join(format!("{domain}.toml"));
-        let content = format!(
-            "[[tls.certificates]]\n  certFile = \"/certs/{domain}.pem\"\n  \
-             keyFile = \"/certs/{domain}-key.pem\"\n"
-        );
-        fs::write(&dyn_file, content)
-            .map_err(|e| format!("could not write {}: {}", dyn_file.display(), e))?;
+    for name in &names {
+        let sans = desired_sans(name, domains, &route_hosts);
+        ensure_named_cert(name, &sans, &cert_dir, &dynamic_dir, messages)?;
     }
 
     Ok((cert_dir, dynamic_dir))
@@ -791,5 +933,55 @@ mod tests {
             .collect();
         assert!(remaining.is_empty(), "cleanup left {remaining:?}");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_host_rule_hosts_extracts_only_host_arguments() {
+        assert_eq!(
+            host_rule_hosts("Host(`main.red-fox`) && PathPrefix(`/v1.0`)"),
+            vec!["main.red-fox".to_string()]
+        );
+        assert_eq!(
+            host_rule_hosts("Host(`a.gems`) || Host(`b.gems`)"),
+            vec!["a.gems".to_string(), "b.gems".to_string()]
+        );
+        assert!(
+            host_rule_hosts("HostRegexp(`{host:.+}`)").is_empty(),
+            "HostRegexp must not be treated as a Host rule"
+        );
+    }
+
+    #[test]
+    fn test_desired_sans_cover_nested_service_subdomains() {
+        let domains = vec!["shutterbooth".to_string()];
+        let hosts = vec![
+            "fix.shutterbooth".to_string(),
+            "fix.admin.shutterbooth".to_string(),
+            "fix.api.shutterbooth".to_string(),
+            "fix.api.other.gems".to_string(),
+        ];
+        let sans = desired_sans("shutterbooth", &domains, &hosts);
+        for expected in [
+            "shutterbooth",
+            "fix.shutterbooth",
+            "*.admin.shutterbooth",
+            "*.api.shutterbooth",
+        ] {
+            assert!(
+                sans.contains(&expected.to_string()),
+                "missing {expected} in {sans:?}"
+            );
+        }
+        assert!(
+            !sans.contains(&"*.shutterbooth".to_string()),
+            "single-label domains must not rely on an invalid wildcard: {sans:?}"
+        );
+    }
+
+    #[test]
+    fn test_desired_sans_non_domain_names_stay_single_wildcard() {
+        let hosts = vec!["fix.admin.builds".to_string()];
+        let sans = desired_sans("router.builds", &["builds".to_string()], &hosts);
+        assert_eq!(sans, vec!["*.router.builds", "router.builds"]);
     }
 }

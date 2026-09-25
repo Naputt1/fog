@@ -340,10 +340,14 @@ fn default_router_cert_dir() -> String {
 
 /// Optional HTTPS (TLS) settings for the central router.
 ///
-/// When enabled, fog generates local CA wildcard certificates (via mkcert) for
-/// the configured `dnsmasq` domains plus the router hostname and `localhost`,
-/// and Traefik terminates TLS on `:443` (a `websecure` entrypoint) using them.
-/// HTTP on `:80` keeps working alongside HTTPS.
+/// When enabled, fog generates local CA certificates (via mkcert) for the
+/// configured `dnsmasq` domains plus the router hostname and `localhost`, and
+/// Traefik terminates TLS on `:443` (a `websecure` entrypoint) using them. Each
+/// domain certificate covers `<domain>` and every hostname routed beneath it
+/// (`<branch>.<domain>`); because browsers reject a wildcard whose suffix is a
+/// single label (e.g. `*.shutterbooth`), single-label domains list exact
+/// hostnames. Nested service subdomains also get `*.<service>.<domain>`. HTTP on
+/// `:80` keeps working alongside HTTPS.
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
 pub struct RouterTlsConfig {
