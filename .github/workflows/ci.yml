@@ -48,3 +48,35 @@ jobs:
         run: cargo build
       - name: Run tests
         run: cargo test
+
+  windows:
+    runs-on: windows-latest
+    env:
+      # The frontend is built below; skip the release-download path in build.rs.
+      FOG_SKIP_SPA_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.20.0
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: ui/pnpm-lock.yaml
+      - name: Install dependencies
+        working-directory: ui
+        run: pnpm install --frozen-lockfile
+      - name: Build frontend (SPA -> ui/dist)
+        working-directory: ui
+        run: pnpm build
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+      - name: Run clippy
+        run: cargo clippy -- -D warnings
+      - name: Build
+        run: cargo build
+      - name: Run tests
+        run: cargo test

@@ -1,7 +1,7 @@
+use crate::fds::Fd;
 use crate::proxy::LogEntry;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
-use std::os::unix::io::RawFd;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
@@ -65,8 +65,9 @@ pub struct HandoffItem {
     pub name: String,
     /// Process group leader of the running service.
     pub pid: u32,
-    /// A dup of the PTY master fd (now owned by the receiver).
-    pub fd: RawFd,
+    /// A dup of the PTY master fd (now owned by the receiver). Unused on
+    /// Windows, where live handoff is unsupported.
+    pub fd: Fd,
 }
 
 /// A cloneable handle to a proxy's live request-log queue.
