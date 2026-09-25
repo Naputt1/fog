@@ -967,10 +967,8 @@ pub fn build_with_opts(opts: BuildOpts) -> Result<Runtime, String> {
 
     // Close any handoffs whose service is not present in this script's config.
     for (_, handoff) in adopted.drain() {
-        // SAFETY: the fd was dupped for transfer and is owned by us.
-        unsafe {
-            libc::close(handoff.fd);
-        }
+        // The handle was dupped for transfer and is owned by us.
+        crate::fds::close(handoff.fd);
     }
 
     let items: Vec<Terminal> = items
@@ -1164,7 +1162,6 @@ mod tests {
         no_share: bool,
         ports: crate::ports::PortMap,
     ) -> std::path::PathBuf {
-        use std::os::unix::net::UnixListener;
         let state = std::sync::Arc::new(crate::ipc::IpcState::new(
             script.to_string(),
             Some(project.to_string()),
@@ -1174,7 +1171,7 @@ mod tests {
         *state.ports.lock().expect("mutex poisoned") = ports;
         let path = std::env::temp_dir().join(format!("fog-{pid}.sock"));
         let _ = std::fs::remove_file(&path);
-        let listener = UnixListener::bind(&path).unwrap();
+        let listener = crate::ipc::transport::Listener::bind(&path).unwrap();
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { break };

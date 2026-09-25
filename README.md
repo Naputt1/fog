@@ -52,6 +52,8 @@ cargo install --git https://github.com/Naputt1/fog.git --tag v0.1.2
 
 If `ui/dist` is absent on a git install, `build.rs` fetches the prebuilt SPA from the GitHub Release. For offline builds use `FOG_SKIP_SPA_DOWNLOAD=1`. Use `FOG_REQUIRE_SPA=1` to fail the build instead of embedding the fallback page.
 
+Windows 10 build 17763 (October 2018) or newer is supported; see the [Windows notes](https://naputt1.github.io/fog/troubleshooting#windows-support) for the few platform differences.
+
 ### Local rebuild
 
 After changing the UI or Rust sources, rebuild the SPA, recompile, and replace the installed `fog` in one step:

@@ -20,9 +20,115 @@
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+/// Attempts to take an exclusive, non-blocking lock on `file`.
+///
+/// Returns `Ok(true)` when the lock was acquired and `Ok(false)` when another
+/// process already holds it.
+#[cfg(unix)]
+fn try_lock_exclusive(file: &File) -> io::Result<bool> {
+    use std::os::unix::io::AsRawFd;
+    // SAFETY: `file` owns a valid descriptor.
+    let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if ret == 0 {
+        return Ok(true);
+    }
+    let err = io::Error::last_os_error();
+    if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
+        Ok(false)
+    } else {
+        Err(err)
+    }
+}
+
+/// Releases the exclusive lock held on `file`.
+#[cfg(unix)]
+fn unlock(file: &File) -> io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+    // SAFETY: `file` owns a valid descriptor.
+    let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// Byte range used to represent the owner lock on Windows, placed far beyond
+/// any holder metadata the file stores.
+///
+/// Windows byte-range locks are mandatory (unlike Unix `flock`), so locking
+/// offset 0 — where the holder JSON lives — would make the metadata unreadable
+/// to other processes, breaking `HeldBy(Some(..))`. Locking a byte past the
+/// payload keeps the exclusive claim while leaving the payload readable
+/// (locking beyond EOF is allowed).
+#[cfg(windows)]
+const LOCK_BYTE_OFFSET: u64 = 1 << 40;
+
+/// Builds the `OVERLAPPED` identifying the lock byte. `LockFileEx` and
+/// `UnlockFileEx` must reference the same range, so both go through here.
+#[cfg(windows)]
+fn lock_overlapped() -> windows_sys::Win32::System::IO::OVERLAPPED {
+    use windows_sys::Win32::System::IO::OVERLAPPED;
+    let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+    // Writing union fields is safe (only reads are not), so no `unsafe` here.
+    overlapped.Anonymous.Anonymous.Offset = (LOCK_BYTE_OFFSET & 0xffff_ffff) as u32;
+    overlapped.Anonymous.Anonymous.OffsetHigh = (LOCK_BYTE_OFFSET >> 32) as u32;
+    overlapped
+}
+
+/// Attempts to take an exclusive, non-blocking lock on `file`.
+///
+/// Windows file locks are released automatically when the owning handle is
+/// closed or the process exits, matching `flock`'s stale-lock safety.
+#[cfg(windows)]
+fn try_lock_exclusive(file: &File) -> io::Result<bool> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::ERROR_LOCK_VIOLATION;
+    use windows_sys::Win32::Storage::FileSystem::{
+        LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx,
+    };
+    let mut overlapped = lock_overlapped();
+    // SAFETY: the handle is owned by `file` and `overlapped` is fully zeroed
+    // except for the lock offset.
+    let ok = unsafe {
+        LockFileEx(
+            file.as_raw_handle() as _,
+            LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+            0,
+            1,
+            0,
+            &mut overlapped,
+        )
+    };
+    if ok != 0 {
+        return Ok(true);
+    }
+    let err = io::Error::last_os_error();
+    if err.raw_os_error() == Some(ERROR_LOCK_VIOLATION as i32) {
+        Ok(false)
+    } else {
+        Err(err)
+    }
+}
+
+/// Releases the exclusive lock held on `file`.
+#[cfg(windows)]
+fn unlock(file: &File) -> io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::UnlockFileEx;
+    let mut overlapped = lock_overlapped();
+    // SAFETY: the handle is owned by `file` and `overlapped` is fully zeroed
+    // except for the lock offset.
+    let ok = unsafe { UnlockFileEx(file.as_raw_handle() as _, 0, 1, 0, &mut overlapped) };
+    if ok != 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
 
 /// FNV-1a 64-bit hash of the `(project, script, branch)` identity, hex-encoded.
 ///
@@ -105,17 +211,11 @@ impl OwnerLock {
             .read(true)
             .write(true)
             .open(&path)?;
-        let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        if ret == 0 {
+        if try_lock_exclusive(&file)? {
             write_payload(&file, project, script, branch)?;
             Ok(AcquireResult::Locked(OwnerLock { file }))
         } else {
-            let err = io::Error::last_os_error();
-            if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
-                Ok(AcquireResult::HeldBy(read_payload(&path).ok().flatten()))
-            } else {
-                Err(err)
-            }
+            Ok(AcquireResult::HeldBy(read_payload(&path).ok().flatten()))
         }
     }
 
@@ -147,10 +247,7 @@ impl OwnerLock {
 
 impl Drop for OwnerLock {
     fn drop(&mut self) {
-        // SAFETY: `file` is a valid open descriptor owned by this struct.
-        unsafe {
-            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
-        }
+        let _ = unlock(&self.file);
     }
 }
 

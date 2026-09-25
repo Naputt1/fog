@@ -406,11 +406,9 @@ impl App {
                 .map(|h| h.fd)
                 .collect();
                 for fd in fds {
-                    // SAFETY: these fds were dupped for transfer and
-                    // are owned by this instance until sent.
-                    unsafe {
-                        libc::close(fd);
-                    }
+                    // These handles were dupped for transfer and are owned by
+                    // this instance until sent.
+                    crate::fds::close(fd);
                 }
             }
         }
@@ -1073,9 +1071,7 @@ impl App {
             Err(e) => {
                 // Close any fds we duped for handoff that didn't get consumed
                 for (_, handoff) in adopted.drain() {
-                    unsafe {
-                        libc::close(handoff.fd);
-                    }
+                    crate::fds::close(handoff.fd);
                 }
                 return Err(format!("switch worktree: {e}"));
             }

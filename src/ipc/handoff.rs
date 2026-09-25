@@ -1,8 +1,8 @@
+use super::transport::Stream;
 use super::types::{HandoffItem, KillResponse, StatusResponse};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{self, Read, Write};
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
@@ -59,7 +59,7 @@ impl ReclaimOutcome {
 
 /// Reads a single newline-terminated line directly from the stream without
 /// buffering, so fd-passing control messages are not swallowed by a reader.
-fn read_line_nobuf(mut stream: &UnixStream) -> io::Result<String> {
+fn read_line_nobuf(stream: &mut Stream) -> io::Result<String> {
     let mut line = Vec::new();
     let mut byte = [0u8; 1];
     loop {
@@ -80,7 +80,7 @@ fn read_line_nobuf(mut stream: &UnixStream) -> io::Result<String> {
 
 /// Waits for the App to prepare handoffs, then sends each one (metadata line
 /// followed by the fd via SCM_RIGHTS) and finally the kill response.
-pub(crate) fn send_handoffs(mut stream: UnixStream, state: Arc<super::types::IpcState>) {
+pub(crate) fn send_handoffs(mut stream: Stream, state: Arc<super::types::IpcState>) {
     // Wait for the App to prepare the handoffs. An empty result set after
     // preparation legitimately means "no live services to hand over".
     let deadline = std::time::Instant::now() + Duration::from_secs(HANDOFF_PREPARE_TIMEOUT_SECS);
@@ -108,7 +108,7 @@ pub(crate) fn send_handoffs(mut stream: UnixStream, state: Arc<super::types::Ipc
             Ok(l) => l,
             Err(_) => {
                 // SAFETY: the fd was dupped for transfer; close it if unsent.
-                unsafe { libc::close(item.fd) };
+                crate::fds::close(item.fd);
                 continue;
             }
         };
@@ -119,14 +119,14 @@ pub(crate) fn send_handoffs(mut stream: UnixStream, state: Arc<super::types::Ipc
         {
             ok = false;
             // SAFETY: the fd was dupped for transfer; close it if unsent.
-            unsafe { libc::close(item.fd) };
+            crate::fds::close(item.fd);
             break;
         }
     }
     // Close any fds that were never sent (transfer aborted mid-way).
     for item in results {
         // SAFETY: the fds were dupped for transfer and are owned by us.
-        unsafe { libc::close(item.fd) };
+        crate::fds::close(item.fd);
     }
 
     let reason = if ok {
@@ -155,7 +155,7 @@ pub(crate) fn send_handoffs(mut stream: UnixStream, state: Arc<super::types::Ipc
 /// returned (alongside `incomplete`), and a process whose fd could not be
 /// transferred is killed to avoid leaving an orphan behind.
 pub fn reclaim(path: &Path, reuse: &[String]) -> ReclaimOutcome {
-    let mut stream = match UnixStream::connect(path) {
+    let mut stream = match super::transport::connect(path) {
         Ok(s) => s,
         Err(e) => return ReclaimOutcome::failed(format!("connection failed: {e}")),
     };
@@ -181,7 +181,7 @@ pub fn reclaim(path: &Path, reuse: &[String]) -> ReclaimOutcome {
 
     let mut handoffs = Vec::new();
     loop {
-        let line = match read_line_nobuf(&stream) {
+        let line = match read_line_nobuf(&mut stream) {
             Ok(l) => l,
             Err(e) => {
                 if handoffs.is_empty() {
@@ -209,9 +209,9 @@ pub fn reclaim(path: &Path, reuse: &[String]) -> ReclaimOutcome {
                     // The old instance extracted this process but we could not
                     // receive its fd: kill it so it does not run on as an
                     // unmanaged orphan.
-                    crate::process::try_kill_process_group(reply.pid, libc::SIGTERM);
+                    crate::process::try_kill_process_group(reply.pid, crate::process::Signal::Term);
                     thread::sleep(Duration::from_millis(300));
-                    crate::process::try_kill_process_group(reply.pid, libc::SIGKILL);
+                    crate::process::try_kill_process_group(reply.pid, crate::process::Signal::Kill);
                     return ReclaimOutcome {
                         handoffs,
                         incomplete: true,
@@ -373,7 +373,7 @@ pub fn terminate_instances(instances: &[(u32, PathBuf)]) -> usize {
     for (pid, path) in instances {
         let _ = super::send_kill(path);
         if !wait_for_exit(*pid, Duration::from_secs(2)) && crate::process::is_pid_alive(*pid) {
-            crate::process::try_kill_process_group(*pid, libc::SIGTERM);
+            crate::process::try_kill_process_group(*pid, crate::process::Signal::Term);
         }
     }
     instances.len()

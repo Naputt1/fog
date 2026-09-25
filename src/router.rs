@@ -448,11 +448,7 @@ fn dashboard_url(cfg: &RouterConfig) -> String {
 }
 
 fn command_exists(name: &str) -> bool {
-    Command::new("sh")
-        .args(["-c", &format!("command -v {name} >/dev/null 2>&1")])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    crate::process::command_exists(name)
 }
 
 fn network_exists(name: &str) -> bool {

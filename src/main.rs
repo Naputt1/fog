@@ -9,7 +9,6 @@ use crossterm::terminal::{
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::io::stdout;
-use std::os::unix::io::IntoRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -243,8 +242,8 @@ fn reclaim_existing(
             // A duplicate service name from another old instance: close the
             // losing fd so it is not leaked (the process itself stays up).
             if let Some(existing) = adopted.get_mut(&handoff.name) {
-                // SAFETY: the fd was dupped for transfer and is owned by us.
-                unsafe { libc::close(existing.fd) };
+                // The handle was dupped for transfer and is owned by us.
+                fog::fds::close(existing.fd);
                 *existing = handoff;
             } else {
                 adopted.insert(handoff.name.clone(), handoff);
@@ -520,11 +519,11 @@ fn stop_instance(pid: u32, path: &Path, force: bool) -> bool {
     // SIGTERM first for a chance at a clean tree teardown, then SIGKILL. A
     // fog instance registers a SIGTERM handler (the `ctrlc` termination
     // feature), so a wedged loop can ignore the former but never the latter.
-    signal_instance(pid, libc::SIGTERM);
+    signal_instance(pid, fog::process::Signal::Term);
     if wait_for_pid_exit(pid, Duration::from_millis(1000)) {
         return true;
     }
-    signal_instance(pid, libc::SIGKILL);
+    signal_instance(pid, fog::process::Signal::Kill);
     let exited = wait_for_pid_exit(pid, Duration::from_millis(2000));
     if !exited {
         eprintln!("warning: instance {pid} survived SIGKILL");
@@ -537,13 +536,11 @@ fn stop_instance(pid: u32, path: &Path, force: bool) -> bool {
 /// [`fog::process::signal_tree`] targets the group, which reaches the leader
 /// (fog is normally its own group leader), but a target that is not a group
 /// leader would be missed — so hit the PID directly too.
-fn signal_instance(pid: u32, signal: i32) {
+fn signal_instance(pid: u32, signal: fog::process::Signal) {
     fog::process::signal_tree(pid, signal);
-    // SAFETY: `pid` is a live process id observed from the instance scan; the
-    // signal is delivered to that process only.
-    unsafe {
-        libc::kill(pid as libc::pid_t, signal);
-    }
+    // Also signal the process itself: a non-group-leader target is missed by
+    // the group kill above.
+    let _ = fog::process::kill_process(pid, signal);
 }
 
 /// Waits until `pid` is no longer alive, up to `timeout`.
@@ -662,14 +659,7 @@ fn spawn_instance_detached(
     if let Some(b) = branch {
         cmd.arg("--branch").arg(b);
     }
-    #[cfg(unix)]
-    unsafe {
-        use std::os::unix::process::CommandExt;
-        cmd.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
-    }
+    fog::process::detach_command(&mut cmd);
     let mut child = cmd
         .spawn()
         .map_err(|e| io::Error::other(format!("could not restart fog '{script}': {e}")))?;
@@ -1506,7 +1496,9 @@ fn create_log_dir() -> io::Result<PathBuf> {
 /// Redirects this process's stdout/stderr into `daemon.log` inside `dir`,
 /// so a detached daemon's own diagnostics are captured too. Only called for
 /// detached runs — an interactive run keeps stdout/stderr for the TUI.
+#[cfg(unix)]
 fn redirect_daemon_output(dir: &Path) -> io::Result<()> {
+    use std::os::unix::io::IntoRawFd;
     let log = fs::File::create(dir.join("daemon.log"))?;
     // SAFETY: dup2 onto the standard fds is always valid, and the original
     // fd is ours to close.
@@ -1515,6 +1507,26 @@ fn redirect_daemon_output(dir: &Path) -> io::Result<()> {
         libc::dup2(fd, 1);
         libc::dup2(fd, 2);
         libc::close(fd);
+    }
+    Ok(())
+}
+
+/// Redirects this process's stdout/stderr into `daemon.log` inside `dir`.
+///
+/// Windows has no `dup2`; instead the standard handles are pointed at the log
+/// file, which Rust's stdout/stderr resolve on each write.
+#[cfg(windows)]
+fn redirect_daemon_output(dir: &Path) -> io::Result<()> {
+    use std::os::windows::io::IntoRawHandle;
+    use windows_sys::Win32::System::Console::{STD_ERROR_HANDLE, STD_OUTPUT_HANDLE, SetStdHandle};
+    let log = fs::File::create(dir.join("daemon.log"))?;
+    // Leak the handle so the log stays open for the process lifetime.
+    let handle = log.into_raw_handle();
+    // SAFETY: both are valid standard-handle selectors and the file handle
+    // stays open for the process lifetime.
+    unsafe {
+        SetStdHandle(STD_OUTPUT_HANDLE, handle);
+        SetStdHandle(STD_ERROR_HANDLE, handle);
     }
     Ok(())
 }
@@ -1537,14 +1549,7 @@ fn daemonize(script: &str) -> io::Result<()> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    #[cfg(unix)]
-    unsafe {
-        use std::os::unix::process::CommandExt;
-        cmd.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
-    }
+    fog::process::detach_command(&mut cmd);
     let mut child = cmd
         .spawn()
         .map_err(|e| io::Error::other(format!("could not start detached fog: {e}")))?;
@@ -2149,6 +2154,7 @@ mod tests {
         assert!(cli.force && cli.all);
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_stop_instance_force_kills_unresponsive_pid() {
         use std::os::unix::process::CommandExt;

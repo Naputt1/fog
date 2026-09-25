@@ -1,10 +1,10 @@
+use super::transport::{Listener, Stream};
 use super::types::{
     ControlResponse, IpcState, KillResponse, Request, ServiceAction, ServiceActionRequest,
 };
 use crate::proxy::LogEntry;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -15,7 +15,7 @@ pub fn spawn_server(state: Arc<IpcState>) -> io::Result<()> {
     let path = super::current_socket_path();
     let _ = fs::remove_file(&path);
 
-    let listener = UnixListener::bind(&path)?;
+    let listener = Listener::bind(&path)?;
 
     thread::spawn(move || {
         for conn in listener.incoming() {
@@ -38,7 +38,7 @@ pub fn cleanup_socket() {
 }
 
 /// Handles a single IPC connection: reads one request line and writes a response.
-pub(crate) fn handle_connection(mut stream: UnixStream, state: Arc<IpcState>) {
+pub(crate) fn handle_connection(mut stream: Stream, state: Arc<IpcState>) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(super::READ_TIMEOUT_SECS)));
     let mut reader = match stream.try_clone() {
         Ok(r) => BufReader::new(r),
@@ -209,7 +209,7 @@ pub(crate) fn handle_connection(mut stream: UnixStream, state: Arc<IpcState>) {
 /// client disconnects. The `[fog] ...` prefix marks control messages the
 /// page uses to stop reconnecting.
 pub(crate) fn handle_logs(
-    mut stream: UnixStream,
+    mut stream: Stream,
     state: Arc<IpcState>,
     service: &str,
     tail: usize,
@@ -251,7 +251,7 @@ pub(crate) fn proxy_running(state: &IpcState) -> bool {
 /// Streams a service's captured log file (`<sanitized>.log` inside `dir`).
 /// See [`handle_logs`] for the wire format.
 pub(crate) fn stream_service_log(
-    stream: &mut UnixStream,
+    stream: &mut Stream,
     state: &IpcState,
     dir: &Path,
     service: &str,
@@ -325,12 +325,7 @@ pub(crate) fn stream_service_log(
 
 /// Streams the proxy's live request-log queue. See [`handle_logs`] for the
 /// wire format; each entry is rendered the way the TUI's proxy tab shows it.
-pub(crate) fn stream_proxy_log(
-    stream: &mut UnixStream,
-    state: &IpcState,
-    tail: usize,
-    follow: bool,
-) {
+pub(crate) fn stream_proxy_log(stream: &mut Stream, state: &IpcState, tail: usize, follow: bool) {
     let handle = state.proxy_logs.lock().expect("mutex poisoned").clone();
     let Some(queue) = handle else {
         let _ = writeln!(stream, "[fog] no proxy configured");
@@ -380,7 +375,7 @@ pub(crate) fn stream_proxy_log(
 }
 
 /// Formats a proxy log entry as a line matching the TUI proxy tab's layout.
-pub(crate) fn write_log_entry(stream: &mut UnixStream, entry: &LogEntry) -> io::Result<()> {
+pub(crate) fn write_log_entry(stream: &mut Stream, entry: &LogEntry) -> io::Result<()> {
     let method = if entry.ws {
         "WS".to_string()
     } else {
@@ -405,7 +400,7 @@ pub(crate) fn write_log_entry(stream: &mut UnixStream, entry: &LogEntry) -> io::
 
 /// Whether the client closed the connection. Attempts a non-blocking read
 /// with a short timeout: `Ok(0)` (EOF) or a hard error means closed.
-pub(crate) fn client_closed(stream: &mut UnixStream) -> bool {
+pub(crate) fn client_closed(stream: &mut Stream) -> bool {
     let _ = stream.set_read_timeout(Some(Duration::from_millis(super::LOG_FOLLOW_POLL_MS)));
     let mut buf = [0u8; 1];
     match stream.read(&mut buf) {
@@ -512,7 +507,7 @@ pub fn find_instances() -> io::Result<Vec<(u32, PathBuf)>> {
 /// Returns an error if the connection fails (e.g. a stale socket) or the
 /// response is malformed.
 pub fn query_status(path: &Path) -> io::Result<super::StatusResponse> {
-    let mut stream = UnixStream::connect(path)?;
+    let mut stream = super::transport::connect(path)?;
     stream.set_read_timeout(Some(Duration::from_secs(super::READ_TIMEOUT_SECS)))?;
     stream.write_all(b"{\"type\":\"status\"}\n")?;
     stream.flush()?;
@@ -537,7 +532,7 @@ pub fn send_kill(path: &Path) -> io::Result<()> {
 /// # Errors
 /// Returns an error if the connection fails.
 pub fn send_kill_with_reuse(path: &Path, reuse: &[String]) -> io::Result<()> {
-    let mut stream = UnixStream::connect(path)?;
+    let mut stream = super::transport::connect(path)?;
     let mut payload = r#"{"type":"kill""#.to_string();
     if !reuse.is_empty() {
         let names = serde_json::to_string(reuse).unwrap_or_else(|_| "[]".to_string());
@@ -580,7 +575,7 @@ pub(crate) fn send_service_action_with_timeout(
     action: ServiceAction,
     read_timeout: Duration,
 ) -> io::Result<ControlResponse> {
-    let mut stream = UnixStream::connect(path)?;
+    let mut stream = super::transport::connect(path)?;
     stream.set_read_timeout(Some(read_timeout))?;
     // Serialize both fields through serde_json so a hostile name or a
     // non-default action can never break out of the JSON line.
@@ -606,7 +601,7 @@ pub(crate) fn send_service_action_with_timeout(
 /// # Errors
 /// Returns an error if the connection fails or the response cannot be read.
 pub fn query_logs(path: &Path, service: &str, tail: usize) -> io::Result<Vec<String>> {
-    let mut stream = UnixStream::connect(path)?;
+    let mut stream = super::transport::connect(path)?;
     stream.set_read_timeout(Some(Duration::from_secs(super::READ_TIMEOUT_SECS)))?;
     // Serialize the service name through serde_json so a hostile name can
     // never break out of the JSON request line.
@@ -637,7 +632,7 @@ pub fn query_terminal_snapshot(
     rows: usize,
     offset: usize,
 ) -> io::Result<(Vec<Vec<u8>>, usize)> {
-    let mut stream = UnixStream::connect(path)?;
+    let mut stream = super::transport::connect(path)?;
     stream.set_read_timeout(Some(Duration::from_secs(super::READ_TIMEOUT_SECS)))?;
     let svc = serde_json::to_string(service).unwrap_or_else(|_| "\"\"".to_string());
     let line = format!(
