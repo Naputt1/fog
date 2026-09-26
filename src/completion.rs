@@ -44,7 +44,7 @@ _fog() {{
         return 0
     fi
 
-    opts="--config --save-logs --branch --detach --service --all --force --completions -d -h --help -V --version"
+    opts="--config --save-logs --branch --detach --service --all --force --port --completions -d -h --help -V --version"
     if [[ "$prev" == "--service" || "$prev" == "-s" ]]; then
         return 0
     fi
@@ -76,6 +76,7 @@ _fog() {{
         '(-s --service)'{{-s,--service}}'[Show logs for one service]:service:' \
         '--all[Apply to every matching instance (kill/restart)]' \
         '--force[Escalate to SIGTERM/SIGKILL if it does not stop (kill/restart)]' \
+        '--port=[Override a top-level ports entry for this run]:port:' \
         '--completions=[Generate a completion script]:shell:(bash zsh fish)' \
         '(-h --help)'{{-h,--help}}'[Print help]' \
         '(-V --version)'{{-V,--version}}'[Print version]' \
@@ -105,6 +106,7 @@ complete -c fog -s d -l detach -d 'Run in the background without the TUI'
 complete -c fog -s s -l service -d 'Show logs for one service (fog logs)'
 complete -c fog -l all -d 'Apply to every matching instance (kill/restart)'
 complete -c fog -l force -d 'Escalate to SIGTERM/SIGKILL if it does not stop (kill/restart)'
+complete -c fog -l port -d 'Override a top-level ports entry for this run (NAME=PORT)' -r
 complete -c fog -l completions -d 'Generate a completion script' -a 'bash zsh fish'
 complete -c fog -s h -l help -d 'Print help'
 complete -c fog -s V -l version -d 'Print version'
@@ -122,6 +124,7 @@ mod tests {
         let out = generate(CompletionShell::Bash);
         assert!(out.contains("git worktree list"));
         assert!(out.contains("--branch"));
+        assert!(out.contains("--port"));
         assert!(out.contains("complete -F _fog fog"));
     }
 
@@ -130,6 +133,7 @@ mod tests {
         let out = generate(CompletionShell::Zsh);
         assert!(out.contains("git worktree list"));
         assert!(out.contains("--branch"));
+        assert!(out.contains("--port"));
         assert!(out.contains("compdef _fog fog"));
     }
 
@@ -138,6 +142,7 @@ mod tests {
         let out = generate(CompletionShell::Fish);
         assert!(out.contains("git worktree list"));
         assert!(out.contains("-l branch"));
+        assert!(out.contains("-l port"));
         assert!(out.contains("complete -c fog"));
     }
 }

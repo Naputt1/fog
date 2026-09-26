@@ -41,7 +41,7 @@ const DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(60);
     name = "fog",
     version = env!("CARGO_PKG_VERSION"),
     about = "Terminal-based service orchestrator & reverse-proxy dashboard",
-    after_help = "Built-in commands:\n  fog ls [PID]                    list running instances and service status\n  fog kill [PID|--all]            gracefully shut down a running instance\n  fog kill --force [PID|--all]    forcibly shut down a wedged instance\n  fog restart [PID|--all]         restart a running instance\n  fog logs [PID]                  list services and their status\n  fog logs [PID] --service NAME   print captured output of one service\n  fog index serve [--foreground] [--port N]  run the index server (detached by default)\n  fog index kill                  stop the index server\n  fog index restart               restart the index server\n\nWith no PID, kill/restart/logs target the instance started from the local\nfog.json (same config directory, so the branch is implicit). When several\nlocal instances match, the command lists them: pass an explicit PID, or\n--all (kill/restart) to apply to every local match. Outside a directory\nwith fog.json, --all applies to every running instance.\n\nWhen a kill/restart grace period is not enough (a wedged instance that never\nconsumes its kill flag), --force escalates to SIGTERM then SIGKILL.\n\nRun a script from fog.json:\n  fog <script> [OPTIONS]  (e.g. fog dev)"
+    after_help = "Built-in commands:\n  fog ls [PID]                    list running instances and service status\n  fog kill [PID|--all]            gracefully shut down a running instance\n  fog kill --force [PID|--all]    forcibly shut down a wedged instance\n  fog restart [PID|--all]         restart a running instance\n  fog logs [PID]                  list services and their status\n  fog logs [PID] --service NAME   print captured output of one service\n  fog index serve [--foreground] [--port N]  run the index server (detached by default)\n  fog index kill                  stop the index server\n  fog index restart               restart the index server\n\nWith no PID, kill/restart/logs target the instance started from the local\nfog.json (same config directory, so the branch is implicit). When several\nlocal instances match, the command lists them: pass an explicit PID, or\n--all (kill/restart) to apply to every local match. Outside a directory\nwith fog.json, --all applies to every running instance.\n\nWhen a kill/restart grace period is not enough (a wedged instance that never\nconsumes its kill flag), --force escalates to SIGTERM then SIGKILL.\n\nRun a script from fog.json:\n  fog <script> [OPTIONS]  (e.g. fog dev)\n\nOverride an allocated port for one run:\n  fog dev --port api=4000       (repeatable; --port web=0 re-randomizes)"
 )]
 struct Cli {
     /// Script to run (e.g. `fog dev`), or a built-in command
@@ -98,6 +98,12 @@ struct Cli {
     /// `health_check`, start a fresh instance instead of borrowing/reusing.
     #[arg(long)]
     no_share: bool,
+
+    /// Override a top-level `ports` entry for this run, e.g. `--port api=4000`.
+    /// Repeatable; use `0` to re-randomize. Names not in the config `ports` map
+    /// are added for this run. Only applies when running a script.
+    #[arg(long, value_name = "NAME=PORT")]
+    port: Vec<String>,
 
     /// Print verbose setup output (DNS, router, index, port and native-route
     /// details). Warnings are always printed.
@@ -1270,8 +1276,29 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
         None
     };
 
-    let mut port_map = if let Some(specs) = &config.ports {
-        match fog::ports::allocate_ports(specs) {
+    // Run-time `--port NAME=PORT` overrides are merged onto the config's
+    // `ports` map before allocation: they can replace a configured value or
+    // define a name the config does not declare. Duplicate or malformed
+    // overrides fail fast.
+    let overrides = match fog::ports::parse_port_overrides(&cli.port) {
+        Ok(m) => m,
+        Err(e) => {
+            if !detached {
+                let _ = execute!(stdout(), LeaveAlternateScreen, DisableMouseCapture);
+                let _ = disable_raw_mode();
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("error: {e}"),
+            ));
+        }
+    };
+    let mut port_specs = config.ports.clone().unwrap_or_default();
+    let ports_defined = config.ports.is_some() || !overrides.is_empty();
+    port_specs.extend(overrides);
+
+    let mut port_map = if !port_specs.is_empty() {
+        match fog::ports::allocate_ports(&port_specs) {
             Ok(m) => m,
             Err(e) => {
                 if !detached {
@@ -1302,7 +1329,7 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
         ));
     }
     if let Err(e) = fog::ports::ensure_ports_defined(
-        config.ports.as_ref(),
+        ports_defined.then_some(&port_specs),
         script,
         config.native_routes.as_ref(),
     ) {
@@ -1735,6 +1762,19 @@ fn main() -> io::Result<()> {
         std::process::exit(1);
     }
 
+    // `--port` only applies when running a script.
+    if !cli.port.is_empty() {
+        match cli.script.as_deref() {
+            Some(name) if !matches!(name, "ls" | "kill" | "restart" | "logs" | "index") => {}
+            _ => {
+                eprintln!(
+                    "error: --port only applies when running a script (e.g. `fog dev --port api=4000`)"
+                );
+                std::process::exit(1);
+            }
+        }
+    }
+
     // Detach: run the script in the background and return once it is serving.
     // The daemon child (re-executed with FOG_DAEMON_CHILD=1) takes the
     // headless path in run_script and must not re-daemonize.
@@ -2147,6 +2187,14 @@ mod tests {
 
         let cli = Cli::try_parse_from(["fog", "restart", "--all", "--force"]).unwrap();
         assert!(cli.force && cli.all);
+    }
+
+    #[test]
+    fn test_cli_accepts_port_overrides() {
+        let cli =
+            Cli::try_parse_from(["fog", "dev", "--port", "api=4000", "--port=web=0"]).unwrap();
+        assert_eq!(cli.port, vec!["api=4000".to_string(), "web=0".to_string()]);
+        assert_eq!(cli.script.as_deref(), Some("dev"));
     }
 
     #[test]

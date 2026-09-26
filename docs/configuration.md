@@ -28,7 +28,7 @@ See [`fog.schema.json`](https://github.com/Naputt1/fog/blob/main/fog.schema.json
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `scripts` | `object` | — | Named profiles; each defines its own services and proxy |
-| `ports` | `object` | — | Allocatable ports for templating (`${ports.<name>}`); `0` = random free port |
+| `ports` | `object` | — | Allocatable ports for templating (`${ports.<name>}`); `0` = random free port. Override per run with `--port <name>=<port>` |
 | `native_routes` | `array` | — | Explicit Traefik file-provider routes for native services |
 | `max_scrollback` | `integer` | `2000` | Maximum scrollback lines per terminal (min: 100) |
 | `sidebar` | `object` | `null` | Sidebar width constraints |
@@ -37,6 +37,8 @@ See [`fog.schema.json`](https://github.com/Naputt1/fog/blob/main/fog.schema.json
 | `index` | `object` | `{ enabled: true }` | Standalone index server (service directory + web UI); set `enabled:false` to opt this project out. See [Index Server](/index-server) |
 | `router` | `object` | `null` | Central Traefik router (host-global). See [Router & DNS](/router) |
 | `dnsmasq` | `object` | `null` | Wildcard DNS setup. See [Router & DNS](/router) |
+
+Run-time port overrides: `fog <script> --port <name>=<port>` (repeatable) replaces an allocated port for one run without editing `fog.json`; `--port <name>=0` re-randomizes it. A name not declared in `ports` is added for that run. Overrides apply before templating, so every `${ports.<name>}` consumer — service `cmd`/`env`/health checks, endpoint routes and native routes — resolves to the overridden value.
 
 ## Scripts
 

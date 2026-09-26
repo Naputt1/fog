@@ -135,6 +135,7 @@ fog logs [pid] -s <name>        # print captured output of one service
 |--------|-------------|
 | `-c`, `--config <PATH>` | Path to config file or directory containing `fog.json` (default `fog.json`) |
 | `--branch <BRANCH>` | Run in the git worktree for this branch |
+| `--port <NAME=PORT>` | Override a top-level `ports` entry for this run (repeatable; `0` re-randomizes, e.g. `fog dev --port api=4000`) |
 | `-d`, `--detach` | Run in background without TUI, captures logs to `$TMPDIR/fog-<pid>.logs/` |
 | `-s`, `--service <NAME>` | With `fog logs`: show one service instead of listing (`daemon` and `proxy` included) |
 | `--save-logs` | Save service output to `temp/<name>.txt` on exit |
@@ -142,6 +143,14 @@ fog logs [pid] -s <name>        # print captured output of one service
 | `--completions <SHELL>` | Print bash/zsh/fish completions |
 
 Each instance exposes a Unix socket at `$TMPDIR/fog-<pid>.sock`. `fog ls` and `fog kill` discover it there. Pass a PID when multiple instances run.
+
+Override an allocated port for one run without editing `fog.json`:
+
+```bash
+fog dev --port api=4000 --port web=0   # pin api, re-randomize web
+```
+
+`--port` is repeatable and applies before `${ports.*}` templating, so services, endpoint routes and native routes all use the overridden value. A name not declared in the config's `ports` map is added for that run.
 
 Docs: [https://naputt1.github.io/fog/](https://naputt1.github.io/fog/) for configuration, proxy, themes, keybindings, architecture and troubleshooting.
 

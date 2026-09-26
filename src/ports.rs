@@ -79,6 +79,37 @@ pub fn allocate_ports(specs: &HashMap<String, u16>) -> Result<PortMap, String> {
     Ok(out)
 }
 
+/// Parses repeated `--port NAME=PORT` run-time overrides into a map.
+///
+/// Each entry must be `NAME=PORT` with a non-empty name and a `u16` port
+/// (`0` re-randomizes). Duplicate names are rejected so the effective override
+/// is unambiguous. Returns a human-readable error string on malformed input.
+///
+/// The result is merged onto the config's `ports` map before allocation; a
+/// name absent from the config defines a new port for this run.
+pub fn parse_port_overrides(raw: &[String]) -> Result<HashMap<String, u16>, String> {
+    let mut out = HashMap::new();
+    for item in raw {
+        let Some((name, value)) = item.split_once('=') else {
+            return Err(format!(
+                "invalid --port '{item}' (expected NAME=PORT, e.g. --port api=4000)"
+            ));
+        };
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(format!("invalid --port '{item}': port name is empty"));
+        }
+        let value = value.trim();
+        let port = value.parse::<u16>().map_err(|_| {
+            format!("invalid --port '{item}': '{value}' is not a valid port (0-65535)")
+        })?;
+        if out.insert(name.to_string(), port).is_some() {
+            return Err(format!("duplicate --port override for '{name}'"));
+        }
+    }
+    Ok(out)
+}
+
 /// Sanitizes a branch name for DNS/hostname use.
 ///
 /// - lowercases
@@ -520,6 +551,54 @@ mod tests {
         specs.insert("b".into(), 41234);
         let err = allocate_ports(&specs).unwrap_err();
         assert!(err.contains("duplicate"), "{err}");
+    }
+
+    #[test]
+    fn test_parse_port_overrides_ok() {
+        let raw = vec!["api=4000".to_string(), "web=0".to_string()];
+        let m = parse_port_overrides(&raw).unwrap();
+        assert_eq!(m["api"], 4000);
+        assert_eq!(m["web"], 0);
+    }
+
+    #[test]
+    fn test_parse_port_overrides_trims() {
+        let raw = vec![" api = 4000 ".to_string()];
+        let m = parse_port_overrides(&raw).unwrap();
+        assert_eq!(m["api"], 4000);
+    }
+
+    #[test]
+    fn test_parse_port_overrides_missing_equals_errors() {
+        let err = parse_port_overrides(&["api".to_string()]).unwrap_err();
+        assert!(err.contains("NAME=PORT"), "{err}");
+    }
+
+    #[test]
+    fn test_parse_port_overrides_empty_name_errors() {
+        let err = parse_port_overrides(&["=4000".to_string()]).unwrap_err();
+        assert!(err.contains("empty"), "{err}");
+    }
+
+    #[test]
+    fn test_parse_port_overrides_bad_port_errors() {
+        for value in ["abc", "-1", "65536", ""] {
+            let item = format!("api={value}");
+            let err = parse_port_overrides(std::slice::from_ref(&item)).unwrap_err();
+            assert!(err.contains("not a valid port"), "{value}: {err}");
+        }
+    }
+
+    #[test]
+    fn test_parse_port_overrides_duplicate_name_errors() {
+        let raw = vec!["api=4000".to_string(), "api=4001".to_string()];
+        let err = parse_port_overrides(&raw).unwrap_err();
+        assert!(err.contains("duplicate"), "{err}");
+    }
+
+    #[test]
+    fn test_parse_port_overrides_empty_input() {
+        assert!(parse_port_overrides(&[]).unwrap().is_empty());
     }
 
     #[test]
