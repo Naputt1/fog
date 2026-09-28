@@ -1140,11 +1140,16 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
         None => list_scripts_and_exit(&config, &format!("error: unknown script '{}'", name)),
     };
 
+    // Setup diagnostics are collected rather than printed immediately: in
+    // interactive mode the TUI takes the screen moments later, so warnings are
+    // surfaced in-app and everything is persisted to the instance's daemon.log.
+    let mut startup_messages: Vec<String> = Vec::new();
+
     // Apply the configured dnsmasq wildcard-DNS routes before the TUI enters
     // raw mode, so sudo can prompt on a normal terminal. Best-effort: failures
     // only warn and never block the run.
     if let Some(dnsmasq) = config.dnsmasq.as_ref() {
-        fog::log::emit(&fog::dnsmasq::ensure(dnsmasq, detached), cli.verbose);
+        startup_messages.extend(fog::dnsmasq::ensure(dnsmasq, detached));
     }
 
     // Bring up the central reverse-proxy router (Traefik), mirroring the
@@ -1158,13 +1163,13 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
             .as_ref()
             .map(|d| d.domains.clone())
             .unwrap_or_default();
-        fog::log::emit(&fog::router::ensure(router, &domains), cli.verbose);
+        startup_messages.extend(fog::router::ensure(router, &domains));
     }
     // Standalone index server (service directory + web UI). Controlled by
     // fog config (`~/.config/fog/fog.json` alongside `theme`, plus per-project
     // `fog.json` top-level `index`). Both default true; either can opt-out.
     if config.effective_should_serve_index() {
-        fog::log::emit(&fog::index::ensure_for_config(&config), cli.verbose);
+        startup_messages.extend(fog::index::ensure_for_config(&config));
     }
 
     let config_path = config_path
@@ -1403,7 +1408,7 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
             &config,
             cli.verbose,
         );
-        fog::log::emit(&messages, cli.verbose);
+        startup_messages.extend(messages);
     }
 
     let runtime = fog::runtime::build_with_ports_no_share(
@@ -1449,15 +1454,15 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
                 &config,
                 cli.verbose,
             );
-            fog::log::emit(&messages, cli.verbose);
+            startup_messages.extend(messages);
         }
     }
     // Log allocated ports for visibility (also useful for `fog logs`)
-    if cli.verbose && !port_map.is_empty() {
+    if !port_map.is_empty() {
         let mut names: Vec<&String> = port_map.keys().collect();
         names.sort();
         for n in names {
-            eprintln!("  + port {} -> {}", n, port_map[n]);
+            startup_messages.push(format!("  + port {} -> {}", n, port_map[n]));
         }
     }
 
@@ -1479,6 +1484,23 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
         config_watcher::spawn_config_watcher(config_path.clone(), Arc::new(AtomicBool::new(false)))
     };
 
+    // Persist setup diagnostics, then surface warnings. Detached runs already
+    // redirected stderr into daemon.log, so they only need the historic emit;
+    // interactive runs append to daemon.log and show a dismissible overlay.
+    let startup_warnings: Vec<String> = if detached {
+        fog::log::emit(&startup_messages, cli.verbose);
+        Vec::new()
+    } else {
+        if let Some(dir) = log_dir.as_ref() {
+            fog::log::append_daemon_log(dir, &startup_messages, cli.verbose);
+        }
+        startup_messages
+            .iter()
+            .filter(|m| !fog::log::is_info(m))
+            .cloned()
+            .collect()
+    };
+
     let mut app = App::new_with_opts(fog::app::AppCreateOpts {
         items: runtime.items,
         pending_services: runtime.pending_services,
@@ -1495,6 +1517,7 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
         save_logs: cli.save_logs,
         no_share: cli.no_share,
         verbose: cli.verbose,
+        startup_messages: startup_warnings,
     });
     if detached {
         app.run_headless()?;

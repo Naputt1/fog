@@ -119,6 +119,10 @@ pub struct App {
     no_share: bool,
     /// Whether `--verbose` was passed: gates informational setup output.
     verbose: bool,
+    /// Non-fatal startup warnings, shown as a dismissible overlay.
+    startup_messages: Vec<String>,
+    /// Whether the startup-warning overlay is currently visible.
+    show_startup_popup: bool,
 }
 
 /// Options for creating an `App` without `clippy::too_many_arguments`.
@@ -138,6 +142,9 @@ pub struct AppCreateOpts {
     pub save_logs: bool,
     pub no_share: bool,
     pub verbose: bool,
+    /// Non-fatal startup warnings, shown as a dismissible overlay and
+    /// reprinted to stderr on exit.
+    pub startup_messages: Vec<String>,
 }
 
 impl App {
@@ -182,6 +189,7 @@ impl App {
             save_logs,
             no_share: false,
             verbose: false,
+            startup_messages: Vec::new(),
         })
     }
 
@@ -203,7 +211,9 @@ impl App {
             save_logs,
             no_share,
             verbose,
+            startup_messages,
         } = opts;
+        let show_startup_popup = !startup_messages.is_empty();
         let (tabs, proxy_tab_index) = Self::build_tabs(
             &items,
             &pending_services,
@@ -228,7 +238,7 @@ impl App {
             select_end: None,
             content_area: Rect::default(),
             show_help: false,
-            errors: Vec::new(),
+            errors: startup_messages.clone(),
             proxy_filter: String::new(),
             config_path,
             config_rel,
@@ -246,6 +256,8 @@ impl App {
             switch_popup: None,
             no_share,
             verbose,
+            startup_messages,
+            show_startup_popup,
         }
     }
 
@@ -588,7 +600,27 @@ impl App {
             .unwrap_or(false)
     }
 
+    /// Records a setup warning: shown in the startup overlay (info lines are
+    /// omitted) and always reprinted to stderr once the TUI exits.
+    fn note_setup_message(&mut self, msg: String) {
+        if !crate::log::is_info(&msg) {
+            self.startup_messages.push(msg.clone());
+            self.show_startup_popup = true;
+        }
+        self.errors.push(msg);
+    }
+
     fn handle_key(&mut self, key: KeyEvent) {
+        if self.show_startup_popup {
+            self.show_startup_popup = false;
+            // Any key dismisses the overlay; quit keys also take effect.
+            if key.code == KeyCode::Char('q')
+                || (key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('q'))
+            {
+                self.exit = true;
+            }
+            return;
+        }
         if self.show_help {
             match key.code {
                 KeyCode::Char('?') => self.show_help = false,
@@ -1130,7 +1162,7 @@ impl App {
                 &config,
                 self.verbose,
             ) {
-                self.errors.push(msg);
+                self.note_setup_message(msg);
             }
         }
         // Declared endpoint routes for the new branch.
@@ -1540,6 +1572,44 @@ impl App {
             frame.render_widget(help, overlay_area);
         }
 
+        if self.show_startup_popup && !self.startup_messages.is_empty() {
+            let width = 78u16.min(area.width.saturating_sub(4)).max(8);
+            let inner = width.saturating_sub(2) as usize;
+            // Allow for wrapped lines so the box fits its text.
+            let body: u16 = self
+                .startup_messages
+                .iter()
+                .map(|m| (m.chars().count() / inner.max(1)) as u16 + 1)
+                .sum();
+            let height = (body + 3).min(area.height);
+            let overlay_area = Rect {
+                x: (area.width.saturating_sub(width)) / 2,
+                y: (area.height.saturating_sub(height)) / 2,
+                width,
+                height,
+            };
+            let mut lines: Vec<Line> = self
+                .startup_messages
+                .iter()
+                .map(|m| {
+                    Line::from(Span::styled(
+                        m.clone(),
+                        Style::default().fg(Color::Rgb(255, 176, 0)),
+                    ))
+                })
+                .collect();
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                " press any key to dismiss ",
+                Style::default().dim(),
+            )));
+            let popup = Paragraph::new(Text::from(lines))
+                .block(Block::bordered().title(" Startup "))
+                .wrap(Wrap { trim: false });
+            frame.render_widget(Clear, overlay_area);
+            frame.render_widget(popup, overlay_area);
+        }
+
         if let Some(popup) = &self.switch_popup {
             let config_dir = self.config_path.parent().unwrap_or_else(|| Path::new("."));
             let matches = popup.matches();
@@ -1933,6 +2003,8 @@ mod tests {
             switch_popup: None,
             no_share: false,
             verbose: false,
+            startup_messages: vec![],
+            show_startup_popup: false,
         }
     }
 
@@ -1941,6 +2013,69 @@ mod tests {
         let tabs = ClickTab::new(vec!["svc".into()], 10, 30);
         let app = make_app(vec![], None, tabs, Mode::Normal, Rect::default());
         assert!(!app.is_proxy_tab());
+    }
+
+    #[test]
+    fn test_startup_popup_dismissed_by_any_key() {
+        let tabs = ClickTab::new(vec!["svc".into()], 10, 30);
+        let mut app = make_app(vec![], None, tabs, Mode::Normal, Rect::default());
+        app.startup_messages = vec!["⚠ docker hung".to_string()];
+        app.show_startup_popup = true;
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('x')));
+
+        assert!(!app.show_startup_popup);
+        assert!(!app.exit);
+    }
+
+    #[test]
+    fn test_startup_popup_quit_key_still_exits() {
+        let tabs = ClickTab::new(vec!["svc".into()], 10, 30);
+        let mut app = make_app(vec![], None, tabs, Mode::Normal, Rect::default());
+        app.startup_messages = vec!["⚠ docker hung".to_string()];
+        app.show_startup_popup = true;
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('q')));
+
+        assert!(!app.show_startup_popup);
+        assert!(app.exit);
+    }
+
+    #[test]
+    fn test_note_setup_message_shows_only_warnings() {
+        let tabs = ClickTab::new(vec!["svc".into()], 10, 30);
+        let mut app = make_app(vec![], None, tabs, Mode::Normal, Rect::default());
+
+        app.note_setup_message("  + port web -> 1".to_string());
+        assert!(!app.show_startup_popup, "info lines never open the popup");
+        assert_eq!(app.errors.len(), 1);
+
+        app.note_setup_message("⚠ docker hung".to_string());
+        assert!(app.show_startup_popup);
+        assert_eq!(app.startup_messages.len(), 1);
+        assert_eq!(app.errors.len(), 2);
+    }
+
+    #[test]
+    fn test_startup_popup_renders_messages() {
+        use ratatui::Terminal as RatatuiTerminal;
+        use ratatui::backend::TestBackend;
+
+        let tabs = ClickTab::new(vec!["svc".into()], 10, 30);
+        let mut app = make_app(vec![], None, tabs, Mode::Normal, Rect::default());
+        app.startup_messages = vec!["⚠ docker hung".to_string()];
+        app.show_startup_popup = true;
+
+        let mut terminal = RatatuiTerminal::new(TestBackend::new(60, 12)).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+
+        let buf = terminal.backend().buffer();
+        let content: String = (0..12)
+            .flat_map(|y| (0..60).map(move |x| (x, y)))
+            .map(|(x, y)| buf[(x, y)].symbol().to_string())
+            .collect();
+        assert!(content.contains("Startup"), "overlay title missing");
+        assert!(content.contains("docker hung"), "warning text missing");
     }
 
     #[test]

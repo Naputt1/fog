@@ -1,7 +1,26 @@
 use crate::config::RouterConfig;
+use crate::process::run_with_timeout;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
+
+/// Wall-clock budget for the fast docker control-plane calls made during router
+/// setup. A hung Docker Desktop would otherwise block startup forever.
+const DOCKER_CMD_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Longer budget for `docker run`: a first run may need to pull the Traefik
+/// image before the container starts.
+const DOCKER_RUN_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// Warning used when a docker CLI call exceeds its budget.
+fn docker_timeout_msg(cmd: &str, timeout: Duration) -> String {
+    format!(
+        "docker {cmd} did not respond within {}s; is Docker Desktop running or hung? \
+         (check with `docker info`)",
+        timeout.as_secs()
+    )
+}
 
 /// Ensures the central reverse-proxy (Traefik) router exists on the host.
 ///
@@ -30,9 +49,12 @@ pub fn ensure(cfg: &RouterConfig, domains: &[String]) -> Vec<String> {
         return messages;
     }
 
-    // 1. Create the shared network (idempotent).
-    if !network_exists(&cfg.shared_network) {
-        match create_network(&cfg.shared_network) {
+    // 1. Create the shared network (idempotent). A timeout here means Docker
+    //    is not answering at all, so bail before every later docker call hangs
+    //    the daemon too.
+    match network_exists(&cfg.shared_network) {
+        Ok(true) => {}
+        Ok(false) => match create_network(&cfg.shared_network) {
             Ok(()) => messages.push(format!(
                 "  + created shared router network '{}'",
                 cfg.shared_network
@@ -44,6 +66,10 @@ pub fn ensure(cfg: &RouterConfig, domains: &[String]) -> Vec<String> {
                 ));
                 return messages;
             }
+        },
+        Err(e) => {
+            messages.push(format!("⚠ {e}; skipping central router setup."));
+            return messages;
         }
     }
 
@@ -597,71 +623,67 @@ fn command_exists(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn network_exists(name: &str) -> bool {
-    Command::new("docker")
-        .args(["network", "inspect", name])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+fn network_exists(name: &str) -> Result<bool, String> {
+    let mut cmd = Command::new("docker");
+    cmd.args(["network", "inspect", name]);
+    match run_with_timeout(cmd, DOCKER_CMD_TIMEOUT) {
+        Some(out) => Ok(out.status.success()),
+        None => Err(docker_timeout_msg("network inspect", DOCKER_CMD_TIMEOUT)),
+    }
 }
 
 fn create_network(name: &str) -> Result<(), String> {
-    let status = Command::new("docker")
-        .args(["network", "create", name])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map_err(|e| format!("docker: {e}"))?;
-    if status.success() {
+    let mut cmd = Command::new("docker");
+    cmd.args(["network", "create", name]);
+    let out = run_with_timeout(cmd, DOCKER_CMD_TIMEOUT)
+        .ok_or_else(|| docker_timeout_msg("network create", DOCKER_CMD_TIMEOUT))?;
+    if out.status.success() {
         Ok(())
     } else {
-        Err(format!("docker network create exited with {}", status))
+        Err(format!("docker network create exited with {}", out.status))
     }
 }
 
 /// Returns `true` if a container with `name` exists (running or not).
+///
+/// A docker timeout reports "does not exist"; callers that need to distinguish
+/// a hung Docker from a missing container check [`network_exists`] first.
 fn container_exists(name: &str) -> bool {
-    let out = Command::new("docker")
-        .args([
-            "ps",
-            "-a",
-            "--filter",
-            &format!("name=^{name}$"),
-            "--format",
-            "{{.Names}}",
-        ])
-        .output();
-    match out {
-        Ok(o) => String::from_utf8_lossy(&o.stdout).contains(name),
-        Err(_) => false,
+    let mut cmd = Command::new("docker");
+    cmd.args([
+        "ps",
+        "-a",
+        "--filter",
+        &format!("name=^{name}$"),
+        "--format",
+        "{{.Names}}",
+    ]);
+    match run_with_timeout(cmd, DOCKER_CMD_TIMEOUT) {
+        Some(out) => String::from_utf8_lossy(&out.stdout).contains(name),
+        None => false,
     }
 }
 
 /// Returns `true` if the running router container was started with TLS enabled
 /// (i.e. it has the `websecure` entrypoint). Used to detect config drift.
 fn container_tls_enabled(name: &str) -> bool {
-    let out = Command::new("docker")
-        .args(["inspect", "--format", "{{.Args}}", name])
-        .output();
-    match out {
-        Ok(o) => String::from_utf8_lossy(&o.stdout).contains("websecure"),
-        Err(_) => false,
+    let mut cmd = Command::new("docker");
+    cmd.args(["inspect", "--format", "{{.Args}}", name]);
+    match run_with_timeout(cmd, DOCKER_CMD_TIMEOUT) {
+        Some(out) => String::from_utf8_lossy(&out.stdout).contains("websecure"),
+        None => false,
     }
 }
 
 fn remove_container(name: &str) -> Result<(), String> {
-    let status = Command::new("docker")
-        .args(["rm", "-f", name])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map_err(|e| format!("docker rm: {e}"))?;
-    if status.success() {
+    let mut cmd = Command::new("docker");
+    cmd.args(["rm", "-f", name]);
+    let out = run_with_timeout(cmd, DOCKER_CMD_TIMEOUT)
+        .ok_or_else(|| docker_timeout_msg("rm", DOCKER_CMD_TIMEOUT))?;
+    if out.status.success() {
         Ok(())
     } else {
-        Err(format!("docker rm exited with {}", status))
+        Err(format!("docker rm exited with {}", out.status))
     }
 }
 
@@ -743,11 +765,12 @@ fn start_router(
     cmd.args(["--api.dashboard=true"])
         .arg("--api.insecure")
         .arg("--log.level=ERROR");
-    let status = cmd.status().map_err(|e| format!("docker run: {e}"))?;
-    if status.success() {
+    let out = run_with_timeout(cmd, DOCKER_RUN_TIMEOUT)
+        .ok_or_else(|| docker_timeout_msg("run", DOCKER_RUN_TIMEOUT))?;
+    if out.status.success() {
         Ok(())
     } else {
-        Err(format!("docker run exited with {}", status))
+        Err(format!("docker run exited with {}", out.status))
     }
 }
 

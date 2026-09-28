@@ -1,4 +1,37 @@
 use std::io;
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
+
+/// Spawns a command and waits at most `timeout` for it to exit.
+///
+/// stdout and stderr are captured. Returns `None` if the child does not exit
+/// within `timeout` (the child is killed and reaped) or if it cannot be spawned.
+/// A command that rejects piped stdio, such as a PTY-bound runner, is not a
+/// fit for this helper.
+pub fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Option<Output> {
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd.spawn().ok()?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+    child.wait_with_output().ok()
+}
 
 /// Sends a signal to the entire process group of the given PID.
 ///
@@ -296,5 +329,28 @@ mod tests {
     fn test_waitpid_nohang_nonexistent_pid() {
         let result = waitpid_nohang(999_999);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_run_with_timeout_captures_output() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "echo hi"]);
+        let out = run_with_timeout(cmd, Duration::from_secs(5)).expect("command should finish");
+        assert!(out.status.success());
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "hi");
+    }
+
+    #[test]
+    fn test_run_with_timeout_kills_slow_command() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "sleep 5"]);
+        let start = Instant::now();
+        let out = run_with_timeout(cmd, Duration::from_millis(200));
+        assert!(out.is_none(), "slow command should time out");
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "timeout should fire promptly, took {:?}",
+            start.elapsed()
+        );
     }
 }
