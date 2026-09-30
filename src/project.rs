@@ -57,6 +57,26 @@ pub fn display(config_dir: &Path) -> String {
     config_dir.to_string_lossy().into_owned()
 }
 
+/// Returns a short, human-readable project name from a project identity.
+///
+/// The instance's project identity is the git common dir (e.g. `/repo/.git`),
+/// shared by every worktree; strip the trailing `.git` component so the repo
+/// name is shown instead. Other paths (e.g. the non-git fallback identity) use
+/// their last component.
+pub fn display_name(project: &str) -> String {
+    let path = Path::new(project);
+    if path.file_name().is_some_and(|n| n == ".git") {
+        path.parent()
+            .and_then(Path::file_name)
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| project.to_string())
+    } else {
+        path.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| project.to_string())
+    }
+}
+
 /// Returns the main working-tree root of the git repository containing `dir`,
 /// regardless of which worktree `dir` is checked out in.
 ///
@@ -211,6 +231,22 @@ mod tests {
             .args(["worktree", "remove", "--force", &worktree.to_string_lossy()])
             .output();
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_display_name_strips_git_common_dir() {
+        // The project identity is the git common dir (`/repo/.git`); the
+        // display name must be the repo directory, not `.git`.
+        assert_eq!(display_name("/Users/alice/dev/fog/.git"), "fog");
+        assert_eq!(display_name("/Users/alice/dev/fog"), "fog");
+    }
+
+    #[test]
+    fn test_display_name_fallback() {
+        // Fallback identity (non-git) is a plain directory path; the display
+        // name is its basename. A bare/rootless path falls back to itself.
+        assert_eq!(display_name("/tmp/my-project"), "my-project");
+        assert_eq!(display_name("fog"), "fog");
     }
 
     #[test]

@@ -114,6 +114,10 @@ pub struct App {
     switch_popup: Option<SwitchPopup>,
     config_watcher_stop: Arc<AtomicBool>,
     ipc_state: Arc<IpcState>,
+    /// Branch shown in the content panel's top title. Tracked separately from
+    /// `ipc_state.branch` (which is set once at startup) so a worktree switch
+    /// updates the title without changing the instance's IPC identity.
+    title_branch: Option<String>,
     /// Whether `--no-share` was passed: when true shared/reuse services are
     /// always started fresh instead of borrowed/handed over.
     no_share: bool,
@@ -214,6 +218,7 @@ impl App {
             startup_messages,
         } = opts;
         let show_startup_popup = !startup_messages.is_empty();
+        let title_branch = ipc_state.branch.clone();
         let (tabs, proxy_tab_index) = Self::build_tabs(
             &items,
             &pending_services,
@@ -246,6 +251,7 @@ impl App {
             config_rx,
             config_watcher_stop: Arc::new(AtomicBool::new(false)),
             ipc_state,
+            title_branch,
             proxy_tab_index,
             sidebar_min,
             sidebar_max,
@@ -1087,6 +1093,7 @@ impl App {
                 }
             }
         }
+        let title_branch = branch_for_ports.clone();
         let built = match runtime::build_with_ports_no_share(
             script,
             &script_name,
@@ -1115,6 +1122,7 @@ impl App {
 
         // The project identity is the repo's git-common-dir, shared by every
         // worktree, so `ipc_state.project` stays unchanged across switches.
+        self.title_branch = title_branch;
 
         // Tear down the old services and proxy now so their ports are free
         // before the new worktree's services start.
@@ -1408,6 +1416,14 @@ impl App {
         }
     }
 
+    /// Short project-and-branch label shown on the content panel's top border.
+    fn panel_title(&self) -> String {
+        panel_title_text(
+            self.ipc_state.project.as_deref(),
+            self.title_branch.as_deref(),
+        )
+    }
+
     fn draw(&mut self, frame: &mut Frame) {
         let area = frame.area();
         let sidebar_width = self.tabs.min_width();
@@ -1500,6 +1516,7 @@ impl App {
         let instructions = render::draw_instructions(is_proxy, is_shell, in_terminal_input);
 
         let block = Block::bordered()
+            .title_top(Line::from(self.panel_title()).centered())
             .title_bottom(instructions.centered())
             .border_set(border::THICK);
 
@@ -1953,6 +1970,27 @@ impl App {
     }
 }
 
+/// Builds the content panel's top title from a project identity and branch.
+///
+/// Produces `" name (branch) "`, `" name (detached) "` for a detached checkout
+/// in a git repo (detected by the `.git` common-dir identity), or `" name "`
+/// outside a git repo. Returns an empty string when there is no identity.
+fn panel_title_text(project: Option<&str>, branch: Option<&str>) -> String {
+    let Some(project) = project else {
+        return String::new();
+    };
+    let name = crate::project::display_name(project);
+    if let Some(branch) = branch {
+        return format!(" {name} ({branch}) ");
+    }
+    let is_git = Path::new(project).file_name().is_some_and(|n| n == ".git");
+    if is_git {
+        format!(" {name} (detached) ")
+    } else {
+        format!(" {name} ")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1993,6 +2031,7 @@ mod tests {
             config_rx: rx,
             config_watcher_stop: Arc::new(AtomicBool::new(false)),
             ipc_state: Arc::new(IpcState::new("test".to_string(), None, None, false)),
+            title_branch: None,
             proxy_tab_index,
             sidebar_min: 10,
             sidebar_max: 30,
@@ -2006,6 +2045,27 @@ mod tests {
             startup_messages: vec![],
             show_startup_popup: false,
         }
+    }
+
+    #[test]
+    fn test_panel_title_text() {
+        // Git repo: repo name plus branch.
+        assert_eq!(
+            panel_title_text(Some("/Users/alice/dev/fog/.git"), Some("main")),
+            " fog (main) "
+        );
+        // Detached checkout in a git repo: repo name, no branch.
+        assert_eq!(
+            panel_title_text(Some("/Users/alice/dev/fog/.git"), None),
+            " fog (detached) "
+        );
+        // Non-git fallback identity: dir name only, no "detached".
+        assert_eq!(
+            panel_title_text(Some("/tmp/my-project"), None),
+            " my-project "
+        );
+        // No identity at all.
+        assert_eq!(panel_title_text(None, Some("main")), "");
     }
 
     #[test]
