@@ -1,4 +1,4 @@
-# fog demo: human + agent on the same branch, then branch switch
+# fog demo: a human and two agents on one branch, sharing a borrowed DB
 Output assets/demo.gif
 Set Shell zsh
 Set FontSize 18
@@ -8,56 +8,54 @@ Set Framerate 30
 Set TypingSpeed 60ms
 
 Hide
-Type 'export PATH=/Users/naputt/code/fog/target/release:$PATH'
+Type@1ms 'export PATH="$PWD/target/release:$PATH"'
 Enter
-Type 'export TMPDIR=/tmp/fog-demo-tmp'
+Type@1ms 'export TMPDIR=/tmp/fog-demo-tmp'
 Enter
-Type 'cd /tmp/fog-demo && clear'
+Type@1ms 'cd /tmp/fog-demo && clear'
 Enter
-Sleep 1s
+Sleep 500ms
 Show
 
-Type@15ms 'echo "> 1. your coding agent starts the stack, headless"'
+Type@5ms 'echo "> 1. your coding agent starts the stack, headless"'
 Enter
-Sleep 1s
+Sleep 500ms
 Type "fog dev -d"
 Enter
-Sleep 8s
+Sleep 3.5s
 
-Type@15ms 'echo "> 2. db + api + web, all healthy"'
+Type@5ms 'echo "> 2. db + api + web, all healthy"'
 Enter
-Sleep 1s
+Sleep 500ms
 Type "fog ls"
 Enter
-Sleep 4s
+Sleep 2.5s
 
-Type@15ms 'echo "> 3. you open the same stack in the TUI; the db is borrowed, not duplicated"'
+Type@5ms 'echo "> 3. you open the same stack in the TUI; the db is borrowed, not duplicated"'
 Enter
-Sleep 1s
+Sleep 500ms
 Type "fog dev"
 Enter
-Sleep 6s
+Sleep 3s
 Type "j"
-Sleep 4s
-Type "s"
 Sleep 2s
+Type "s"
+Sleep 1.2s
 Type "f"
-Sleep 1s
+Sleep 600ms
 Type "feat"
-Sleep 1.5s
+Sleep 800ms
 Enter
-Sleep 5s
-Type "k"
 Sleep 3s
 Type "q"
-Sleep 2s
+Sleep 800ms
 
-Type@15ms 'echo "> 4. a second agent joins the same branch; still one shared db"'
+Type@5ms 'echo "> 4. a second agent joins the same branch; still one shared db"'
 Enter
-Sleep 1s
-Type "fog dev -d --branch master"
+Sleep 500ms
+Type "fog dev -d --branch main"
 Enter
-Sleep 8s
+Sleep 3.5s
 Type "fog ls"
 Enter
-Sleep 6s
+Sleep 3s

@@ -17,7 +17,7 @@ fog dev -d
 # → shares the DB, streams logs you can watch live
 ```
 
-![fog demo](assets/demo.gif)
+<img src="assets/demo.gif" alt="fog demo" width="800">
 
 ## Why fog
 
@@ -28,6 +28,7 @@ AI agents changed how we develop, but dev tooling still assumes one human per en
 - **Humans + agents on one environment.** `fog dev` and `fog dev -d` on the same branch coexist: shared DBs are borrowed (`share: true`), ports are randomized per instance, logs stream to the web UI. See the [agentic guide](https://naputt1.github.io/fog/agentic).
 - **Branches side-by-side.** Run `fog dev` on `main` and `feature-x` at once; `s` switches worktrees in-place in the TUI. Same branch can run twice — you and an agent share the DB without killing each other.
 - **Phone overview.** Check status and live logs at `http://<tailnet IP>` from your phone — no DNS setup.
+- **Web terminal.** A live ANSI-color shell per service at `/ws/terminal`, bridged through the proxy and hardened with a per-script `terminal` config block.
 - **One command per service.** Each service in its own PTY with color and scrollback. `health_check`, `depends_on`, restart with `R`.
 - **Built-in proxy.** Reverse proxy with request log, filter, and WebSocket support.
 - **Simple config.** One `fog.json` with named scripts (`fog dev`). Ports templating, native_routes, worktree-aware sharing.
@@ -88,7 +89,7 @@ fog dev
 
 For wildcard hostnames like `main.acme` and Traefik routing on `:80`, see [DNS and routing setup](https://naputt1.github.io/fog/configuration#dnsmasq) and the [configuration reference](https://naputt1.github.io/fog/configuration).
 
-Web UI and API run on `127.0.0.1:18080` by default when enabled. See [configuration](https://naputt1.github.io/fog/configuration#index) for the index server, SPA build, and API.
+Web UI and API run on `127.0.0.1:18080` by default when enabled; control the host-global server with `fog index serve|kill|restart`. See [configuration](https://naputt1.github.io/fog/configuration#index) for the index server, SPA build, and API.
 
 ## Web terminal
 
@@ -126,11 +127,15 @@ for full details.
 ## Usage
 
 ```bash
-fog <script> [OPTIONS]    # run a script (e.g. fog dev)
-fog ls [pid]              # list running instances
-fog kill [pid]            # gracefully shut down
-fog logs [pid]                  # list services and their status
-fog logs [pid] -s <name>        # print captured output of one service
+fog <script> [OPTIONS]        # run a script (e.g. fog dev)
+fog ls                        # list running instances, project/branch and service status
+fog restart [pid]             # restart a running instance
+fog kill [pid]                # gracefully shut down
+fog kill --all                # every instance from this config (or every instance, outside a fog.json dir)
+fog kill [pid] --force        # escalate SIGTERM → SIGKILL for a wedged instance
+fog logs [pid]                # list services and their status
+fog logs [pid] -s <name>      # print captured output of one service
+fog index serve|kill|restart  # control the host-global web UI / API server
 ```
 
 | Option | Description |
@@ -139,10 +144,15 @@ fog logs [pid] -s <name>        # print captured output of one service
 | `--branch <BRANCH>` | Run in the git worktree for this branch |
 | `--port <NAME=PORT>` | Override a top-level `ports` entry for this run (repeatable; `0` re-randomizes, e.g. `fog dev --port api=4000`) |
 | `-d`, `--detach` | Run in background without TUI, captures logs to `$TMPDIR/fog-<pid>.logs/` |
+| `--no-share` | Ignore `share:`/`reuse:` — start fresh even when a healthy sibling could be borrowed |
+| `--all` | With `fog kill`/`fog restart`: apply to every matching instance (conflicts with `PID`) |
+| `--force` | With `fog kill`/`fog restart`: escalate to SIGTERM then SIGKILL for a wedged instance |
 | `-s`, `--service <NAME>` | With `fog logs`: show one service instead of listing (`daemon` and `proxy` included) |
 | `--save-logs` | Save service output to `temp/<name>.txt` on exit |
 | `-v`, `--verbose` | Print informational setup output (DNS, router, index, ports, native routes); warnings always print |
 | `--completions <SHELL>` | Print bash/zsh/fish completions |
+
+`fog ls` prints one row per instance — `pid script project branch proxy` — with a `service`/`status` sub-table beneath each (`healthy`, `starting`, `unhealthy`, `unknown`, or `stopped`).
 
 Each instance exposes a Unix socket at `$TMPDIR/fog-<pid>.sock`. `fog ls` and `fog kill` discover it there. Pass a PID when multiple instances run.
 
@@ -161,16 +171,18 @@ Docs: [https://naputt1.github.io/fog/](https://naputt1.github.io/fog/) for confi
 | Key | Action |
 |-----|--------|
 | `q` / `Ctrl+q` | Quit |
-| `j` / `k` / `Ctrl+n` / `Ctrl+p` / arrows | Next / previous tab |
-| `i` | Enter terminal input |
-| `Esc` | Exit input |
+| `j` / `→` / `Ctrl+n` | Next tab |
+| `k` / `←` / `Ctrl+p` | Previous tab |
+| `i` | Enter terminal input (`Esc` to exit) |
 | `R` | Restart current service or proxy |
-| `t` / `Ctrl+t` | Open shell tab |
-| `d` | Close shell tab |
-| `s` | Worktree switch |
-| `↑`/`↓`, `PageUp`/`PageDown`, `g`/`G` | Scroll |
+| `t` / `Ctrl+t` | Open a shell tab |
+| `d` | Close the current shell tab |
+| `s` | Worktree switch popup (`f` fuzzy search, `Enter` to switch, `d` to terminate that branch) |
+| `↑` / `↓` · `PageUp` / `PageDown` · `g` / `G` | Scroll |
 | `/` | Filter proxy logs |
-| `?` | Toggle help |
+| `?` | Toggle help overlay |
+
+Mouse: click a sidebar tab to switch, drag-select to copy (OSC 52), scroll wheel to scroll.
 
 Full reference in [keybindings](https://naputt1.github.io/fog/keybindings).
 
