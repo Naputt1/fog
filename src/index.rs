@@ -516,10 +516,8 @@ fn terminate_server_on_port(port: u16) -> bool {
     if let Some(pid) = pid {
         // If the pid is our own, don't signal ourselves — just clean up.
         if pid != std::process::id() && crate::process::is_pid_alive(pid) {
-            unsafe {
-                libc::kill(pid as libc::pid_t, libc::SIGTERM);
-            }
-            crate::process::try_kill_process_group(pid, libc::SIGTERM);
+            let _ = crate::process::kill_process(pid, crate::process::Signal::Term);
+            crate::process::try_kill_process_group(pid, crate::process::Signal::Term);
             // Give it a moment to exit gracefully.
             for _ in 0..20 {
                 if !crate::process::is_pid_alive(pid) || !server_started(port) {
@@ -528,10 +526,8 @@ fn terminate_server_on_port(port: u16) -> bool {
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
             if crate::process::is_pid_alive(pid) && server_started(port) {
-                unsafe {
-                    libc::kill(pid as libc::pid_t, libc::SIGKILL);
-                }
-                crate::process::try_kill_process_group(pid, libc::SIGKILL);
+                let _ = crate::process::kill_process(pid, crate::process::Signal::Kill);
+                crate::process::try_kill_process_group(pid, crate::process::Signal::Kill);
                 std::thread::sleep(std::time::Duration::from_millis(200));
             }
         }
@@ -564,16 +560,12 @@ fn terminate_server_on_port(port: u16) -> bool {
             {
                 // Try both process-group and direct kill for compatibility
                 // with servers started with and without setsid.
-                unsafe {
-                    libc::kill(pid as libc::pid_t, libc::SIGTERM);
-                }
-                crate::process::try_kill_process_group(pid, libc::SIGTERM);
+                let _ = crate::process::kill_process(pid, crate::process::Signal::Term);
+                crate::process::try_kill_process_group(pid, crate::process::Signal::Term);
                 std::thread::sleep(std::time::Duration::from_millis(300));
                 if crate::process::is_pid_alive(pid) {
-                    unsafe {
-                        libc::kill(pid as libc::pid_t, libc::SIGKILL);
-                    }
-                    crate::process::try_kill_process_group(pid, libc::SIGKILL);
+                    let _ = crate::process::kill_process(pid, crate::process::Signal::Kill);
+                    crate::process::try_kill_process_group(pid, crate::process::Signal::Kill);
                 }
             }
         }
@@ -808,14 +800,7 @@ pub fn serve_detached(port: u16, network: &str) -> io::Result<()> {
     .stdin(Stdio::null())
     .stdout(log_file)
     .stderr(log_err);
-    #[cfg(unix)]
-    unsafe {
-        use std::os::unix::process::CommandExt;
-        cmd.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
-    }
+    crate::process::detach_command(&mut cmd);
     let mut child = cmd
         .spawn()
         .map_err(|e| io::Error::other(format!("could not spawn index server: {e}")))?;
@@ -900,14 +885,7 @@ fn spawn_server(cfg: &RouterConfig) -> Result<(), String> {
                 .stderr(std::process::Stdio::null());
         }
     }
-    #[cfg(unix)]
-    unsafe {
-        use std::os::unix::process::CommandExt;
-        cmd.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
-    }
+    crate::process::detach_command(&mut cmd);
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("could not spawn index server: {e}"))?;
@@ -1346,30 +1324,19 @@ async fn handle_server_restart_request(method: &hyper::Method) -> Response<RespB
             .clone()
     });
     tokio::task::spawn_blocking(move || {
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        // Spawn a detached helper that waits for the port to free then
-        // launches a new `fog index serve`. `--foreground`: the helper is
-        // already detached via setsid, so the child must block (plain
-        // `serve` would detach itself and double-fork).
+        // Wait for the current server to release the port before relaunching.
+        std::thread::sleep(std::time::Duration::from_millis(700));
+        // Launch a detached `fog index serve --foreground`: the helper blocks
+        // (plain `serve` would detach itself and double-fork).
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("fog"));
-        let mut cmd = std::process::Command::new("sh");
-        cmd.arg("-c").arg(format!(
-            "sleep 0.5; exec {} index serve --foreground",
-            exe.display()
-        ));
-        cmd.env("FOG_INDEX_PORT", port.to_string())
+        let mut cmd = std::process::Command::new(&exe);
+        cmd.args(["index", "serve", "--foreground"])
+            .env("FOG_INDEX_PORT", port.to_string())
             .env("FOG_INDEX_NETWORK", &network)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
-        #[cfg(unix)]
-        unsafe {
-            use std::os::unix::process::CommandExt;
-            cmd.pre_exec(|| {
-                libc::setsid();
-                Ok(())
-            });
-        }
+        crate::process::detach_command(&mut cmd);
         let _ = cmd.spawn();
         let _ = std::fs::remove_file(index_pid_path(port));
         std::process::exit(0);
@@ -1423,14 +1390,7 @@ async fn handle_instance_restart_request(
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
-        #[cfg(unix)]
-        unsafe {
-            use std::os::unix::process::CommandExt;
-            cmd.pre_exec(|| {
-                libc::setsid();
-                Ok(())
-            });
-        }
+        crate::process::detach_command(&mut cmd);
         let mut child = cmd.spawn().map_err(|e| format!("could not restart: {e}"))?;
         let new_pid = child.id();
         let new_socket = crate::ipc::socket_path(new_pid);
@@ -2980,8 +2940,6 @@ fn resolve_launch_target(body: &LaunchBody) -> Result<PathBuf, String> {
 /// socket serves a status reply, and returns its PID. Returns `io::Error` on
 /// spawn failure or if the child exits / never becomes ready during startup.
 fn spawn_detached(config_path: &std::path::Path, script: &str) -> io::Result<u32> {
-    use std::os::unix::process::CommandExt;
-
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("fog"));
     let mut cmd = Command::new(&exe);
     cmd.arg("--config")
@@ -2992,13 +2950,8 @@ fn spawn_detached(config_path: &std::path::Path, script: &str) -> io::Result<u32
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     // Detach from the controlling terminal / session, exactly like
-    // `daemonize`'s `pre_exec`.
-    unsafe {
-        cmd.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
-    }
+    // `daemonize`.
+    crate::process::detach_command(&mut cmd);
     let mut child = cmd
         .spawn()
         .map_err(|e| io::Error::other(format!("could not start detached fog: {e}")))?;
@@ -3177,7 +3130,7 @@ async fn serve_fog_logs_stream(pid: u32, service: &str, tail: usize) -> Response
     tokio::spawn(async move {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
         let mut close_rx = close_rx;
-        let Ok(mut sock) = tokio::net::UnixStream::connect(&sock_path).await else {
+        let Ok(mut sock) = crate::ipc::transport::connect_async(&sock_path).await else {
             let _ = tx
                 .send(Ok(Frame::data(Bytes::from(
                     "data: [fog] no such fog instance\n\n",
@@ -3588,11 +3541,7 @@ fn parse_query(query: &str) -> std::collections::HashMap<String, String> {
 }
 
 fn command_exists(name: &str) -> bool {
-    Command::new("sh")
-        .args(["-c", &format!("command -v {name} >/dev/null 2>&1")])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    crate::process::command_exists(name)
 }
 
 #[cfg(test)]
@@ -4410,10 +4359,10 @@ mod tests {
     /// and replies with the given `ControlResponse`-shaped JSON.
     fn spawn_fake_instance(path: &std::path::Path, reply: &str) -> thread::JoinHandle<()> {
         use std::io::{BufRead, Write};
-        let listener = std::os::unix::net::UnixListener::bind(path).unwrap();
+        let listener = crate::ipc::transport::Listener::bind(path).unwrap();
         let reply = reply.to_string();
         thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
+            let mut stream = listener.accept().unwrap();
             let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
             let mut line = String::new();
             reader.read_line(&mut line).unwrap();

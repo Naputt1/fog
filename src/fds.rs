@@ -1,16 +1,32 @@
-//! File descriptor passing over Unix domain sockets (SCM_RIGHTS).
+//! File descriptor passing over local IPC (SCM_RIGHTS on Unix).
 //!
 //! Used to hand a live PTY master fd from one fog instance to another so the
 //! replacing instance can keep reading its output without killing it.
+//!
+//! Windows has no equivalent transfer (ConPTY handles are process-local and
+//! cannot be duplicated), so live-service handoff is Unix-only and the Windows
+//! entry points report [`io::ErrorKind::Unsupported`].
 
 use std::io;
-use std::mem;
-use std::os::unix::io::{AsRawFd, RawFd};
-use std::os::unix::net::UnixStream;
 
+#[cfg(unix)]
+use crate::ipc::transport::Stream;
+
+/// Opaque handoff handle.
+///
+/// On Unix this is a duplicated PTY master file descriptor; on Windows live
+/// handoff is unsupported and it is an uninhabited placeholder.
+#[cfg(unix)]
+pub type Fd = std::os::unix::io::RawFd;
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy)]
+pub struct Fd;
+
+#[cfg(unix)]
 const CMSG_BUF: usize = 64;
 
 /// Byte buffer aligned enough to hold a `cmsghdr` (and any fd payload).
+#[cfg(unix)]
 #[repr(align(8))]
 struct AlignBuf([u8; CMSG_BUF]);
 
@@ -18,7 +34,10 @@ struct AlignBuf([u8; CMSG_BUF]);
 ///
 /// # Errors
 /// Returns an error if the sendmsg call fails.
-pub fn send_fd(stream: &UnixStream, fd: RawFd) -> io::Result<()> {
+#[cfg(unix)]
+pub fn send_fd(stream: &Stream, fd: Fd) -> io::Result<()> {
+    use std::mem;
+    use std::os::unix::io::RawFd;
     let mut cmsg = AlignBuf([0u8; CMSG_BUF]);
     let mut byte = b'X';
     let mut iovec = libc::iovec {
@@ -55,7 +74,10 @@ pub fn send_fd(stream: &UnixStream, fd: RawFd) -> io::Result<()> {
 ///
 /// # Errors
 /// Returns an error if the recvmsg call fails or no fd was received.
-pub fn recv_fd(stream: &UnixStream) -> io::Result<RawFd> {
+#[cfg(unix)]
+pub fn recv_fd(stream: &Stream) -> io::Result<Fd> {
+    use std::mem;
+    use std::os::unix::io::RawFd;
     let mut cmsg = AlignBuf([0u8; CMSG_BUF]);
     let mut byte = 0u8;
     let mut iovec = libc::iovec {
@@ -87,10 +109,48 @@ pub fn recv_fd(stream: &UnixStream) -> io::Result<RawFd> {
     Ok(fd)
 }
 
-#[cfg(test)]
+/// Closes a handoff handle. No-op on Windows.
+///
+/// # Safety
+/// On Unix the caller must own `fd` and not use it afterwards.
+#[cfg(unix)]
+pub fn close(fd: Fd) {
+    // SAFETY: the caller owns the descriptor.
+    unsafe { libc::close(fd) };
+}
+
+/// Closes a handoff handle. No-op on Windows.
+#[cfg(windows)]
+pub fn close(_fd: Fd) {}
+
+/// Live-service handoff via fd passing is unsupported on Windows.
+///
+/// # Errors
+/// Always returns [`io::ErrorKind::Unsupported`].
+#[cfg(windows)]
+pub fn send_fd(_stream: &crate::ipc::transport::Stream, _fd: Fd) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "fd passing is unsupported on Windows",
+    ))
+}
+
+/// Live-service handoff via fd passing is unsupported on Windows.
+///
+/// # Errors
+/// Always returns [`io::ErrorKind::Unsupported`].
+#[cfg(windows)]
+pub fn recv_fd(_stream: &crate::ipc::transport::Stream) -> io::Result<Fd> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "fd passing is unsupported on Windows",
+    ))
+}
+
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use std::os::unix::net::UnixListener;
+    use std::os::unix::net::{UnixListener, UnixStream};
 
     #[test]
     fn test_send_recv_fd_roundtrip() {
@@ -100,10 +160,12 @@ mod tests {
 
         let server = std::thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
+            let stream = crate::ipc::transport::Stream::from_unix(stream);
             recv_fd(&stream).unwrap()
         });
 
         let client = UnixStream::connect(&path).unwrap();
+        let client = crate::ipc::transport::Stream::from_unix(client);
         let fd = unsafe { libc::dup(1) };
         send_fd(&client, fd).unwrap();
 

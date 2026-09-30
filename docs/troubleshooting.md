@@ -78,9 +78,20 @@ Ensure you have a recent Rust toolchain installed:
 rustup update stable
 ```
 
-### The app doesn't start on Windows
+### Windows support
 
-fog currently has platform-specific code only for macOS and Linux (process tree killing). It may not build or run correctly on Windows.
+fog runs on Windows 10 October 2018 (build 17763) or newer, which is required
+for ConPTY. Some features differ from macOS and Linux:
+
+- **Live handoff is unavailable.** Adopting a running service's PTY across
+  instances needs file-descriptor passing, which ConPTY does not support, so
+  owned services are stopped and restarted on a worktree switch. Borrowed
+  resources (`share: true` / `reuse: true` with a passing `health_check`, such
+  as a database) still work as usual.
+- **Wildcard DNS (dnsmasq) is unsupported** and warns on startup, the same as
+  on any non-macOS/Linux host.
+- **The Traefik router requires Docker Desktop**, and its `mkcert` helper
+  expects a `brew`-style install.
 
 ## FAQ
 

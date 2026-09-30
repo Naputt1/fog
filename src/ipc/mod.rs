@@ -31,6 +31,8 @@ pub(crate) use server::{
     send_service_action_with_timeout, service_running, stream_proxy_log, stream_service_log,
     write_log_entry,
 };
+pub mod transport;
+pub use transport::connect_async;
 
 /// Returns the socket path for a given PID: `$TMPDIR/fog-<pid>.sock`.
 pub fn socket_path(pid: u32) -> PathBuf {
@@ -57,7 +59,6 @@ mod tests {
     use std::collections::VecDeque;
     use std::fs::{self};
     use std::io::{BufReader, Read, Seek, SeekFrom, Write};
-    use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::PathBuf;
     use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex};
@@ -102,10 +103,10 @@ mod tests {
 
         let path = std::env::temp_dir().join("fog-test-roundtrip.sock");
         let _ = fs::remove_file(&path);
-        let listener = UnixListener::bind(&path).unwrap();
+        let listener = super::transport::Listener::bind(&path).unwrap();
         let server_state = state.clone();
         let server = thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
+            let stream = listener.accept().unwrap();
             handle_connection(stream, server_state);
         });
 
@@ -131,10 +132,10 @@ mod tests {
         let state = Arc::new(IpcState::new("dev".to_string(), None, None, false));
         let path = std::env::temp_dir().join("fog-test-kill.sock");
         let _ = fs::remove_file(&path);
-        let listener = UnixListener::bind(&path).unwrap();
+        let listener = super::transport::Listener::bind(&path).unwrap();
         let server_state = state.clone();
         let server = thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
+            let stream = listener.accept().unwrap();
             handle_connection(stream, server_state);
         });
 
@@ -154,10 +155,10 @@ mod tests {
         let state = Arc::new(IpcState::new("dev".to_string(), None, None, false));
         let path = std::env::temp_dir().join("fog-test-terminate.sock");
         let _ = fs::remove_file(&path);
-        let listener = UnixListener::bind(&path).unwrap();
+        let listener = super::transport::Listener::bind(&path).unwrap();
         let server_state = state.clone();
         let server = thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
+            let stream = listener.accept().unwrap();
             handle_connection(stream, server_state);
         });
 
@@ -170,6 +171,8 @@ mod tests {
         let _ = fs::remove_file(&path);
     }
 
+    #[cfg(unix)]
+    #[cfg(unix)]
     #[test]
     fn test_reclaim_receives_handoffs() {
         // Build a real PTY master fd to transfer.
@@ -195,10 +198,10 @@ mod tests {
 
         let path = std::env::temp_dir().join("fog-test-reclaim.sock");
         let _ = fs::remove_file(&path);
-        let listener = UnixListener::bind(&path).unwrap();
+        let listener = super::transport::Listener::bind(&path).unwrap();
         let server_state = state.clone();
         let server = thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
+            let stream = listener.accept().unwrap();
             handle_connection(stream, server_state);
         });
 
@@ -225,6 +228,8 @@ mod tests {
         let _ = fs::remove_file(&path);
     }
 
+    #[cfg(unix)]
+    #[cfg(unix)]
     #[test]
     fn test_reclaim_single_winner() {
         // Two concurrent reclaims: exactly one gets the handoff, the other is
@@ -254,7 +259,7 @@ mod tests {
             std::process::id()
         ));
         let _ = fs::remove_file(&path);
-        let listener = UnixListener::bind(&path).unwrap();
+        let listener = super::transport::Listener::bind(&path).unwrap();
 
         let server_state = state.clone();
         let server = thread::spawn(move || {
@@ -292,6 +297,8 @@ mod tests {
         assert_eq!(refusals, 1, "the other reclaim must be refused");
     }
 
+    #[cfg(unix)]
+    #[cfg(unix)]
     #[test]
     fn test_plain_kill_does_not_consume_handoffs() {
         // A plain kill arriving while a handoff is pending must not take the
@@ -318,7 +325,7 @@ mod tests {
         let path =
             std::env::temp_dir().join(format!("fog-test-plain-kill-{}.sock", std::process::id()));
         let _ = fs::remove_file(&path);
-        let listener = UnixListener::bind(&path).unwrap();
+        let listener = super::transport::Listener::bind(&path).unwrap();
         let server_state = state.clone();
         let server = thread::spawn(move || {
             for stream in listener.incoming().flatten() {
@@ -355,10 +362,10 @@ mod tests {
         let state = Arc::new(IpcState::new("dev".to_string(), None, None, false));
         let path = unique("svcaction.sock");
         let _ = fs::remove_file(&path);
-        let listener = UnixListener::bind(&path).unwrap();
+        let listener = super::transport::Listener::bind(&path).unwrap();
         let server_state = state.clone();
         let server = thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
+            let stream = listener.accept().unwrap();
             handle_connection(stream, server_state);
         });
 
@@ -401,10 +408,10 @@ mod tests {
         let state = Arc::new(IpcState::new("dev".to_string(), None, None, false));
         let path = unique("svcaction-timeout.sock");
         let _ = fs::remove_file(&path);
-        let listener = UnixListener::bind(&path).unwrap();
+        let listener = super::transport::Listener::bind(&path).unwrap();
         let server_state = state.clone();
         let server = thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
+            let stream = listener.accept().unwrap();
             handle_connection(stream, server_state);
         });
 
@@ -489,16 +496,16 @@ mod tests {
         let sock = unique("svclog.sock");
         let _ = fs::remove_file(&sock);
 
-        let listener = UnixListener::bind(&sock).unwrap();
+        let listener = super::transport::Listener::bind(&sock).unwrap();
         let dir_clone = dir.clone();
         let state = Arc::new(IpcState::new("dev".to_string(), None, None, false));
         let server_state = state.clone();
         let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
+            let mut stream = listener.accept().unwrap();
             stream_service_log(&mut stream, &server_state, &dir_clone, "web", 2, false);
         });
 
-        let mut client = UnixStream::connect(&sock).unwrap();
+        let mut client = super::transport::connect(&sock).unwrap();
         let mut out = String::new();
         client.read_to_string(&mut out).unwrap();
         server.join().unwrap();
@@ -516,16 +523,16 @@ mod tests {
         let sock = unique("misslog.sock");
         let _ = fs::remove_file(&sock);
 
-        let listener = UnixListener::bind(&sock).unwrap();
+        let listener = super::transport::Listener::bind(&sock).unwrap();
         let dir_clone = dir.clone();
         let state = Arc::new(IpcState::new("dev".to_string(), None, None, false));
         let server_state = state.clone();
         let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
+            let mut stream = listener.accept().unwrap();
             stream_service_log(&mut stream, &server_state, &dir_clone, "web", 5, false);
         });
 
-        let mut client = UnixStream::connect(&sock).unwrap();
+        let mut client = super::transport::connect(&sock).unwrap();
         let mut out = String::new();
         client.read_to_string(&mut out).unwrap();
         server.join().unwrap();
@@ -563,14 +570,14 @@ mod tests {
 
         let sock = unique("proxylog.sock");
         let _ = fs::remove_file(&sock);
-        let listener = UnixListener::bind(&sock).unwrap();
+        let listener = super::transport::Listener::bind(&sock).unwrap();
         let server_state = state.clone();
         let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
+            let mut stream = listener.accept().unwrap();
             stream_proxy_log(&mut stream, &server_state, 10, false);
         });
 
-        let mut client = UnixStream::connect(&sock).unwrap();
+        let mut client = super::transport::connect(&sock).unwrap();
         let mut out = String::new();
         client.read_to_string(&mut out).unwrap();
         server.join().unwrap();
@@ -590,14 +597,14 @@ mod tests {
         let state = Arc::new(IpcState::new("dev".to_string(), None, None, false));
         let sock = unique("logsreq.sock");
         let _ = fs::remove_file(&sock);
-        let listener = UnixListener::bind(&sock).unwrap();
+        let listener = super::transport::Listener::bind(&sock).unwrap();
         let server_state = state.clone();
         let server = thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
+            let stream = listener.accept().unwrap();
             handle_connection(stream, server_state);
         });
 
-        let mut client = UnixStream::connect(&sock).unwrap();
+        let mut client = super::transport::connect(&sock).unwrap();
         client
             .write_all(b"{\"type\":\"logs\",\"service\":\"nonexistent\",\"follow\":false}\n")
             .unwrap();
@@ -628,10 +635,10 @@ mod tests {
 
         let sock = unique("querylogs.sock");
         let _ = fs::remove_file(&sock);
-        let listener = UnixListener::bind(&sock).unwrap();
+        let listener = super::transport::Listener::bind(&sock).unwrap();
         let server_state = state.clone();
         let server = thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
+            let stream = listener.accept().unwrap();
             handle_connection(stream, server_state);
         });
 
@@ -647,10 +654,10 @@ mod tests {
         let state = Arc::new(IpcState::new("dev".to_string(), None, None, false));
         let sock = unique("querylogs-miss.sock");
         let _ = fs::remove_file(&sock);
-        let listener = UnixListener::bind(&sock).unwrap();
+        let listener = super::transport::Listener::bind(&sock).unwrap();
         let server_state = state.clone();
         let server = thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
+            let stream = listener.accept().unwrap();
             handle_connection(stream, server_state);
         });
 

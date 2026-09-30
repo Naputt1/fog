@@ -1,6 +1,6 @@
 use crate::config::{EndpointConfig, HealthCheckConfig, HealthCheckSpec};
-use crate::process;
-use libc::{SIGKILL, SIGTERM};
+use crate::fds::Fd;
+use crate::process::{self, Signal};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize};
 use ratatui::{
     style::{Color, Modifier, Style},
@@ -11,7 +11,6 @@ use std::{
     fs,
     io::{self, Write},
     net::ToSocketAddrs,
-    os::unix::io::RawFd,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -189,15 +188,17 @@ pub struct Terminal {
     /// When a reused service is adopted from another instance, the child PID
     /// to wait on / kill instead of a [`Child`] handle.
     owned_pid: Option<u32>,
-    /// Raw master fd of an adopted PTY (used for resizing).
-    raw_fd: Option<RawFd>,
+    /// Raw master fd of an adopted PTY (used for resizing). Unix-only; always
+    /// `None` on Windows, where live handoff is unsupported.
+    raw_fd: Option<Fd>,
     /// When the reused service was created, for the grace-period auto-start.
     reused_since: Option<Instant>,
     /// How long to wait for a reused resource to become healthy before
     /// starting it ourselves.
     reuse_grace: Duration,
-    /// Write end of the pipe used to stop the reader thread.
-    stop_w: Option<RawFd>,
+    /// Write end of the pipe used to stop the reader thread. Unix-only.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    stop_w: Option<Fd>,
     /// Set when this terminal's live process has been handed to another
     /// instance; `kill_inner` then releases resources without killing.
     handed_off: bool,
@@ -534,7 +535,8 @@ fn borrow_notice(name: &str) -> String {
 
 /// Creates a pipe used to signal a reader thread to stop. Returns
 /// `(read_end, write_end)`.
-fn make_stop_pipe() -> io::Result<(RawFd, RawFd)> {
+#[cfg(unix)]
+fn make_stop_pipe() -> io::Result<(Fd, Fd)> {
     let mut fds = [-1i32, -1];
     let ret = unsafe { libc::pipe(fds.as_mut_ptr()) };
     if ret != 0 {
@@ -551,12 +553,13 @@ fn make_stop_pipe() -> io::Result<(RawFd, RawFd)> {
 /// detached runs to capture service output to `<log_dir>/<name>.log`).
 ///
 /// The thread owns `fd`, `stop`, and `tee` and closes them on exit.
+#[cfg(unix)]
 fn spawn_reader(
     parser: Arc<Mutex<vt100::Parser>>,
     generation: Arc<AtomicUsize>,
     raw_output: Arc<Mutex<std::collections::VecDeque<Vec<u8>>>>,
-    fd: RawFd,
-    stop: RawFd,
+    fd: Fd,
+    stop: Fd,
     mut tee: Option<fs::File>,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
@@ -614,6 +617,76 @@ fn spawn_reader(
     })
 }
 
+/// Spawns a thread that reads PTY output from a portable-pty reader and feeds
+/// the parser, until the PTY reaches EOF or the master is closed.
+///
+/// Windows uses ConPTY, whose output handle cannot be polled alongside a stop
+/// pipe, so there is no explicit cancellation: dropping the master (which
+/// closes the pseudoconsole) ends the read. Every teardown path kills the
+/// child and drops the master, so the thread always terminates.
+#[cfg(windows)]
+fn spawn_reader_pty(
+    parser: Arc<Mutex<vt100::Parser>>,
+    generation: Arc<AtomicUsize>,
+    raw_output: Arc<Mutex<std::collections::VecDeque<Vec<u8>>>>,
+    mut reader: Box<dyn std::io::Read + Send>,
+    mut tee: Option<fs::File>,
+) -> JoinHandle<()> {
+    thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if let Ok(mut p) = parser.lock() {
+                        p.process(&buf[..n]);
+                    }
+                    generation.fetch_add(1, Ordering::Relaxed);
+                    {
+                        let mut q = raw_output.lock().expect("mutex poisoned");
+                        if q.len() >= 500 {
+                            q.pop_front();
+                        }
+                        q.push_back(buf[..n].to_vec());
+                    }
+                    if let Some(file) = tee.as_mut() {
+                        let _ = file.write_all(&buf[..n]);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    })
+}
+
+/// Returns the user's shell, or a sensible platform default.
+pub(crate) fn default_shell() -> String {
+    #[cfg(unix)]
+    {
+        std::env::var("SHELL").unwrap_or_else(|_| "bash".to_string())
+    }
+    #[cfg(windows)]
+    {
+        std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string())
+    }
+}
+
+/// Builds a `Command` that runs `cmd` through the platform shell.
+fn shell_command(cmd: &str) -> std::process::Command {
+    #[cfg(unix)]
+    {
+        let mut c = std::process::Command::new("sh");
+        c.args(["-c", cmd]);
+        c
+    }
+    #[cfg(windows)]
+    {
+        let mut c = std::process::Command::new(default_shell());
+        c.args(["/C", cmd]);
+        c
+    }
+}
+
 /// Polls `waitpid(pid, WNOHANG)` until the child is reaped or `timeout` elapses.
 ///
 /// Returns `true` if the child was reaped, `false` if it was still running (or
@@ -639,10 +712,12 @@ fn wait_reaped(pid: u32, timeout: Duration) -> bool {
 
 /// A write-only wrapper around a raw fd (e.g. a PTY master received from
 /// another instance). Owns the fd and closes it on drop.
+#[cfg(unix)]
 struct FdWriter {
-    fd: RawFd,
+    fd: Fd,
 }
 
+#[cfg(unix)]
 impl Write for FdWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         // SAFETY: fd is a valid, owned descriptor opened for writing.
@@ -659,6 +734,7 @@ impl Write for FdWriter {
     }
 }
 
+#[cfg(unix)]
 impl Drop for FdWriter {
     fn drop(&mut self) {
         // SAFETY: this struct owns the fd.
@@ -689,7 +765,7 @@ impl Terminal {
             .openpty(size)
             .map_err(|e| io::Error::other(e.to_string()))?;
 
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "bash".to_string());
+        let shell = default_shell();
         let cmd = CommandBuilder::new(shell);
         let child = pair
             .slave
@@ -701,28 +777,48 @@ impl Terminal {
             .take_writer()
             .map_err(|e| io::Error::other(e.to_string()))?;
 
-        let master_fd = pair
-            .master
-            .as_raw_fd()
-            .ok_or_else(|| io::Error::other("pty master has no fd"))?;
-        let (stop_r, stop_w) = make_stop_pipe()?;
-        // SAFETY: dup creates a new independent descriptor for the thread.
-        let reader_fd = unsafe { libc::dup(master_fd) };
-        if reader_fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-
         let parser = Arc::new(Mutex::new(vt100::Parser::new(24, 80, scrollback)));
         let screen_generation = Arc::new(AtomicUsize::new(0));
         let raw_output = Arc::new(Mutex::new(std::collections::VecDeque::new()));
-        let handler = spawn_reader(
-            parser.clone(),
-            screen_generation.clone(),
-            raw_output.clone(),
-            reader_fd,
-            stop_r,
-            None,
-        );
+
+        #[cfg(unix)]
+        let (handler, stop_w) = {
+            let master_fd = pair
+                .master
+                .as_raw_fd()
+                .ok_or_else(|| io::Error::other("pty master has no fd"))?;
+            let (stop_r, stop_w) = make_stop_pipe()?;
+            // SAFETY: dup creates a new independent descriptor for the thread.
+            let reader_fd = unsafe { libc::dup(master_fd) };
+            if reader_fd < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let handler = spawn_reader(
+                parser.clone(),
+                screen_generation.clone(),
+                raw_output.clone(),
+                reader_fd,
+                stop_r,
+                None,
+            );
+            (Some(handler), Some(stop_w))
+        };
+
+        #[cfg(windows)]
+        let (handler, stop_w) = {
+            let reader = pair
+                .master
+                .try_clone_reader()
+                .map_err(|e| io::Error::other(e.to_string()))?;
+            let handler = spawn_reader_pty(
+                parser.clone(),
+                screen_generation.clone(),
+                raw_output.clone(),
+                reader,
+                None,
+            );
+            (Some(handler), None)
+        };
 
         Ok(Self {
             init: Init::Shell,
@@ -746,7 +842,7 @@ impl Terminal {
             reused_since: None,
             reuse_grace: DEFAULT_REUSE_GRACE,
             endpoints: Vec::new(),
-            stop_w: Some(stop_w),
+            stop_w,
             handed_off: false,
             child_reaped: false,
             parser,
@@ -755,7 +851,7 @@ impl Terminal {
             screen_generation: Arc::new(AtomicUsize::new(0)),
             line_cache: RefCell::new(None),
             raw_output,
-            handler: Some(handler),
+            handler,
             writer: Some(writer),
             child: Some(child),
             master: Some(pair.master),
@@ -1026,12 +1122,13 @@ impl Terminal {
     /// * `pid` - The process group leader of the running service.
     /// * `log_dir` - If set, raw PTY output is teed into
     ///   `<log_dir>/<name>.log` while the service runs.
+    #[cfg(unix)]
     pub fn adopt(
         path: String,
         cmd: String,
         name: String,
         scrollback: usize,
-        fd: RawFd,
+        fd: Fd,
         pid: u32,
         log_dir: Option<std::path::PathBuf>,
     ) -> Self {
@@ -1117,6 +1214,27 @@ impl Terminal {
         }
     }
 
+    /// Adopts a live PTY handed over from another fog instance.
+    ///
+    /// Live handoff is unsupported on Windows (ConPTY handles cannot be
+    /// transferred), so no handoffs are ever produced and this is never
+    /// reached. It falls back to a borrowed-reuse placeholder for
+    /// completeness.
+    #[cfg(windows)]
+    pub fn adopt(
+        path: String,
+        cmd: String,
+        name: String,
+        scrollback: usize,
+        _fd: Fd,
+        _pid: u32,
+        log_dir: Option<std::path::PathBuf>,
+    ) -> Self {
+        let mut t = Self::spawn_reused(name, path, cmd, scrollback);
+        t.log_dir = log_dir;
+        t
+    }
+
     /// Marks this terminal as handed over to a successor without transferring
     /// a live process. Used for borrowed reuse services during in-place
     /// worktree switches: `Drop` then neither kills the resource nor runs its
@@ -1130,6 +1248,7 @@ impl Terminal {
     /// Dups the PTY master fd and stops this terminal's reader so output is
     /// not consumed after handoff. Returns `None` if there is no live process
     /// to hand over.
+    #[cfg(unix)]
     pub fn extract_handoff(&mut self) -> Option<crate::ipc::HandoffItem> {
         let pid = if let Some(pid) = self.owned_pid {
             pid
@@ -1171,6 +1290,15 @@ impl Terminal {
             pid,
             fd: dup_fd,
         })
+    }
+
+    /// Extracts this terminal's live process for transfer to another instance.
+    ///
+    /// Live handoff is unsupported on Windows, so this always returns `None`,
+    /// causing the successor instance to start the service fresh.
+    #[cfg(windows)]
+    pub fn extract_handoff(&mut self) -> Option<crate::ipc::HandoffItem> {
+        None
     }
 
     /// Starts a command in this terminal, upgrading it from a pending state.
@@ -1218,7 +1346,7 @@ impl Terminal {
             .openpty(size)
             .map_err(|e| io::Error::other(e.to_string()))?;
 
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "bash".to_string());
+        let shell = default_shell();
         let mut cmd_builder = CommandBuilder::new(&shell);
         cmd_builder.cwd(path);
         if let Some(branch) = &self.branch {
@@ -1242,17 +1370,6 @@ impl Terminal {
             .take_writer()
             .map_err(|e| io::Error::other(e.to_string()))?;
 
-        let master_fd = pair
-            .master
-            .as_raw_fd()
-            .ok_or_else(|| io::Error::other("pty master has no fd"))?;
-        let (stop_r, stop_w) = make_stop_pipe()?;
-        // SAFETY: dup creates a new independent descriptor for the thread.
-        let reader_fd = unsafe { libc::dup(master_fd) };
-        if reader_fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-
         let _ = writeln!(writer, "{}", cmd);
 
         let tee = self
@@ -1269,15 +1386,45 @@ impl Terminal {
         self.screen_generation.store(0, Ordering::Relaxed);
         let raw_output = Arc::new(Mutex::new(std::collections::VecDeque::new()));
         self.raw_output = raw_output.clone();
-        self.handler = Some(spawn_reader(
-            self.parser.clone(),
-            self.screen_generation.clone(),
-            raw_output,
-            reader_fd,
-            stop_r,
-            tee,
-        ));
-        self.stop_w = Some(stop_w);
+
+        #[cfg(unix)]
+        {
+            let master_fd = pair
+                .master
+                .as_raw_fd()
+                .ok_or_else(|| io::Error::other("pty master has no fd"))?;
+            let (stop_r, stop_w) = make_stop_pipe()?;
+            // SAFETY: dup creates a new independent descriptor for the thread.
+            let reader_fd = unsafe { libc::dup(master_fd) };
+            if reader_fd < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            self.handler = Some(spawn_reader(
+                self.parser.clone(),
+                self.screen_generation.clone(),
+                raw_output,
+                reader_fd,
+                stop_r,
+                tee,
+            ));
+            self.stop_w = Some(stop_w);
+        }
+
+        #[cfg(windows)]
+        {
+            let reader = pair
+                .master
+                .try_clone_reader()
+                .map_err(|e| io::Error::other(e.to_string()))?;
+            self.handler = Some(spawn_reader_pty(
+                self.parser.clone(),
+                self.screen_generation.clone(),
+                raw_output,
+                reader,
+                tee,
+            ));
+        }
+
         self.writer = Some(writer);
         self.child = Some(child);
         self.child_reaped = false;
@@ -1470,6 +1617,7 @@ impl Terminal {
         // minimums (also avoids PTY ioctls that would fail).
         let rows = rows.max(1);
         let cols = cols.max(1);
+        #[cfg(unix)]
         if let Some(fd) = self.raw_fd {
             // Adopted PTY: resize directly via ioctl.
             // SAFETY: ws is a valid, fully-initialized winsize struct.
@@ -1507,6 +1655,7 @@ impl Terminal {
 
     fn kill_inner(&mut self) {
         // Signal the reader thread to stop reading so it releases its fd.
+        #[cfg(unix)]
         if let Some(stop) = self.stop_w.take() {
             // SAFETY: stop is a valid pipe write end owned by this terminal.
             unsafe {
@@ -1538,10 +1687,10 @@ impl Terminal {
                 // grandchildren in their own pgid (shell job control) survive
                 // kill(-pgid), and orphans reparent once the leader exits, so
                 // a post-mortem scan finds nothing.
-                process::signal_tree(pid, SIGTERM);
+                process::signal_tree(pid, Signal::Term);
                 thread::sleep(Duration::from_millis(500));
                 if process::is_pid_alive(pid) {
-                    process::signal_tree(pid, SIGKILL);
+                    process::signal_tree(pid, Signal::Kill);
                 }
                 process::kill_descendants(pid);
             }
@@ -1554,11 +1703,11 @@ impl Terminal {
             && let Some(ref child) = self.child
             && let Some(pid) = child.process_id()
         {
-            process::signal_tree(pid, SIGTERM);
+            process::signal_tree(pid, Signal::Term);
             thread::sleep(Duration::from_millis(500));
             match process::waitpid_nohang(pid) {
                 Ok(Some(_)) => self.child_reaped = true,
-                Ok(None) => process::signal_tree(pid, SIGKILL),
+                Ok(None) => process::signal_tree(pid, Signal::Kill),
                 Err(_) => self.child_reaped = true,
             }
             process::kill_descendants(pid);
@@ -1576,22 +1725,26 @@ impl Terminal {
             if let Some(pid) = pid
                 && !wait_reaped(pid, Duration::from_secs(2))
             {
-                process::signal_tree(pid, SIGKILL);
+                process::signal_tree(pid, Signal::Kill);
             }
         }
 
+        #[cfg(unix)]
         if let Some(fd) = self.raw_fd {
             // SAFETY: fd was received via SCM_RIGHTS and is owned by us.
             unsafe { libc::close(fd) };
             self.raw_fd = None;
         }
 
+        // Drop the PTY before joining the reader: on Windows the reader blocks
+        // on a ConPTY read until the pseudoconsole is closed.
+        self.master = None;
+        self.writer = None;
+
         if let Some(handler) = self.handler.take() {
             let _ = handler.join();
         }
 
-        self.master = None;
-        self.writer = None;
         self.process_running = false;
     }
 
@@ -1759,8 +1912,8 @@ impl Terminal {
         {
             self.owned_pid = None;
             if let Some(fd) = self.raw_fd.take() {
-                // SAFETY: fd was received via SCM_RIGHTS and is owned by us.
-                unsafe { libc::close(fd) };
+                // The handle was received via SCM_RIGHTS and is owned by us.
+                crate::fds::close(fd);
             }
             self.process_running = false;
         }
@@ -1888,9 +2041,8 @@ impl Terminal {
             Init::Command { path, .. } if !path.is_empty() => Some(path.as_str()),
             _ => None,
         };
-        let mut cmd = std::process::Command::new("sh");
-        cmd.args(["-c", shutdown_cmd])
-            .stdin(std::process::Stdio::null())
+        let mut cmd = shell_command(shutdown_cmd);
+        cmd.stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
         if let Some(branch) = &self.branch {
@@ -1942,7 +2094,7 @@ impl Terminal {
         let pid = child.id();
         let exited = wait_reaped(pid, timeout);
         if !exited {
-            process::signal_tree(pid, SIGKILL);
+            process::signal_tree(pid, Signal::Kill);
             wait_reaped(pid, Duration::from_secs(2));
         }
         exited
@@ -1999,6 +2151,7 @@ impl Drop for Terminal {
 mod tests {
     use super::*;
     use ratatui::style::{Color, Modifier};
+    #[cfg(unix)]
     static DOCKER_STUB_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
@@ -2029,6 +2182,7 @@ mod tests {
         assert_eq!(statuses[0].health, "unknown");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_stop_kills_backgrounded_grandchildren() {
         // Regression test for orphaned listeners: a service that backgrounds
@@ -2317,6 +2471,7 @@ mod tests {
         assert!(!docker_ps_is_healthy("garbage"), "non-JSON must fail");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_check_docker_target_exports_fog_branch() {
         let _lock = DOCKER_STUB_LOCK.lock().unwrap();
@@ -2371,6 +2526,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_check_docker_target_exports_slug_for_slashed_branch() {
         let _lock = DOCKER_STUB_LOCK.lock().unwrap();
@@ -2423,6 +2579,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_adopted_probe_health_runs_immediately() {
         let pty = portable_pty::native_pty_system()
@@ -2480,6 +2637,7 @@ mod tests {
     }
 
     /// Runs `shutdown_cmd` (a `touch`) and waits up to `timeout` for `marker`.
+    #[cfg(unix)]
     fn wait_for_marker(marker: &std::path::Path, timeout: Duration) -> bool {
         let deadline = std::time::Instant::now() + timeout;
         while std::time::Instant::now() < deadline {
@@ -2491,6 +2649,7 @@ mod tests {
         false
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_shutdown_cmd_blocking_waits_for_completion() {
         let marker = std::env::temp_dir().join(format!(
@@ -2527,6 +2686,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_shutdown_cmd_blocking_kills_on_timeout() {
         let mut t = Terminal::spawn_reused("db".into(), ".".into(), "true".into(), 100);
@@ -2544,6 +2704,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_drop_runs_shutdown_cmd_for_reused_without_handoff() {
         let marker = std::env::temp_dir().join(format!(
@@ -2564,6 +2725,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_drop_runs_shutdown_cmd_for_adopted_without_handoff() {
         // A borrowed (adopted) terminal is the reported bug case: it must run
@@ -2606,6 +2768,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_drop_skips_shutdown_cmd_when_handed_off() {
         let marker = std::env::temp_dir().join(format!(
@@ -2629,13 +2792,13 @@ mod tests {
 
     /// Binds a fake live instance socket (`$TMPDIR/fog-<pid>.sock`) that answers
     /// status requests, so it is discovered as a sibling instance.
+    #[cfg(unix)]
     fn spawn_status_instance(
         pid: u32,
         project: &str,
         script: &str,
         branch: Option<&str>,
     ) -> std::path::PathBuf {
-        use std::os::unix::net::UnixListener;
         let state = std::sync::Arc::new(crate::ipc::IpcState::new(
             script.to_string(),
             Some(project.to_string()),
@@ -2644,7 +2807,7 @@ mod tests {
         ));
         let path = std::env::temp_dir().join(format!("fog-{pid}.sock"));
         let _ = fs::remove_file(&path);
-        let listener = UnixListener::bind(&path).unwrap();
+        let listener = crate::ipc::transport::Listener::bind(&path).unwrap();
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { break };
@@ -2654,6 +2817,7 @@ mod tests {
         path
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_drop_tears_down_shared_with_sibling_on_other_branch() {
         // Branch-scoped shared resources (e.g. `red-fox-infra-${FOG_BRANCH}`):
@@ -2682,6 +2846,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_drop_skips_shared_teardown_with_sibling_on_same_branch() {
         let project = format!("fog-test-drop-same-{}", std::process::id());
@@ -2709,6 +2874,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_extract_handoff_live_process() {
         let mut t = Terminal::spawn_command(
@@ -2732,6 +2898,7 @@ mod tests {
         unsafe { libc::close(handoff.fd) };
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_wait_reaped_exited_child() {
         let child = std::process::Command::new("sh")
@@ -2748,6 +2915,7 @@ mod tests {
         drop(child);
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_wait_reaped_still_running_then_killed() {
         let mut child = std::process::Command::new("sh")
@@ -2768,6 +2936,7 @@ mod tests {
         drop(child);
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_adopt_starts_clean_with_header() {
         // Build a live PTY to adopt.
@@ -3044,6 +3213,7 @@ mod tests {
         assert_eq!(layout.last(), Some(&Some((2, 0))));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_log_dir_tees_output_to_file() {
         let dir = std::env::temp_dir().join(format!(
@@ -3090,6 +3260,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_log_file_name_sanitizes_slashes() {
         let dir = std::env::temp_dir().join(format!(

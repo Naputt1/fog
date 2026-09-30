@@ -516,7 +516,7 @@ impl TerminalSession {
             .openpty(size)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
 
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "bash".to_string());
+        let shell = crate::terminal::default_shell();
         let mut cmd = CommandBuilder::new(shell);
         // Pin a stable working directory (the daemon's cwd may be deleted or
         // unrelated to the project) and force a proper TERM so the shell — and

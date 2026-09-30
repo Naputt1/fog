@@ -257,11 +257,7 @@ fn detect_homebrew_prefix() -> Option<PathBuf> {
 }
 
 fn command_exists(name: &str) -> bool {
-    Command::new("sh")
-        .args(["-c", &format!("command -v {name} >/dev/null 2>&1")])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    crate::process::command_exists(name)
 }
 
 /// Reads a file, treating a missing file as empty content. Used by the
