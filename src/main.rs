@@ -2191,6 +2191,7 @@ mod tests {
         assert_eq!(cli.script.as_deref(), Some("dev"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_stop_instance_force_kills_unresponsive_pid() {
         use std::os::unix::process::CommandExt;
