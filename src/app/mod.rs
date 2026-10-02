@@ -1512,7 +1512,13 @@ impl App {
         let instructions = render::draw_instructions(is_proxy, is_shell, in_terminal_input);
 
         let block = Block::bordered()
-            .title_top(Line::from(self.panel_title()).centered())
+            .title_top(
+                Line::from(Span::styled(
+                    self.panel_title(),
+                    Style::default().fg(self.theme.highlight).bold(),
+                ))
+                .centered(),
+            )
             .title_bottom(instructions.centered())
             .border_set(border::THICK);
 
