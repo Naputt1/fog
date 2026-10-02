@@ -29,7 +29,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::{io, time::Duration};
+use std::{
+    io,
+    time::{Duration, Instant},
+};
 
 mod switch;
 use switch::SwitchPopup;
@@ -127,6 +130,16 @@ pub struct App {
     startup_messages: Vec<String>,
     /// Whether the startup-warning overlay is currently visible.
     show_startup_popup: bool,
+    /// Set when something happened that requires the next frame to be drawn
+    /// (input, health change, config reload, IPC control, resize).
+    force_redraw: bool,
+    /// Visible terminal's screen generation at the last draw.
+    last_drawn_gen: usize,
+    /// Proxy request-log fingerprint at the last draw.
+    last_drawn_proxy_fp: (usize, u64),
+    /// When a frame was last drawn, bounding how long a missed invalidation can
+    /// leave the UI stale.
+    last_draw: Instant,
 }
 
 /// Options for creating an `App` without `clippy::too_many_arguments`.
@@ -264,6 +277,10 @@ impl App {
             verbose,
             startup_messages,
             show_startup_popup,
+            force_redraw: true,
+            last_drawn_gen: 0,
+            last_drawn_proxy_fp: (0, 0),
+            last_draw: Instant::now(),
         }
     }
 
@@ -350,9 +367,21 @@ impl App {
         });
         drop(event_tx);
 
+        // How long to block waiting for input before running periodic work.
+        const TICK_INTERVAL: Duration = Duration::from_millis(50);
+        // How often to refresh process liveness and the IPC snapshot. Drawing
+        // is decoupled from this: it happens only when something changed.
+        const REFRESH_INTERVAL: Duration = Duration::from_millis(500);
+
+        self.refresh_runtime_state();
+        self.force_redraw = true;
+        let mut last_refresh = Instant::now();
+        let mut refresh_now = false;
+
         while !self.exit {
             if self.config_rx.try_recv().is_ok() {
                 self.reload_config();
+                self.force_redraw = true;
             }
             if (self.sigint.load(Ordering::SeqCst)
                 || self.ipc_state.kill_flag.load(Ordering::SeqCst))
@@ -366,15 +395,34 @@ impl App {
                     self.errors.push(format!("auto-start error: {}", e));
                 }
             }
-            terminal.draw(|frame| self.draw(frame))?;
-            match event_rx.recv_timeout(Duration::from_millis(50)) {
-                Ok(AppEvent::Input(ev)) => self.handle_event(ev)?,
-                Ok(AppEvent::Health) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            if refresh_now || last_refresh.elapsed() >= REFRESH_INTERVAL {
+                if self.refresh_runtime_state() {
+                    self.force_redraw = true;
+                }
+                last_refresh = Instant::now();
+                refresh_now = false;
+            }
+            // Redraw only when something actually changed; idle ticks do no work.
+            if self.needs_redraw() {
+                terminal.draw(|frame| self.draw(frame))?;
+                self.record_drawn();
+            }
+            match event_rx.recv_timeout(TICK_INTERVAL) {
+                Ok(AppEvent::Input(ev)) => {
+                    self.handle_event(ev)?;
+                    self.force_redraw = true;
+                }
+                Ok(AppEvent::Health) => {
+                    refresh_now = true;
+                    self.force_redraw = true;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             }
             // Drain any queued input without blocking so bursts stay responsive.
             while let Ok(AppEvent::Input(ev)) = event_rx.try_recv() {
                 self.handle_event(ev)?;
+                self.force_redraw = true;
             }
             self.handle_auto_scroll();
         }
@@ -439,7 +487,13 @@ impl App {
     /// IPC socket, so `fog ls` / `fog kill` / `fog logs` behave exactly as
     /// with the TUI, but nothing is drawn and the loop never blocks on input.
     pub fn run_headless(&mut self) -> io::Result<()> {
+        // How long to block waiting for a health ping before polling signals
+        // and IPC. Liveness and the IPC snapshot refresh on a slower cadence.
+        const TICK_INTERVAL: Duration = Duration::from_millis(50);
+        const REFRESH_INTERVAL: Duration = Duration::from_millis(500);
+
         let health_rx = crate::terminal::health_signal().subscribe();
+        let mut last_refresh: Option<Instant> = None;
         while !self.exit {
             if (self.sigint.load(Ordering::SeqCst)
                 || self.ipc_state.kill_flag.load(Ordering::SeqCst))
@@ -453,14 +507,15 @@ impl App {
                     self.errors.push(format!("auto-start error: {}", e));
                 }
             }
-            self.check_pending();
-            for item in &mut self.items {
-                item.refresh_status();
-            }
-            self.update_shared_state();
             // Wake immediately when a dependency becomes ready; the timeout
             // still services signals, IPC and config changes.
-            let _ = health_rx.recv_timeout(Duration::from_millis(50));
+            let health_woke = health_rx.recv_timeout(TICK_INTERVAL).is_ok();
+            if health_woke
+                || last_refresh.map_or(true, |t| t.elapsed() >= REFRESH_INTERVAL)
+            {
+                self.refresh_runtime_state();
+                last_refresh = Some(Instant::now());
+            }
         }
         self.clear_reuse_skip_shutdown_cmds();
         if !self.errors.is_empty() {
@@ -1442,61 +1497,6 @@ impl App {
             }
         }
 
-        self.check_pending();
-
-        let proxy_offset = usize::from(self.proxy_tab_index.is_some());
-        for (i, item) in self.items.iter_mut().enumerate() {
-            item.refresh_status();
-            if let Some(entry) = self.tabs.entries.get_mut(i + proxy_offset) {
-                entry.stopped = item.stopped;
-                entry.process_running = item.process_running;
-                entry.pending = item.get_health_status() == HealthStatus::Pending;
-                entry.health_status = item.get_health_status();
-            }
-        }
-
-        self.update_shared_state();
-
-        if let Some(ref mut p) = self.proxy
-            && let Some(entry) = self
-                .tabs
-                .entries
-                .iter_mut()
-                .find(|e| e.kind == TabKind::Proxy)
-        {
-            entry.stopped = !p.is_running();
-        }
-
-        // Propagate unhealthy status through dependency chains
-        let n = self.items.len();
-        for _ in 0..n {
-            let mut changed = false;
-            for i in 0..n {
-                let deps = &self.items[i].dep_names;
-                if deps.is_empty() {
-                    continue;
-                }
-                let dep_unhealthy = deps.iter().any(|dep| {
-                    self.tabs
-                        .entries
-                        .iter()
-                        .find(|e| e.name == *dep)
-                        .map(|e| e.health_status == HealthStatus::Unhealthy)
-                        .unwrap_or(false)
-                });
-                if dep_unhealthy
-                    && let Some(entry) = self.tabs.entries.get_mut(i + proxy_offset)
-                    && entry.health_status != HealthStatus::Unhealthy
-                {
-                    entry.health_status = HealthStatus::Unhealthy;
-                    changed = true;
-                }
-            }
-            if !changed {
-                break;
-            }
-        }
-
         self.tabs.draw(frame, sidebar_area, &self.theme);
 
         self.content_area = content_area;
@@ -1733,6 +1733,131 @@ impl App {
         }
     }
 
+    /// Refreshes process liveness, tab status, and the IPC snapshot. Runs on a
+    /// slow cadence (and on health changes) instead of every frame.
+    ///
+    /// Returns `true` when a visible status changed, so the caller can redraw.
+    fn refresh_runtime_state(&mut self) -> bool {
+        self.check_pending();
+
+        let mut changed = false;
+        let proxy_offset = usize::from(self.proxy_tab_index.is_some());
+        for (i, item) in self.items.iter_mut().enumerate() {
+            item.refresh_status();
+            if let Some(entry) = self.tabs.entries.get_mut(i + proxy_offset) {
+                let health = item.get_health_status();
+                let pending = health == HealthStatus::Pending;
+                if entry.stopped != item.stopped
+                    || entry.process_running != item.process_running
+                    || entry.pending != pending
+                    || entry.health_status != health
+                {
+                    changed = true;
+                }
+                entry.stopped = item.stopped;
+                entry.process_running = item.process_running;
+                entry.pending = pending;
+                entry.health_status = health;
+            }
+        }
+
+        self.update_shared_state();
+
+        if let Some(ref p) = self.proxy
+            && let Some(entry) = self
+                .tabs
+                .entries
+                .iter_mut()
+                .find(|e| e.kind == TabKind::Proxy)
+            && entry.stopped != !p.is_running()
+        {
+            entry.stopped = !p.is_running();
+            changed = true;
+        }
+
+        // Propagate unhealthy status through dependency chains.
+        let n = self.items.len();
+        for _ in 0..n {
+            let mut round_changed = false;
+            for i in 0..n {
+                let deps = &self.items[i].dep_names;
+                if deps.is_empty() {
+                    continue;
+                }
+                let dep_unhealthy = deps.iter().any(|dep| {
+                    self.tabs
+                        .entries
+                        .iter()
+                        .find(|e| e.name == *dep)
+                        .map(|e| e.health_status == HealthStatus::Unhealthy)
+                        .unwrap_or(false)
+                });
+                if dep_unhealthy
+                    && let Some(entry) = self.tabs.entries.get_mut(i + proxy_offset)
+                    && entry.health_status != HealthStatus::Unhealthy
+                {
+                    entry.health_status = HealthStatus::Unhealthy;
+                    round_changed = true;
+                    changed = true;
+                }
+            }
+            if !round_changed {
+                break;
+            }
+        }
+
+        changed
+    }
+
+    /// Returns `true` when the visible content changed since the last frame.
+    fn visible_content_changed(&self) -> bool {
+        if self.is_proxy_tab() {
+            let fp = self
+                .proxy
+                .as_ref()
+                .map(|p| p.log_fingerprint())
+                .unwrap_or((0, 0));
+            return fp != self.last_drawn_proxy_fp;
+        }
+        let generation = self
+            .service_tab_index()
+            .and_then(|i| self.items.get(i))
+            .map(|t| t.screen_generation())
+            .unwrap_or(0);
+        generation != self.last_drawn_gen
+    }
+
+    /// Returns `true` when a frame should be drawn. Idle ticks do no work: every
+    /// event that changes the visible state sets `force_redraw`, and new output
+    /// is detected from the content generation.
+    fn needs_redraw(&self) -> bool {
+        self.force_redraw
+            || self.auto_scrolling.is_some()
+            || self.visible_content_changed()
+            // The worktree popup is the only transient overlay whose contents
+            // can outlive a key press; keep it fresh without repainting an idle
+            // screen.
+            || (self.switch_popup.is_some()
+                && self.last_draw.elapsed() >= Duration::from_millis(500))
+    }
+
+    /// Records that a frame was drawn, clearing the dirty flag and capturing the
+    /// content generation so the next tick can detect new output.
+    fn record_drawn(&mut self) {
+        self.force_redraw = false;
+        self.last_draw = Instant::now();
+        self.last_drawn_gen = self
+            .service_tab_index()
+            .and_then(|i| self.items.get(i))
+            .map(|t| t.screen_generation())
+            .unwrap_or(0);
+        self.last_drawn_proxy_fp = self
+            .proxy
+            .as_ref()
+            .map(|p| p.log_fingerprint())
+            .unwrap_or((0, 0));
+    }
+
     fn update_shared_state(&self) {
         let mut services = self.ipc_state.services.lock().expect("mutex poisoned");
         services.clear();
@@ -1787,6 +1912,7 @@ impl App {
         let Some(req) = req else {
             return;
         };
+        self.force_redraw = true;
         let resp = self.execute_service_action(&req);
         *self
             .ipc_state
@@ -2046,6 +2172,10 @@ mod tests {
             verbose: false,
             startup_messages: vec![],
             show_startup_popup: false,
+            force_redraw: true,
+            last_drawn_gen: 0,
+            last_drawn_proxy_fp: (0, 0),
+            last_draw: Instant::now(),
         }
     }
 

@@ -1447,6 +1447,14 @@ impl Terminal {
         }
     }
 
+    /// Monotonic counter bumped whenever the parser processes new output.
+    ///
+    /// The app loop compares this against the generation captured at the last
+    /// draw to detect new terminal output without polling the parser.
+    pub fn screen_generation(&self) -> usize {
+        self.screen_generation.load(Ordering::Relaxed)
+    }
+
     /// Returns the total number of lines in both scrollback and visible area.
     pub fn total_lines(&self) -> usize {
         let mut parser = self.parser.lock().expect("mutex poisoned");

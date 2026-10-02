@@ -393,6 +393,24 @@ impl ProxyInstance {
         lk.iter().cloned().collect()
     }
 
+    /// Cheap change token for the request log, used by the TUI to decide when a
+    /// repaint is needed without cloning the whole queue every frame.
+    pub fn log_fingerprint(&self) -> (usize, u64) {
+        use std::hash::{Hash, Hasher};
+        let lk = self.logs.lock().expect("mutex poisoned");
+        let last = lk.back().map(|e| {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            e.method.hash(&mut h);
+            e.path.hash(&mut h);
+            e.status.hash(&mut h);
+            e.latency_ms.hash(&mut h);
+            e.upstream.hash(&mut h);
+            e.ws.hash(&mut h);
+            h.finish()
+        });
+        (lk.len(), last.unwrap_or(0))
+    }
+
     /// Returns a clone of the live request-log handle so other threads (e.g.
     /// the IPC server) can tail the proxy log in real time. The handle is
     /// stable across `restart()`: config hot-reloads reuse the same queue.
