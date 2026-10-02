@@ -85,6 +85,7 @@ fog ls [pid]              # List running instances and service status
 fog kill [pid]            # Gracefully shut down a running instance
 fog logs [pid]                  # List services and their status
 fog logs [pid] --service <name> # Print captured output of one service
+fog logs [pid] -s <name> --tail 50  # Last 50 lines (`--head`, `--head -N`, `--tail +N`)
 ```
 
 | Option | Description |
@@ -95,6 +96,8 @@ fog logs [pid] --service <name> # Print captured output of one service
 | `--save-logs` | Save service output to `temp/<name>.txt` on exit |
 | `-v`, `--verbose` | Print informational setup output (DNS, router, index, ports, native routes); warnings always print |
 | `--completions <SHELL>` | Print bash/zsh/fish completions |
+| `--head <N\|-N>` | With `fog logs -s`: keep the first `N` lines, or all but the last `N` with `-N` |
+| `--tail <N\|-N\|+N>` | With `fog logs -s`: keep the last `N` lines, or from line `N` to the end with `+N` |
 
 ### Managing instances
 
@@ -127,7 +130,7 @@ fog logs 1234 -s api        # print the captured output of one service
 fog kill 1234               # gracefully shut it down
 ```
 
-Each detached instance tees every service's raw PTY output into `$TMPDIR/fog-<pid>.logs/<name>.log` (the daemon's own diagnostics go to `daemon.log`). `fog logs <pid>` lists the available services (`daemon` and `proxy` included) with their status; `fog logs <pid> --service <name>` (short `-s`) prints one service's output with ANSI escape sequences stripped. The log files persist after the instance exits. This is separate from `--save-logs`, which on any exit (TUI or detached) writes `temp/<name>.txt` in the project directory.
+Each detached instance tees every service's raw PTY output into `$TMPDIR/fog-<pid>.logs/<name>.log` (the daemon's own diagnostics go to `daemon.log`). `fog logs <pid>` lists the available services (`daemon` and `proxy` included) with their status; `fog logs <pid> --service <name>` (short `-s`) prints one service's output with ANSI escape sequences stripped. Add `--head N`, `--tail N`, or their signed forms (`--head -N`, `--tail -N`, `--tail +N`) to print only part of a long log — `--head 20 --tail 20` prints the first 20 and last 20 lines with a `... N lines omitted ...` marker between them. The log files persist after the instance exits. This is separate from `--save-logs`, which on any exit (TUI or detached) writes `temp/<name>.txt` in the project directory.
 
 ### Agentic concurrent recipe — human + agent on the same branch
 
@@ -157,7 +160,7 @@ fog ls
 # 5678  dev  main  :3001  db:reused  api:healthy
 # ↑ same branch, two proxies, DB borrowed (♻ reusing already-running), per-instance ports via ${ports.api}
 
-fog logs 5678         # tail agent output
+fog logs 5678         # print agent output
 fog kill 5678         # stop just the agent; DB stays while your TUI lives
 ```
 

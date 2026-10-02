@@ -89,7 +89,9 @@ fog ls
 # 5678  dev  main  :3001   db:reused  api:healthy web:running
 # ↑ same branch, two proxies, DB not duplicated
 fog logs 5678          # captured agent output, ANSI stripped
-fog logs 5678 --tail 100  # or SSE via web UI /logs/stream?pid=5678
+fog logs 5678 --tail 100           # last 100 lines
+fog logs 5678 --head 50 --tail 50  # first 50 + last 50, middle elided
+# or SSE via web UI /logs/stream?pid=5678
 ```
 
 `db` with `share:true` was borrowed — first instance owns it, second shows re-used tab. `api`/`web` used `ports:{api:0}` random per-instance + templated `upstream`, so no collision. Last `fog kill` tears DB down; any sibling keeps it alive.

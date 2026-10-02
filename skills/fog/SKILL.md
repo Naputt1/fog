@@ -49,6 +49,8 @@ fog ls                     # every running instance (ignores a pid argument)
 fog logs <pid>             # list that instance's services + status (daemon and proxy included)
 fog logs <pid> -s api      # print one service's captured output, ANSI stripped
 fog logs <pid> -s proxy    # the reverse-proxy request log
+fog logs <pid> -s api --tail 100     # only the last 100 lines (keep output small)
+fog logs <pid> -s api --head 20 --tail 20  # first + last 20, middle elided
 ```
 
 `fog ls` prints one row per instance — `pid script project branch proxy services` — with

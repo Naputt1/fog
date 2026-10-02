@@ -135,6 +135,7 @@ fog kill --all                # every instance from this config (or every instan
 fog kill [pid] --force        # escalate SIGTERM → SIGKILL for a wedged instance
 fog logs [pid]                # list services and their status
 fog logs [pid] -s <name>      # print captured output of one service
+fog logs [pid] -s <name> --tail 50   # last 50 lines (--head 50, --head -50, --tail +51)
 fog index serve|kill|restart  # control the host-global web UI / API server
 ```
 
@@ -148,6 +149,8 @@ fog index serve|kill|restart  # control the host-global web UI / API server
 | `--all` | With `fog kill`/`fog restart`: apply to every matching instance (conflicts with `PID`) |
 | `--force` | With `fog kill`/`fog restart`: escalate to SIGTERM then SIGKILL for a wedged instance |
 | `-s`, `--service <NAME>` | With `fog logs`: show one service instead of listing (`daemon` and `proxy` included) |
+| `--head <N\|-N>` | With `fog logs -s`: keep the first `N` lines, or all but the last `N` with `-N` |
+| `--tail <N\|-N\|+N>` | With `fog logs -s`: keep the last `N` lines, or from line `N` to the end with `+N` |
 | `--save-logs` | Save service output to `temp/<name>.txt` on exit |
 | `-v`, `--verbose` | Print informational setup output (DNS, router, index, ports, native routes); warnings always print |
 | `--completions <SHELL>` | Print bash/zsh/fish completions |

@@ -43,7 +43,10 @@ into every service process.
 - **Only theme and proxy settings hot-reload.** Service add/remove/edit needs
   `fog restart <pid>` (or `fog kill` plus `fog dev -d`).
 - **The proxy is HTTP/1.1 only** — no HTTP/2.
-- **`fog logs` has no `--tail` flag.** Print the captured log and pipe through your own
-  tooling.
+- **`fog logs` slices with `--head`/`--tail`.** `fog logs <pid> -s <name> --tail 100`
+  prints the last 100 lines; `--head N` keeps the first `N`; signed forms follow
+  `head -n`/`tail -n` (`--head -N` drops the last `N`, `--tail +N` starts at line `N`).
+  `--head N --tail M` prints both ends with a `... K lines omitted ...` marker. Both
+  flags require `-s <name>` and reduce how much output you pull into context.
 - **`fog ls` ignores a pid argument** and lists every instance.
 - **`fog kill` with no pid is ambiguous** when multiple local instances exist; pass the pid.

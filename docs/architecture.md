@@ -50,7 +50,7 @@ Input / Health:    dedicated crossterm reader + HealthSignal forwarder → AppEv
 ```
 main.rs
   │
-  ├── Parses CLI args (clap): `fog <script>` | `fog ls` | `fog kill [pid]` | `fog logs [pid] [--service NAME]`; `-d` runs headlessly as a daemon
+  ├── Parses CLI args (clap): `fog <script>` | `fog ls` | `fog kill [pid]` | `fog logs [pid] [--service NAME] [--head N|-N] [--tail N|-N|+N]`; `-d` runs headlessly as a daemon
   ├── Loads config, looks up the named script's services & proxy
   ├── Single-instance scripts only (`"concurrent": false`): acquires a
   │   per-(project, script, branch) owner lock and reclaims any existing

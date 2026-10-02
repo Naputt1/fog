@@ -44,7 +44,7 @@ _fog() {{
         return 0
     fi
 
-    opts="--config --save-logs --branch --detach --service --all --force --port --completions -d -h --help -V --version"
+    opts="--config --save-logs --branch --detach --service --head --tail --all --force --port --completions -d -h --help -V --version"
     if [[ "$prev" == "--service" || "$prev" == "-s" ]]; then
         return 0
     fi
@@ -74,6 +74,8 @@ _fog() {{
         '--branch=[Run in the worktree of a branch]:branch:->branches' \
         '(-d --detach)'{{-d,--detach}}'[Run in the background without the TUI]' \
         '(-s --service)'{{-s,--service}}'[Show logs for one service]:service:' \
+        '--head=[First N lines, or all but last N with -N (fog logs)]:n:' \
+        '--tail=[Last N lines, or from +N to the end (fog logs)]:n:' \
         '--all[Apply to every matching instance (kill/restart)]' \
         '--force[Escalate to SIGTERM/SIGKILL if it does not stop (kill/restart)]' \
         '--port=[Override a top-level ports entry for this run]:port:' \
@@ -104,6 +106,8 @@ complete -c fog -l save-logs -d 'Save service output to temp/ on exit'
 complete -c fog -l branch -d 'Run in the worktree of a branch' -a '({branches})'
 complete -c fog -s d -l detach -d 'Run in the background without the TUI'
 complete -c fog -s s -l service -d 'Show logs for one service (fog logs)'
+complete -c fog -l head -d 'First N lines, or all but last N with -N (fog logs)' -r
+complete -c fog -l tail -d 'Last N lines, or from +N to the end (fog logs)' -r
 complete -c fog -l all -d 'Apply to every matching instance (kill/restart)'
 complete -c fog -l force -d 'Escalate to SIGTERM/SIGKILL if it does not stop (kill/restart)'
 complete -c fog -l port -d 'Override a top-level ports entry for this run (NAME=PORT)' -r
@@ -125,6 +129,8 @@ mod tests {
         assert!(out.contains("git worktree list"));
         assert!(out.contains("--branch"));
         assert!(out.contains("--port"));
+        assert!(out.contains("--head"));
+        assert!(out.contains("--tail"));
         assert!(out.contains("complete -F _fog fog"));
     }
 
@@ -134,6 +140,8 @@ mod tests {
         assert!(out.contains("git worktree list"));
         assert!(out.contains("--branch"));
         assert!(out.contains("--port"));
+        assert!(out.contains("--head"));
+        assert!(out.contains("--tail"));
         assert!(out.contains("compdef _fog fog"));
     }
 
@@ -143,6 +151,8 @@ mod tests {
         assert!(out.contains("git worktree list"));
         assert!(out.contains("-l branch"));
         assert!(out.contains("-l port"));
+        assert!(out.contains("-l head"));
+        assert!(out.contains("-l tail"));
         assert!(out.contains("complete -c fog"));
     }
 }

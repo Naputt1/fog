@@ -8,7 +8,7 @@ use crossterm::terminal::{
 };
 use std::collections::HashMap;
 use std::ffi::OsString;
-use std::io::stdout;
+use std::io::{BufRead, BufReader, stdout};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -40,7 +40,7 @@ const DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(60);
     name = "fog",
     version = env!("CARGO_PKG_VERSION"),
     about = "Terminal-based service orchestrator & reverse-proxy dashboard",
-    after_help = "Built-in commands:\n  fog ls [PID]                    list running instances and service status\n  fog kill [PID|--all]            gracefully shut down a running instance\n  fog kill --force [PID|--all]    forcibly shut down a wedged instance\n  fog restart [PID|--all]         restart a running instance\n  fog logs [PID]                  list services and their status\n  fog logs [PID] --service NAME   print captured output of one service\n  fog index serve [--foreground] [--port N]  run the index server (detached by default)\n  fog index kill                  stop the index server\n  fog index restart               restart the index server\n\nWith no PID, kill/restart/logs target the instance started from the local\nfog.json (same config directory, so the branch is implicit). When several\nlocal instances match, the command lists them: pass an explicit PID, or\n--all (kill/restart) to apply to every local match. Outside a directory\nwith fog.json, --all applies to every running instance.\n\nWhen a kill/restart grace period is not enough (a wedged instance that never\nconsumes its kill flag), --force escalates to SIGTERM then SIGKILL.\n\nRun a script from fog.json:\n  fog <script> [OPTIONS]  (e.g. fog dev)\n\nOverride an allocated port for one run:\n  fog dev --port api=4000       (repeatable; --port web=0 re-randomizes)"
+    after_help = "Built-in commands:\n  fog ls [PID]                    list running instances and service status\n  fog kill [PID|--all]            gracefully shut down a running instance\n  fog kill --force [PID|--all]    forcibly shut down a wedged instance\n  fog restart [PID|--all]         restart a running instance\n  fog logs [PID]                  list services and their status\n  fog logs [PID] --service NAME   print captured output of one service\n  fog logs [PID] -s NAME --tail   limit lines: --head N|-N, --tail N|-N|+N\n  fog index serve [--foreground] [--port N]  run the index server (detached by default)\n  fog index kill                  stop the index server\n  fog index restart               restart the index server\n\nWith no PID, kill/restart/logs target the instance started from the local\nfog.json (same config directory, so the branch is implicit). When several\nlocal instances match, the command lists them: pass an explicit PID, or\n--all (kill/restart) to apply to every local match. Outside a directory\nwith fog.json, --all applies to every running instance.\n\nWhen a kill/restart grace period is not enough (a wedged instance that never\nconsumes its kill flag), --force escalates to SIGTERM then SIGKILL.\n\nRun a script from fog.json:\n  fog <script> [OPTIONS]  (e.g. fog dev)\n\nOverride an allocated port for one run:\n  fog dev --port api=4000       (repeatable; --port web=0 re-randomizes)"
 )]
 struct Cli {
     /// Script to run (e.g. `fog dev`), or a built-in command
@@ -69,6 +69,16 @@ struct Cli {
     /// available service names and their status.
     #[arg(short, long, value_name = "SERVICE")]
     service: Option<String>,
+
+    /// Only used with `fog logs --service`: keep the first `N` lines, or all
+    /// but the last `N` with `-N` (like `head -n`).
+    #[arg(long, value_name = "N", allow_hyphen_values = true, value_parser = parse_head_spec)]
+    head: Option<LineRange>,
+
+    /// Only used with `fog logs --service`: keep the last `N` lines (or
+    /// `-N`), or every line from `N` to the end with `+N` (like `tail -n`).
+    #[arg(long, value_name = "N", allow_hyphen_values = true, value_parser = parse_tail_spec)]
+    tail: Option<LineRange>,
 
     /// Path to the configuration file (or a directory containing `fog.json`).
     /// Defaults to `fog.json`.
@@ -953,18 +963,187 @@ fn log_service_rows(status: &ipc::StatusResponse, daemon_exists: bool) -> Vec<(S
     rows
 }
 
-/// Prints one captured log file as a single `==== <script> (<name>) ====`
-/// section with ANSI escape sequences stripped.
-fn print_log_file(script: &str, name: &str, file: &Path) {
-    println!("==== {} ({}) ====", script, name);
-    match fs::read_to_string(file) {
-        Ok(content) => {
-            print!("{}", strip_ansi(&content));
-            if !content.ends_with('\n') {
-                println!();
+/// A `--head`/`--tail` window in the spirit of `head -n` / `tail -n`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LineRange {
+    /// First `n` lines (`--head N`).
+    First(usize),
+    /// All but the last `n` lines (`--head -N`).
+    ExceptLast(usize),
+    /// Last `n` lines (`--tail N` / `--tail -N`).
+    Last(usize),
+    /// From 1-indexed line `n` to the end (`--tail +N`).
+    From(usize),
+}
+
+/// Parses `--head`: `N` (first N) or `-N` (all but the last N).
+fn parse_head_spec(s: &str) -> Result<LineRange, String> {
+    let (digits, make): (&str, fn(usize) -> LineRange) = match s.strip_prefix('-') {
+        Some(rest) => (rest, LineRange::ExceptLast),
+        None => (s, LineRange::First),
+    };
+    digits
+        .parse::<usize>()
+        .map(make)
+        .map_err(|_| format!("invalid --head value '{s}': expected N or -N"))
+}
+
+/// Parses `--tail`: `N`/`-N` (last N) or `+N` (from line N to the end).
+fn parse_tail_spec(s: &str) -> Result<LineRange, String> {
+    let (digits, make): (&str, fn(usize) -> LineRange) = match s.strip_prefix('+') {
+        Some(rest) => (rest, LineRange::From),
+        None => (s.strip_prefix('-').unwrap_or(s), LineRange::Last),
+    };
+    digits
+        .parse::<usize>()
+        .map(make)
+        .map_err(|_| format!("invalid --tail value '{s}': expected N, -N or +N"))
+}
+
+/// Resolves a window against a file of `total` lines into a half-open
+/// `[start, end)` line index range.
+fn resolve_range(range: LineRange, total: usize) -> (usize, usize) {
+    match range {
+        LineRange::First(n) => (0, n.min(total)),
+        LineRange::ExceptLast(n) => (0, total.saturating_sub(n)),
+        LineRange::Last(n) => (total.saturating_sub(n), total),
+        LineRange::From(n) => (n.saturating_sub(1).min(total), total),
+    }
+}
+
+/// Resolves `--head`/`--tail` into ordered, non-overlapping line segments.
+/// `--head N --tail M` yields the first N and last M lines as two segments
+/// (the caller prints an elision marker between them); overlapping windows
+/// merge into one.
+fn line_segments(
+    head: Option<LineRange>,
+    tail: Option<LineRange>,
+    total: usize,
+) -> Vec<(usize, usize)> {
+    let mut segs: Vec<(usize, usize)> = Vec::new();
+    if let Some(h) = head {
+        segs.push(resolve_range(h, total));
+    }
+    if let Some(t) = tail {
+        segs.push(resolve_range(t, total));
+    }
+    segs.retain(|(start, end)| end > start);
+    segs.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(segs.len());
+    for (start, end) in segs {
+        match merged.last_mut() {
+            Some(last) if start <= last.1 => last.1 = last.1.max(end),
+            _ => merged.push((start, end)),
+        }
+    }
+    merged
+}
+
+/// The marker printed between two disjoint selected segments.
+fn omitted_marker(n: usize) -> String {
+    format!("... {n} lines omitted ...")
+}
+
+/// Applies `head`/`tail` to an in-memory slice of lines (used for the proxy
+/// request log), inserting the elision marker between disjoint segments.
+fn select_lines(lines: &[String], head: Option<LineRange>, tail: Option<LineRange>) -> Vec<String> {
+    let segs = line_segments(head, tail, lines.len());
+    let mut out = Vec::new();
+    for (i, &(start, end)) in segs.iter().enumerate() {
+        if i > 0 {
+            let omitted = start - segs[i - 1].1;
+            if omitted > 0 {
+                out.push(omitted_marker(omitted));
             }
         }
-        Err(e) => eprintln!("error: could not read {}: {e}", file.display()),
+        out.extend_from_slice(&lines[start..end]);
+    }
+    out
+}
+
+/// Counts newline-terminated (or final partial) lines in a log file without
+/// holding it in memory.
+fn count_log_lines(file: &Path) -> io::Result<usize> {
+    let mut reader = BufReader::new(fs::File::open(file)?);
+    let mut buf = Vec::new();
+    let mut count = 0usize;
+    loop {
+        buf.clear();
+        if reader.read_until(b'\n', &mut buf)? == 0 {
+            return Ok(count);
+        }
+        count += 1;
+    }
+}
+
+/// Streams only the selected line segments of a log file, emitting the
+/// elision marker between them. ANSI sequences are stripped and trailing
+/// `\r` removed, matching the whole-file path.
+fn print_log_slice(
+    file: &Path,
+    head: Option<LineRange>,
+    tail: Option<LineRange>,
+) -> io::Result<()> {
+    let total = count_log_lines(file)?;
+    let segs = line_segments(head, tail, total);
+    if segs.is_empty() {
+        return Ok(());
+    }
+    let mut reader = BufReader::new(fs::File::open(file)?);
+    let mut buf = Vec::new();
+    let mut idx = 0usize;
+    for (i, &(start, end)) in segs.iter().enumerate() {
+        while idx < start {
+            buf.clear();
+            if reader.read_until(b'\n', &mut buf)? == 0 {
+                return Ok(());
+            }
+            idx += 1;
+        }
+        if i > 0 {
+            let omitted = start - segs[i - 1].1;
+            if omitted > 0 {
+                println!("{}", omitted_marker(omitted));
+            }
+        }
+        while idx < end {
+            buf.clear();
+            if reader.read_until(b'\n', &mut buf)? == 0 {
+                return Ok(());
+            }
+            let text = String::from_utf8_lossy(&buf);
+            println!("{}", strip_ansi(text.trim_end_matches(['\r', '\n'])));
+            idx += 1;
+        }
+    }
+    Ok(())
+}
+
+/// Prints one captured log file as a single `==== <script> (<name>) ====`
+/// section. With `head`/`tail` set, only the selected line window is printed
+/// (ANSI stripped); otherwise the whole file is printed as before.
+fn print_log_file(
+    script: &str,
+    name: &str,
+    file: &Path,
+    head: Option<LineRange>,
+    tail: Option<LineRange>,
+) {
+    println!("==== {} ({}) ====", script, name);
+    if head.is_none() && tail.is_none() {
+        match fs::read_to_string(file) {
+            Ok(content) => {
+                print!("{}", strip_ansi(&content));
+                if !content.ends_with('\n') {
+                    println!();
+                }
+            }
+            Err(e) => eprintln!("error: could not read {}: {e}", file.display()),
+        }
+        return;
+    }
+    if let Err(e) = print_log_slice(file, head, tail) {
+        eprintln!("error: could not read {}: {e}", file.display());
     }
 }
 
@@ -1002,7 +1181,7 @@ fn print_available_services(target_pid: u32, script: &str, rows: &[(String, Stri
 /// Without `service`, lists the available service names and their status.
 /// With `service`, prints only that service's captured output (`daemon` reads
 /// `daemon.log`; `proxy` streams the live request log over IPC; anything else
-/// reads `<service>.log`).
+/// reads `<service>.log`). `--head`/`--tail` limit which lines are printed.
 fn cmd_logs(pid: Option<u32>, service: Option<String>, cli: &Cli) -> io::Result<()> {
     let instances = ipc::find_instances()?;
 
@@ -1055,11 +1234,23 @@ fn cmd_logs(pid: Option<u32>, service: Option<String>, cli: &Cli) -> io::Result<
     };
 
     if name == "proxy" {
-        match ipc::query_logs(path, "proxy", 10_000) {
+        // The proxy log lives in a bounded in-memory queue; fetch enough to
+        // resolve any window, but let a plain `--tail N` fetch just N.
+        let fetch = match (cli.head, cli.tail) {
+            (None, Some(LineRange::Last(n))) => n.max(1),
+            _ => 10_000,
+        };
+        match ipc::query_logs(path, "proxy", fetch) {
             Ok(lines) => {
                 println!("==== {} (proxy) ====", status.script);
-                for line in lines {
-                    println!("{line}");
+                if cli.head.is_none() && cli.tail.is_none() {
+                    for line in lines {
+                        println!("{line}");
+                    }
+                } else {
+                    for line in select_lines(&lines, cli.head, cli.tail) {
+                        println!("{line}");
+                    }
                 }
             }
             Err(e) => {
@@ -1075,7 +1266,7 @@ fn cmd_logs(pid: Option<u32>, service: Option<String>, cli: &Cli) -> io::Result<
         eprintln!("error: instance {target_pid} has no captured log for service '{name}'");
         std::process::exit(1);
     }
-    print_log_file(&status.script, &name, &file);
+    print_log_file(&status.script, &name, &file, cli.head, cli.tail);
     Ok(())
 }
 
@@ -1743,6 +1934,23 @@ fn main() -> io::Result<()> {
         std::process::exit(1);
     }
 
+    // `--head`/`--tail` only apply to `fog logs`, and only alongside a service
+    // selection (the plain listing is already short).
+    if cli.head.is_some() || cli.tail.is_some() {
+        if cli.script.as_deref() != Some("logs") {
+            eprintln!(
+                "error: --head/--tail only apply to `fog logs` (e.g. `fog logs <pid> -s api --tail 50`)"
+            );
+            std::process::exit(1);
+        }
+        if cli.service.is_none() {
+            eprintln!(
+                "error: --head/--tail require --service (e.g. `fog logs <pid> -s api --tail 50`)"
+            );
+            std::process::exit(1);
+        }
+    }
+
     // `--all` only applies to `fog kill` / `fog restart`, and conflicts with
     // an explicit PID.
     if cli.all {
@@ -2191,6 +2399,17 @@ mod tests {
         assert_eq!(cli.script.as_deref(), Some("dev"));
     }
 
+    #[test]
+    fn test_cli_accepts_logs_head_tail() {
+        let cli = Cli::try_parse_from(["fog", "logs", "-s", "api", "--tail", "50"]).unwrap();
+        assert_eq!(cli.tail, Some(LineRange::Last(50)));
+        // A leading '-' must be accepted as the value, not parsed as a flag.
+        let cli = Cli::try_parse_from(["fog", "logs", "-s", "api", "--head", "-50"]).unwrap();
+        assert_eq!(cli.head, Some(LineRange::ExceptLast(50)));
+        let cli = Cli::try_parse_from(["fog", "logs", "-s", "api", "--tail", "+51"]).unwrap();
+        assert_eq!(cli.tail, Some(LineRange::From(51)));
+    }
+
     #[cfg(unix)]
     #[test]
     fn test_stop_instance_force_kills_unresponsive_pid() {
@@ -2216,5 +2435,94 @@ mod tests {
         assert!(stopped, "force stop must terminate the process");
         reaper.join().expect("reaper thread");
         assert!(!fog::process::is_pid_alive(pid));
+    }
+
+    #[test]
+    fn test_parse_head_spec() {
+        assert_eq!(parse_head_spec("50").unwrap(), LineRange::First(50));
+        assert_eq!(parse_head_spec("-50").unwrap(), LineRange::ExceptLast(50));
+        // A leading '+' is accepted as the plain count.
+        assert_eq!(parse_head_spec("+50").unwrap(), LineRange::First(50));
+        assert!(parse_head_spec("x").is_err());
+    }
+
+    #[test]
+    fn test_parse_tail_spec() {
+        assert_eq!(parse_tail_spec("50").unwrap(), LineRange::Last(50));
+        assert_eq!(parse_tail_spec("-50").unwrap(), LineRange::Last(50));
+        assert_eq!(parse_tail_spec("+51").unwrap(), LineRange::From(51));
+        assert!(parse_tail_spec("x").is_err());
+    }
+
+    #[test]
+    fn test_line_segments_bookends_and_merge() {
+        assert_eq!(
+            line_segments(Some(LineRange::First(5)), Some(LineRange::Last(10)), 100),
+            vec![(0, 5), (90, 100)]
+        );
+        // Overlapping windows merge into the whole file.
+        assert_eq!(
+            line_segments(Some(LineRange::First(60)), Some(LineRange::Last(60)), 100),
+            vec![(0, 100)]
+        );
+        // Touching windows (end == start) merge too.
+        assert_eq!(
+            line_segments(Some(LineRange::First(50)), Some(LineRange::Last(50)), 100),
+            vec![(0, 100)]
+        );
+    }
+
+    #[test]
+    fn test_line_segments_single_and_signed() {
+        assert_eq!(
+            line_segments(Some(LineRange::First(5)), None, 100),
+            vec![(0, 5)]
+        );
+        assert_eq!(
+            line_segments(None, Some(LineRange::From(51)), 100),
+            vec![(50, 100)]
+        );
+        assert_eq!(
+            line_segments(Some(LineRange::ExceptLast(10)), None, 100),
+            vec![(0, 90)]
+        );
+        // Windows larger than the file clamp to everything.
+        assert_eq!(
+            line_segments(Some(LineRange::First(200)), None, 100),
+            vec![(0, 100)]
+        );
+        // A zero window selects nothing.
+        assert_eq!(line_segments(Some(LineRange::First(0)), None, 100), vec![]);
+        assert_eq!(line_segments(None, Some(LineRange::Last(0)), 100), vec![]);
+    }
+
+    #[test]
+    fn test_select_lines_inserts_omission_marker() {
+        let lines: Vec<String> = (1..=100).map(|i| i.to_string()).collect();
+        let got = select_lines(&lines, Some(LineRange::First(2)), Some(LineRange::Last(2)));
+        assert_eq!(got, vec!["1", "2", "... 96 lines omitted ...", "99", "100"]);
+        // No marker for a single window.
+        assert_eq!(
+            select_lines(&lines, Some(LineRange::First(2)), None),
+            vec!["1", "2"]
+        );
+        // Full overlap prints the whole file with no marker.
+        assert_eq!(
+            select_lines(&lines, None, Some(LineRange::Last(100))).len(),
+            100
+        );
+    }
+
+    #[test]
+    fn test_count_log_lines_includes_partial_last_line() {
+        let dir = temp_dir();
+        let file = dir.join("count.log");
+        fs::write(&file, "a\nb\nc").unwrap();
+        assert_eq!(count_log_lines(&file).unwrap(), 3);
+        fs::write(&file, "a\n").unwrap();
+        assert_eq!(count_log_lines(&file).unwrap(), 1);
+        fs::write(&file, "").unwrap();
+        assert_eq!(count_log_lines(&file).unwrap(), 0);
+        let _ = fs::remove_dir_all(&dir);
     }
 }
