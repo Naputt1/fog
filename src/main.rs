@@ -1270,6 +1270,38 @@ fn cmd_logs(pid: Option<u32>, service: Option<String>, cli: &Cli) -> io::Result<
     Ok(())
 }
 
+/// Restores the terminal (raw mode off, alternate screen left, mouse capture
+/// disabled) whenever it is dropped or when setup fails partway, so an early
+/// `?` or panic never leaves the user's terminal in TUI state.
+struct TerminalGuard;
+
+impl TerminalGuard {
+    /// Enters raw mode, then the alternate screen with mouse capture. If the
+    /// escape sequence fails, the terminal is restored before the error is
+    /// returned so a failed setup still leaves it clean.
+    fn enter() -> io::Result<Self> {
+        enable_raw_mode()?;
+        if let Err(e) = execute!(stdout(), EnterAlternateScreen, EnableMouseCapture) {
+            Self::restore();
+            return Err(e);
+        }
+        Ok(Self)
+    }
+
+    /// Best-effort restore, shared by `Drop` and the panic hook. Failures are
+    /// ignored: this runs on paths where there is nothing useful left to do.
+    fn restore() {
+        let _ = disable_raw_mode();
+        let _ = execute!(stdout(), LeaveAlternateScreen, DisableMouseCapture);
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        Self::restore();
+    }
+}
+
 fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
     // A `-d` run executes as a background daemon (re-executed by `main` with
     // `FOG_DAEMON_CHILD` set); the daemon child skips the TUI and runs a
@@ -1390,10 +1422,24 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
     ipc_state.config_dir = Some(config_dir.to_string_lossy().into_owned());
     let ipc_state = Arc::new(ipc_state);
 
+    // Restore the terminal on panic (interactive runs only). Installed before
+    // raw mode is enabled so an early panic during setup still leaves the
+    // terminal usable; the previously installed hook is chained afterwards.
     if !detached {
-        enable_raw_mode()?;
-        execute!(stdout(), EnterAlternateScreen, EnableMouseCapture)?;
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            TerminalGuard::restore();
+            previous_hook(info);
+        }));
     }
+
+    // Held for the rest of the function: an `Err` or panic anywhere from here
+    // through `ratatui::run` drops the guard and restores the terminal.
+    let _terminal_guard = if !detached {
+        Some(TerminalGuard::enter()?)
+    } else {
+        None
+    };
 
     let scrollback = config.max_scrollback.unwrap_or(DEFAULT_SCROLLBACK);
     let sidebar_min = config
