@@ -99,6 +99,7 @@ jobs:
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
         with:
+          shared-key: rust
           cache-on-failure: true
       - name: Check dependencies
         if: runner.os == 'Linux'
