@@ -510,9 +510,7 @@ impl App {
             // Wake immediately when a dependency becomes ready; the timeout
             // still services signals, IPC and config changes.
             let health_woke = health_rx.recv_timeout(TICK_INTERVAL).is_ok();
-            if health_woke
-                || last_refresh.map_or(true, |t| t.elapsed() >= REFRESH_INTERVAL)
-            {
+            if health_woke || last_refresh.is_none_or(|t| t.elapsed() >= REFRESH_INTERVAL) {
                 self.refresh_runtime_state();
                 last_refresh = Some(Instant::now());
             }
