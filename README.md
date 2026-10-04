@@ -19,6 +19,29 @@ fog dev -d
 
 <img src="assets/demo.gif" alt="fog demo" width="800">
 
+## Set up fog with your agent
+
+Paste this into your coding agent (Claude Code, Cursor, OpenCode, …) to install fog and write a `fog.json` for the repo:
+
+```text
+Install fog if it is missing (cargo install fog-tui), then set it up for this repository.
+
+1. Inspect the repo to find the real services and how they start: package.json scripts, docker-compose files,
+   Cargo/Go/Python entrypoints, and the ports each one listens on.
+2. Write a fog.json at the repo root with "$schema" set to
+   https://raw.githubusercontent.com/Naputt1/fog/main/fog.schema.json and a single "dev" script listing one
+   service per process (with a working "path" and "cmd").
+3. Apply fog's conventions: declare per-instance ports as "ports": { "api": 0 } and reference them as
+   ${ports.api}; give a shared database "share": true plus a "health_check" so concurrent instances borrow it;
+   use "depends_on" for start order; and add a "proxy" with routes when the repo serves HTTP.
+4. Validate: run `fog dev -d`, then `fog ls` and `fog logs <pid>`; fix any service that fails to become healthy,
+   then `fog kill <pid>`.
+
+Read https://naputt1.github.io/fog/configuration and https://naputt1.github.io/fog/agentic before writing the config.
+```
+
+This is the same `fog.json` your `fog dev` will run; see the [configuration reference](https://naputt1.github.io/fog/configuration) to edit it by hand.
+
 ## Why fog
 
 AI agents changed how we develop, but dev tooling still assumes one human per environment. fog is worktree-aware and **concurrent by default**: run `main` and `feature-x` side-by-side, or the *same* branch twice — human in the TUI, agent headless — and fog shares healthy services (the DB) while isolating the rest with per-instance ports and `${branch}` templating.
