@@ -1004,6 +1004,62 @@ fn serve_blocking(port: u16, network: String) -> io::Result<()> {
     result
 }
 
+/// Guards state-changing routes against cross-origin "simple" requests.
+///
+/// The embedded server binds loopback only, but a browser on any site the user
+/// visits can still fire a cross-origin `POST` (a CORS "simple" request needs
+/// no preflight) that launches or kills fog instances. A browser attaches
+/// either `Sec-Fetch-Site` or `Origin` to such a request; a non-browser client
+/// such as `curl` sends neither and is allowed, since it is not subject to the
+/// browser's same-origin enforcement.
+fn write_request_allowed(headers: &hyper::HeaderMap) -> bool {
+    if let Some(site) = headers.get("sec-fetch-site").and_then(|v| v.to_str().ok())
+        && site != "same-origin"
+        && site != "none"
+    {
+        return false;
+    }
+    if let Some(origin) = headers
+        .get(hyper::header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+    {
+        if origin.eq_ignore_ascii_case("null") {
+            return false;
+        }
+        let Some((_scheme, origin_authority)) = origin.split_once("://") else {
+            return false;
+        };
+        let Some(host) = headers
+            .get(hyper::header::HOST)
+            .and_then(|v| v.to_str().ok())
+        else {
+            return false;
+        };
+        if crate::terminal_ws::normalize_authority(origin_authority)
+            != crate::terminal_ws::normalize_authority(host)
+        {
+            return false;
+        }
+    }
+    true
+}
+
+/// Defense-in-depth for the two body-parsing routes: a request that carries a
+/// `Content-Type` must declare JSON. A missing header is allowed so non-browser
+/// clients keep working; the origin guard is the primary protection.
+fn json_content_type_allowed(headers: &hyper::HeaderMap) -> bool {
+    match headers
+        .get(hyper::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+    {
+        Some(ct) => ct
+            .trim_start()
+            .to_ascii_lowercase()
+            .starts_with("application/json"),
+        None => true,
+    }
+}
+
 /// Routes embedded-server requests:
 ///   - `/ws/terminal` → the built-in terminal WebSocket gateway (live PTY)
 ///   - `/logs/stream` → SSE stream of a container's `docker logs -f`
@@ -1025,6 +1081,23 @@ async fn serve_index(
 ) -> Result<Response<RespBody>, Infallible> {
     let method = req.method().clone();
     let path = req.uri().path().to_string();
+
+    // State-changing routes are dispatched before the SPA fallback. Loopback
+    // binding alone does not stop a web page the user visits from firing a
+    // cross-origin "simple" POST (no preflight), so reject any write route that
+    // a browser marks as coming from another origin.
+    let is_write_route = parse_action_route(&path).is_some()
+        || parse_kill_route(&path).is_some()
+        || path == "/api/launch"
+        || path == "/api/server/kill"
+        || path == "/api/server/restart"
+        || parse_restart_route(&path).is_some();
+    if is_write_route && !write_request_allowed(req.headers()) {
+        return Ok(api_error(
+            StatusCode::FORBIDDEN,
+            "cross-origin request rejected",
+        ));
+    }
 
     // The terminal gateway is a built-in WebSocket endpoint, so it must be
     // served before any static/API routing. Without this the browser's
@@ -1100,6 +1173,12 @@ async fn serve_index(
     // The action route consumes the request body (and forwards to a blocking
     // IPC call), so handle it before the path-only dispatch below.
     if let Some((pid, name)) = parse_action_route(&path) {
+        if !json_content_type_allowed(req.headers()) {
+            return Ok(api_error(
+                StatusCode::BAD_REQUEST,
+                "unsupported content-type",
+            ));
+        }
         let (_, body) = req.into_parts();
         let bytes = match body.collect().await {
             Ok(collected) => collected.to_bytes(),
@@ -1119,6 +1198,12 @@ async fn serve_index(
     // while waiting for the daemon to become ready, so handle it before the
     // path-only dispatch below.
     if path == "/api/launch" {
+        if !json_content_type_allowed(req.headers()) {
+            return Ok(api_error(
+                StatusCode::BAD_REQUEST,
+                "unsupported content-type",
+            ));
+        }
         let (_, body) = req.into_parts();
         let bytes = match body.collect().await {
             Ok(collected) => collected.to_bytes(),
@@ -3594,6 +3679,100 @@ mod tests {
         assert_eq!(encode_path_segment("red-fox"), "red-fox");
         assert_eq!(encode_path_segment("my project"), "my%20project");
         assert_eq!(encode_path_segment("a/b"), "a%2Fb");
+    }
+
+    fn headers(pairs: &[(&str, &str)]) -> hyper::HeaderMap {
+        let mut h = hyper::HeaderMap::new();
+        for (k, v) in pairs {
+            h.insert(
+                hyper::header::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                hyper::header::HeaderValue::from_str(v).unwrap(),
+            );
+        }
+        h
+    }
+
+    #[test]
+    fn test_write_request_allowed_same_origin() {
+        let h = headers(&[
+            ("origin", "http://127.0.0.1:18080"),
+            ("host", "127.0.0.1:18080"),
+        ]);
+        assert!(write_request_allowed(&h));
+    }
+
+    #[test]
+    fn test_write_request_allowed_cross_origin() {
+        let h = headers(&[
+            ("origin", "http://evil.example"),
+            ("host", "127.0.0.1:18080"),
+        ]);
+        assert!(!write_request_allowed(&h));
+    }
+
+    #[test]
+    fn test_write_request_allowed_null_origin() {
+        let h = headers(&[("origin", "null"), ("host", "127.0.0.1:18080")]);
+        assert!(!write_request_allowed(&h));
+    }
+
+    #[test]
+    fn test_write_request_allowed_no_headers_allows_curl() {
+        assert!(write_request_allowed(&hyper::HeaderMap::new()));
+    }
+
+    #[test]
+    fn test_write_request_allowed_origin_without_host() {
+        let h = headers(&[("origin", "http://127.0.0.1:18080")]);
+        assert!(!write_request_allowed(&h));
+    }
+
+    #[test]
+    fn test_write_request_allowed_default_port_normalized() {
+        let h = headers(&[("origin", "http://127.0.0.1"), ("host", "127.0.0.1:80")]);
+        assert!(write_request_allowed(&h));
+    }
+
+    #[test]
+    fn test_write_request_allowed_sec_fetch_site() {
+        assert!(!write_request_allowed(&headers(&[(
+            "sec-fetch-site",
+            "cross-site",
+        )])));
+        assert!(!write_request_allowed(&headers(&[(
+            "sec-fetch-site",
+            "same-site",
+        )])));
+        assert!(write_request_allowed(&headers(&[(
+            "sec-fetch-site",
+            "same-origin",
+        )])));
+        assert!(write_request_allowed(&headers(&[(
+            "sec-fetch-site",
+            "none",
+        )])));
+    }
+
+    #[test]
+    fn test_json_content_type_allowed() {
+        // Missing Content-Type is allowed (non-browser clients).
+        assert!(json_content_type_allowed(&hyper::HeaderMap::new()));
+        assert!(json_content_type_allowed(&headers(&[(
+            "content-type",
+            "application/json",
+        )])));
+        assert!(json_content_type_allowed(&headers(&[(
+            "content-type",
+            "application/json; charset=utf-8",
+        )])));
+        assert!(!json_content_type_allowed(&headers(&[(
+            "content-type",
+            "text/plain",
+        )])));
+        assert!(!json_content_type_allowed(&headers(&[(
+            "content-type",
+            "application/x-www-form-urlencoded",
+        )])));
     }
 
     #[test]
