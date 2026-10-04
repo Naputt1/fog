@@ -70,42 +70,11 @@ jobs:
   rust:
     needs: changes
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.frontend == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - name: Set up pnpm
-        uses: pnpm/action-setup@v6
-        with:
-          version: 12.8.1
-      - name: Set up Node
-        uses: actions/setup-node@v7
-        with:
-          node-version: 24
-          cache: pnpm
-          cache-dependency-path: ui/pnpm-lock.yaml
-      - name: Install dependencies
-        working-directory: ui
-        run: pnpm install --frozen-lockfile
-      - name: Build frontend (SPA -> ui/dist)
-        working-directory: ui
-        run: pnpm build
-      - name: Cache dependencies
-        uses: Swatinem/rust-cache@v2
-      - name: Check dependencies
-        uses: EmbarkStudios/cargo-deny-action@v2
-      - name: Check formatting
-        run: cargo fmt --check
-      - name: Run clippy
-        run: cargo clippy -- -D warnings
-      - name: Build
-        run: cargo build
-      - name: Run tests
-        run: cargo test
-
-  windows:
-    needs: changes
-    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.frontend == 'true'
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     env:
       # The frontend is built below; skip the release-download path in build.rs.
       FOG_SKIP_SPA_DOWNLOAD: "1"
@@ -129,15 +98,22 @@ jobs:
         run: pnpm build
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: Check dependencies
+        if: runner.os == 'Linux'
+        uses: EmbarkStudios/cargo-deny-action@v2
+      - name: Check formatting
+        if: runner.os == 'Linux'
+        run: cargo fmt --check
       - name: Run clippy
-        run: cargo clippy -- -D warnings
-      - name: Build
-        run: cargo build
+        if: runner.os == 'Linux'
+        run: cargo clippy --all-targets -- -D warnings
       - name: Run tests
         run: cargo test
 
   ci-required:
-    needs: [changes, frontend, rust, windows]
+    needs: [changes, frontend, rust]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -146,12 +122,11 @@ jobs:
           echo "changes=${{ needs.changes.result }}"
           echo "frontend=${{ needs.frontend.result }}"
           echo "rust=${{ needs.rust.result }}"
-          echo "windows=${{ needs.windows.result }}"
           if [ "${{ needs.changes.result }}" != "success" ]; then
             echo "changes job did not succeed"
             exit 1
           fi
-          for result in "${{ needs.frontend.result }}" "${{ needs.rust.result }}" "${{ needs.windows.result }}"; do
+          for result in "${{ needs.frontend.result }}" "${{ needs.rust.result }}"; do
             case "$result" in
               success|skipped) ;;
               *) echo "Required job did not succeed: $result"; exit 1 ;;
