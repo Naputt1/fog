@@ -2034,9 +2034,18 @@ mod tests {
     use super::*;
 
     fn temp_dir() -> PathBuf {
+        // Many tests in this binary call `temp_dir` concurrently. The process
+        // id is shared, and the clock reports two calls made in quick
+        // succession as the same nanosecond, so a per-process counter is what
+        // keeps the paths unique. Without it two tests can share a directory
+        // and one test's cleanup deletes another's files mid-run.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!(
-            "fog-resolve-config-{}-{}",
+            "fog-resolve-config-{}-{}-{}",
             std::process::id(),
+            seq,
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
