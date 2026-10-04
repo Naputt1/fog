@@ -5,7 +5,7 @@
 //! on Windows the equivalent is `TerminateProcess`, which has no graceful
 //! variant, so both [`Signal::Term`] and [`Signal::Kill`] terminate.
 
-use std::io;
+use std::io::{self, Read};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
@@ -18,14 +18,36 @@ use std::time::{Duration, Instant};
 pub fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Option<Output> {
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn().ok()?;
+
+    // Drain both pipes on dedicated threads. A child that writes more than the
+    // pipe buffer (~64 KiB) blocks until a reader consumes it; if we only read
+    // after `try_wait` reports exit, such a child deadlocks and the timeout
+    // then kills it despite it being healthy.
+    let stdout_handle = child.stdout.take().map(|mut pipe| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = pipe.read_to_end(&mut buf);
+            buf
+        })
+    });
+    let stderr_handle = child.stderr.take().map(|mut pipe| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = pipe.read_to_end(&mut buf);
+            buf
+        })
+    });
+
     let deadline = Instant::now() + timeout;
-    loop {
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(_)) => break,
+            Ok(Some(status)) => break status,
             Ok(None) => {
                 if Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
+                    join_reader(stdout_handle);
+                    join_reader(stderr_handle);
                     return None;
                 }
                 std::thread::sleep(Duration::from_millis(25));
@@ -33,11 +55,31 @@ pub fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Option<Output> {
             Err(_) => {
                 let _ = child.kill();
                 let _ = child.wait();
+                join_reader(stdout_handle);
+                join_reader(stderr_handle);
                 return None;
             }
         }
+    };
+
+    let stdout = join_reader(stdout_handle);
+    let stderr = join_reader(stderr_handle);
+    Some(Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+/// Joins a pipe-reader thread, returning the captured bytes.
+///
+/// A reader that panicked yields an empty buffer rather than propagating the
+/// panic, so `run_with_timeout` never panics.
+fn join_reader(handle: Option<std::thread::JoinHandle<Vec<u8>>>) -> Vec<u8> {
+    match handle {
+        Some(handle) => handle.join().unwrap_or_default(),
+        None => Vec::new(),
     }
-    child.wait_with_output().ok()
 }
 
 /// A termination request, abstracting over POSIX signals.
@@ -622,6 +664,37 @@ mod tests {
             start.elapsed() < Duration::from_secs(3),
             "timeout should fire promptly, took {:?}",
             start.elapsed()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_run_with_timeout_drains_large_stdout() {
+        // Well over the ~64 KiB pipe buffer, so the old read-after-wait
+        // implementation would deadlock and kill a healthy child.
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "head -c 200000 /dev/zero"]);
+        let out = run_with_timeout(cmd, Duration::from_secs(30))
+            .expect("command with large stdout should finish");
+        assert!(out.status.success());
+        assert!(
+            out.stdout.len() > 65536,
+            "stdout should not be truncated, len = {}",
+            out.stdout.len()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_run_with_timeout_drains_large_stderr() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "head -c 200000 /dev/zero 1>&2"]);
+        let out = run_with_timeout(cmd, Duration::from_secs(30))
+            .expect("command with large stderr should finish");
+        assert!(
+            out.stderr.len() > 65536,
+            "stderr should not be truncated, len = {}",
+            out.stderr.len()
         );
     }
 }
