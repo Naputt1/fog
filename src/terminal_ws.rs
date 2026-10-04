@@ -154,29 +154,111 @@ fn query_param(query: Option<&str>, name: &str) -> Option<String> {
     })
 }
 
-/// Checks whether the request satisfies the optional `auth_token` requirement.
+/// Returns `true` when `host` is a loopback bind address, i.e. the gateway is
+/// not reachable off-host.
+fn is_loopback_bind(host: &str) -> bool {
+    matches!(host.trim(), "127.0.0.1" | "localhost" | "::1" | "[::1]")
+}
+
+/// Constant-time byte comparison for the optional shared secret, so the token
+/// is not leaked through response-timing differences.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// Normalizes an authority (`host` or `host:port`) for same-origin comparison:
+/// lowercased, with a trailing default port (`:80`/`:443`) removed.
+fn normalize_authority(authority: &str) -> String {
+    let a = authority.trim().trim_end_matches('/');
+    let a = a
+        .strip_suffix(":80")
+        .or_else(|| a.strip_suffix(":443"))
+        .filter(|rest| !rest.contains(':'))
+        .unwrap_or(a);
+    a.to_ascii_lowercase()
+}
+
+/// Guards the terminal upgrade against cross-site WebSocket hijacking.
+///
+/// Browsers attach `Origin` to WebSocket handshakes but do not enforce the
+/// same-origin policy on them, so without this check any web page the user
+/// visits could open `ws://127.0.0.1:.../ws/terminal` and drive a shell.
+/// Requests with no `Origin` (non-browser clients such as `websocat`/`curl`)
+/// are allowed: an attack always carries one, and CLI clients often omit it.
+/// A sandboxed context sends the literal `Origin: null`, which is rejected.
+fn origin_allowed(req: &Request<hyper::body::Incoming>) -> bool {
+    let Some(origin) = req
+        .headers()
+        .get(hyper::header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+    else {
+        return true;
+    };
+    if origin.eq_ignore_ascii_case("null") {
+        return false;
+    }
+    let Some((_scheme, origin_authority)) = origin.split_once("://") else {
+        return false;
+    };
+    let Some(host) = req
+        .headers()
+        .get(hyper::header::HOST)
+        .and_then(|v| v.to_str().ok())
+    else {
+        return false;
+    };
+    normalize_authority(origin_authority) == normalize_authority(host)
+}
+
+fn reject(status: StatusCode, message: &str) -> Response<BoxBody> {
+    Response::builder()
+        .status(status)
+        .body(body_full(Bytes::from(message.to_string())))
+        .expect("response builder failed")
+}
+
+/// Checks the terminal upgrade against the exposure, origin, and auth policy.
+///
 /// Returns `Some(response)` when the request must be rejected, `None` to allow.
+/// `bind_host` is the address the serving listener is bound to, so a gateway
+/// reachable off-host cannot run without an `auth_token`.
 fn check_auth(
     req: &Request<hyper::body::Incoming>,
     config: &TerminalConfig,
+    bind_host: &str,
 ) -> Option<Response<BoxBody>> {
-    match &config.auth_token {
-        Some(expected) => {
-            let provided = query_param(req.uri().query(), "auth_token");
-            if provided.as_deref() != Some(expected.as_str()) {
-                return Some(
-                    Response::builder()
-                        .status(StatusCode::UNAUTHORIZED)
-                        .body(body_full(Bytes::from(
-                            "unauthorized: missing or invalid auth_token",
-                        )))
-                        .expect("response builder failed"),
-                );
-            }
-            None
-        }
-        None => None,
+    if !is_loopback_bind(bind_host) && config.auth_token.is_none() {
+        return Some(reject(
+            StatusCode::FORBIDDEN,
+            "terminal gateway disabled on a non-loopback bind without terminal.auth_token",
+        ));
     }
+    if !origin_allowed(req) {
+        return Some(reject(
+            StatusCode::FORBIDDEN,
+            "cross-origin terminal upgrade rejected",
+        ));
+    }
+    if let Some(expected) = &config.auth_token {
+        let provided = query_param(req.uri().query(), "auth_token");
+        let matches = provided
+            .as_deref()
+            .is_some_and(|p| constant_time_eq(p.as_bytes(), expected.as_bytes()));
+        if !matches {
+            return Some(reject(
+                StatusCode::UNAUTHORIZED,
+                "unauthorized: missing or invalid auth_token",
+            ));
+        }
+    }
+    None
 }
 
 /// Answers a `GET /ws/terminal` WebSocket upgrade.
@@ -191,8 +273,9 @@ pub async fn handle_terminal_upgrade(
     registry: Arc<SessionsRegistry>,
     peer_ip: String,
     target: Option<ServiceTarget>,
+    bind_host: &str,
 ) -> Result<Response<BoxBody>, std::convert::Infallible> {
-    if let Some(resp) = check_auth(&req, &config) {
+    if let Some(resp) = check_auth(&req, &config, bind_host) {
         return Ok(resp);
     }
 
@@ -244,8 +327,9 @@ pub async fn handle_live_terminal_upgrade(
     registry: Arc<SessionsRegistry>,
     peer_ip: String,
     service: String,
+    bind_host: &str,
 ) -> Result<Response<BoxBody>, std::convert::Infallible> {
-    if let Some(resp) = check_auth(&req, &config) {
+    if let Some(resp) = check_auth(&req, &config, bind_host) {
         return Ok(resp);
     }
     let session_key = registry_ip(&peer_ip);

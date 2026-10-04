@@ -1056,6 +1056,7 @@ async fn serve_index(
                 terminal_sessions,
                 peer_ip,
                 svc,
+                "127.0.0.1",
             )
             .await
             .expect("live terminal upgrade handler is infallible");
@@ -1081,6 +1082,7 @@ async fn serve_index(
             terminal_sessions,
             peer_ip,
             target,
+            "127.0.0.1",
         )
         .await
         .expect("terminal upgrade handler is infallible");

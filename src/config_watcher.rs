@@ -128,7 +128,7 @@ pub fn reload_config(
                 ws: r.ws.unwrap_or(false),
             })
             .collect();
-        let new_host = pc.host.clone().unwrap_or_else(|| "0.0.0.0".to_string());
+        let new_host = pc.host.clone().unwrap_or_else(|| "127.0.0.1".to_string());
         if pc.port != p.port || new_host != p.host || new_routes != p.routes {
             p.port = pc.port;
             p.host = new_host;
