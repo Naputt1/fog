@@ -1,3 +1,4 @@
+use std::io;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -34,22 +35,68 @@ pub(crate) use server::{
 pub mod transport;
 pub use transport::connect_async;
 
-/// Returns the socket path for a given PID: `$TMPDIR/fog-<pid>.sock`.
+/// Returns the per-user directory holding this user's fog instance endpoints
+/// and logs.
+///
+/// On Unix this is `$TMPDIR/fog-<uid>`, so the socket never lives in the
+/// shared, world-writable temp directory where another local user could
+/// connect to it. The directory is created and locked down to `0700` by
+/// [`ensure_instance_dir`] when a listener binds. On Windows the per-user temp
+/// directory already isolates it.
+pub fn instance_dir() -> PathBuf {
+    std::env::temp_dir().join(instance_dir_name())
+}
+
+/// Name of the per-user instance directory under the temp dir.
+#[cfg(unix)]
+fn instance_dir_name() -> String {
+    // SAFETY: `getuid` has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    format!("fog-{uid}")
+}
+
+/// Name of the per-user instance directory under the temp dir. Windows' temp
+/// directory is already per-user, so no uid is needed.
+#[cfg(windows)]
+fn instance_dir_name() -> String {
+    "fog".to_string()
+}
+
+/// Returns the socket path for a given PID: `$TMPDIR/fog-<uid>/fog-<pid>.sock`.
 pub fn socket_path(pid: u32) -> PathBuf {
-    std::env::temp_dir().join(format!("fog-{pid}.sock"))
+    instance_dir().join(format!("fog-{pid}.sock"))
 }
 
 /// Returns the directory holding an instance's captured logs:
-/// `$TMPDIR/fog-<pid>.logs/`. Every run (interactive or detached) tees each
-/// service's raw PTY output into `<service>.log` here; detached runs also
-/// write their own diagnostics to `daemon.log`.
+/// `$TMPDIR/fog-<uid>/fog-<pid>.logs/`. Every run (interactive or detached)
+/// tees each service's raw PTY output into `<service>.log` here; detached runs
+/// also write their own diagnostics to `daemon.log`.
 pub fn instance_log_dir(pid: u32) -> PathBuf {
-    std::env::temp_dir().join(format!("fog-{pid}.logs"))
+    instance_dir().join(format!("fog-{pid}.logs"))
 }
 
 /// Returns the socket path for the current process.
 pub fn current_socket_path() -> PathBuf {
     socket_path(std::process::id())
+}
+
+/// Creates the per-user instance directory (if needed) and restricts it to the
+/// owner (`0700` on Unix). Callers that bind an instance socket should invoke
+/// this first so the endpoint is unreachable by other local users.
+///
+/// # Errors
+/// Returns an error if the directory cannot be created or secured.
+pub fn ensure_instance_dir() -> io::Result<PathBuf> {
+    let dir = instance_dir();
+    std::fs::create_dir_all(&dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&dir)?.permissions();
+        perms.set_mode(0o700);
+        std::fs::set_permissions(&dir, perms)?;
+    }
+    Ok(dir)
 }
 
 #[cfg(test)]
@@ -68,7 +115,7 @@ mod tests {
     #[test]
     fn test_socket_path_format() {
         let path = socket_path(12345);
-        assert_eq!(path, std::env::temp_dir().join("fog-12345.sock"));
+        assert_eq!(path, instance_dir().join("fog-12345.sock"));
     }
 
     #[test]
@@ -101,7 +148,7 @@ mod tests {
         state.config_dir = Some("/srv/example".to_string());
         let state = Arc::new(state);
 
-        let path = std::env::temp_dir().join("fog-test-roundtrip.sock");
+        let path = instance_dir().join("fog-test-roundtrip.sock");
         let _ = fs::remove_file(&path);
         let listener = super::transport::Listener::bind(&path).unwrap();
         let server_state = state.clone();
@@ -130,7 +177,7 @@ mod tests {
     #[test]
     fn test_kill_sets_flag() {
         let state = Arc::new(IpcState::new("dev".to_string(), None, None, false));
-        let path = std::env::temp_dir().join("fog-test-kill.sock");
+        let path = instance_dir().join("fog-test-kill.sock");
         let _ = fs::remove_file(&path);
         let listener = super::transport::Listener::bind(&path).unwrap();
         let server_state = state.clone();
@@ -153,7 +200,7 @@ mod tests {
         // instance PID is long gone; the nonexistent PID also exercises the
         // signal fallback path without signalling anything real.
         let state = Arc::new(IpcState::new("dev".to_string(), None, None, false));
-        let path = std::env::temp_dir().join("fog-test-terminate.sock");
+        let path = instance_dir().join("fog-test-terminate.sock");
         let _ = fs::remove_file(&path);
         let listener = super::transport::Listener::bind(&path).unwrap();
         let server_state = state.clone();
@@ -196,7 +243,7 @@ mod tests {
         });
         state.handoff_prepared.store(true, Ordering::SeqCst);
 
-        let path = std::env::temp_dir().join("fog-test-reclaim.sock");
+        let path = instance_dir().join("fog-test-reclaim.sock");
         let _ = fs::remove_file(&path);
         let listener = super::transport::Listener::bind(&path).unwrap();
         let server_state = state.clone();
@@ -254,7 +301,7 @@ mod tests {
         });
         state.handoff_prepared.store(true, Ordering::SeqCst);
 
-        let path = std::env::temp_dir().join(format!(
+        let path = instance_dir().join(format!(
             "fog-test-single-winner-{}.sock",
             std::process::id()
         ));
@@ -322,8 +369,7 @@ mod tests {
         });
         state.handoff_prepared.store(true, Ordering::SeqCst);
 
-        let path =
-            std::env::temp_dir().join(format!("fog-test-plain-kill-{}.sock", std::process::id()));
+        let path = instance_dir().join(format!("fog-test-plain-kill-{}.sock", std::process::id()));
         let _ = fs::remove_file(&path);
         let listener = super::transport::Listener::bind(&path).unwrap();
         let server_state = state.clone();
@@ -440,15 +486,12 @@ mod tests {
     }
 
     fn unique(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("fog-{name}-{}", std::process::id()))
+        instance_dir().join(format!("fog-{name}-{}", std::process::id()))
     }
 
     #[test]
     fn test_instance_log_dir_naming() {
-        assert_eq!(
-            instance_log_dir(1234),
-            std::env::temp_dir().join("fog-1234.logs")
-        );
+        assert_eq!(instance_log_dir(1234), instance_dir().join("fog-1234.logs"));
     }
 
     #[test]
@@ -666,5 +709,71 @@ mod tests {
 
         assert!(lines.iter().any(|l| l.contains("[fog] no captured log")));
         let _ = fs::remove_file(&sock);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_socket_and_dir_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = ensure_instance_dir().unwrap();
+        let path = dir.join(format!("fog-perm-{}.sock", std::process::id()));
+        let _ = fs::remove_file(&path);
+        let listener = super::transport::Listener::bind(&path).unwrap();
+
+        let file_mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(file_mode, 0o600, "socket file mode: {file_mode:o}");
+        let dir_mode = fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(dir_mode, 0o700, "instance dir mode: {dir_mode:o}");
+
+        drop(listener);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_find_instances_discovers_bound_socket() {
+        // Use a PID that will not collide with sockets other tests create.
+        let pid = 4_000_000_000_u32;
+        let dir = instance_dir();
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("fog-{pid}.sock"));
+        let _ = fs::remove_file(&path);
+        let listener = super::transport::Listener::bind(&path).unwrap();
+
+        let found = find_instances().unwrap();
+        assert!(
+            found.iter().any(|(p, s)| *p == pid && s == &path),
+            "bound socket must be discovered, got {found:?}"
+        );
+
+        drop(listener);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_spawn_server_stale_and_live_handling() {
+        let path = current_socket_path();
+        let _ = fs::remove_file(&path);
+
+        // A bound-then-dropped listener leaves a stale socket file behind.
+        {
+            let listener = super::transport::Listener::bind(&path).unwrap();
+            drop(listener);
+        }
+        assert!(path.exists(), "stale socket file should remain after drop");
+
+        let state = Arc::new(IpcState::new("dev".to_string(), None, None, false));
+        // A stale socket must be replaced, not refused.
+        spawn_server(state.clone()).unwrap();
+        assert!(
+            query_status(&path).is_ok(),
+            "replaced endpoint must answer status"
+        );
+
+        // A second server must refuse to steal the live endpoint.
+        let err = spawn_server(state).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AddrInUse);
+
+        cleanup_socket();
     }
 }
