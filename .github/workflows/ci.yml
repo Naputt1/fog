@@ -10,7 +10,37 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  check:
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            rust:
+              - 'src/**'
+              - 'tests/**'
+              - 'benches/**'
+              - 'build.rs'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - 'deny.toml'
+              - '.cargo/**'
+              - '.github/workflows/**'
+            frontend:
+              - 'ui/**'
+              - '.github/workflows/**'
+
+  frontend:
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -36,6 +66,29 @@ jobs:
       - name: Build frontend (SPA -> ui/dist)
         working-directory: ui
         run: pnpm build
+
+  rust:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.frontend == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 12.8.1
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: ui/pnpm-lock.yaml
+      - name: Install dependencies
+        working-directory: ui
+        run: pnpm install --frozen-lockfile
+      - name: Build frontend (SPA -> ui/dist)
+        working-directory: ui
+        run: pnpm build
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
       - name: Check dependencies
@@ -50,6 +103,8 @@ jobs:
         run: cargo test
 
   windows:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.frontend == 'true'
     runs-on: windows-latest
     env:
       # The frontend is built below; skip the release-download path in build.rs.
@@ -57,11 +112,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Set up pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 12.8.1
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: pnpm
@@ -80,3 +135,25 @@ jobs:
         run: cargo build
       - name: Run tests
         run: cargo test
+
+  ci-required:
+    needs: [changes, frontend, rust, windows]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify all jobs succeeded
+        run: |
+          echo "changes=${{ needs.changes.result }}"
+          echo "frontend=${{ needs.frontend.result }}"
+          echo "rust=${{ needs.rust.result }}"
+          echo "windows=${{ needs.windows.result }}"
+          if [ "${{ needs.changes.result }}" != "success" ]; then
+            echo "changes job did not succeed"
+            exit 1
+          fi
+          for result in "${{ needs.frontend.result }}" "${{ needs.rust.result }}" "${{ needs.windows.result }}"; do
+            case "$result" in
+              success|skipped) ;;
+              *) echo "Required job did not succeed: $result"; exit 1 ;;
+            esac
+          done
