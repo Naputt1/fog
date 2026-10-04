@@ -17,7 +17,25 @@ fog dev -d
 # → shares the DB, streams logs you can watch live
 ```
 
+<img src="assets/tui.png" alt="fog TUI" width="800">
+
+<details>
+<summary>▶ Watch the demo</summary>
+
 <img src="assets/demo.gif" alt="fog demo" width="800">
+
+</details>
+
+## Web UI
+
+Every running instance is also served by the host-global index server as a dashboard for your desktop or phone — services and status, live logs, and a web terminal — at `http://127.0.0.1:18080` (or `http://<tailnet IP>` from your phone).
+
+<table>
+  <tr>
+    <td><img src="assets/web-ui.png" alt="fog web dashboard" width="430"></td>
+    <td><img src="assets/web-ui-mobile.png" alt="fog dashboard on a phone" width="160"></td>
+  </tr>
+</table>
 
 ## Set up fog with your agent
 
