@@ -167,52 +167,6 @@ pub struct AppCreateOpts {
 }
 
 impl App {
-    /// Creates a new [`App`] with the given terminals, optional proxy, and SIGINT flag.
-    ///
-    /// # Arguments
-    /// * `items` - The list of terminal instances.
-    /// * `proxy` - An optional reverse proxy instance.
-    /// * `sigint` - An `AtomicBool` flag set to `true` when SIGINT (Ctrl+C) is received.
-    /// * `scrollback` - Maximum number of scrollback lines.
-    /// * `sidebar_min` - Minimum sidebar width in columns.
-    /// * `sidebar_max` - Maximum sidebar width in columns.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        items: Vec<Terminal>,
-        pending_services: Vec<PendingService>,
-        proxy: Option<ProxyInstance>,
-        sigint: Arc<AtomicBool>,
-        scrollback: usize,
-        sidebar_min: u16,
-        sidebar_max: u16,
-        theme: Theme,
-        config_path: std::path::PathBuf,
-        config_rx: std::sync::mpsc::Receiver<()>,
-        ipc_state: Arc<IpcState>,
-        config_rel: PathBuf,
-        save_logs: bool,
-    ) -> Self {
-        Self::new_with_opts(AppCreateOpts {
-            items,
-            pending_services,
-            proxy,
-            sigint,
-            scrollback,
-            sidebar_min,
-            sidebar_max,
-            theme,
-            config_path,
-            config_rx,
-            config_watcher_stop: Arc::new(AtomicBool::new(false)),
-            ipc_state,
-            config_rel,
-            save_logs,
-            no_share: false,
-            verbose: false,
-            startup_messages: Vec::new(),
-        })
-    }
-
     /// Preferred constructor using `AppCreateOpts`.
     pub fn new_with_opts(opts: AppCreateOpts) -> Self {
         let AppCreateOpts {
