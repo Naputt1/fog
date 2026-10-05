@@ -2298,6 +2298,231 @@ fn parse_project_icon_route(path: &str) -> Option<&str> {
 /// services (e.g. `postgres`) so the logs picker can still see them. Default
 /// is Traefik-only (`fog.expose` or `traefik.http.routers.*`) to avoid
 /// unrelated `docker ps` entries like a stray `mongodb`.
+/// Derives the `(project, worktree)` display group for an instance.
+///
+/// `project` keeps its original case; callers that compare against docker rows
+/// lowercase it themselves. `worktree` is the branch sanitized down to a single
+/// DNS label (`sanitize_hostname(...).split('.').next()`).
+fn instance_group(inst: &FogInstance) -> (String, String) {
+    let project = inst
+        .project
+        .as_deref()
+        .map(project_name_from_common_dir)
+        .unwrap_or_else(|| inst.script.clone());
+    let raw_worktree = inst.branch.clone().unwrap_or_else(|| "default".to_string());
+    let worktree = crate::ports::sanitize_hostname(&raw_worktree)
+        .split('.')
+        .next()
+        .unwrap_or("default")
+        .to_string();
+    (project, worktree)
+}
+
+/// Declared-endpoint keys: `(project, worktree, endpoint)` for exact matches and
+/// `(project, endpoint)` for branch-agnostic compose projects grouped as `shared`.
+type DeclaredEndpoints = (
+    std::collections::HashSet<(String, String, String)>,
+    std::collections::HashSet<(String, String)>,
+);
+
+/// Collects the declared-endpoint keys for every instance, lowercasing the
+/// project so it matches docker-derived `ApiService.project`.
+fn declared_endpoint_keys(instances: &[FogInstance]) -> DeclaredEndpoints {
+    let mut exact = std::collections::HashSet::new();
+    let mut shared = std::collections::HashSet::new();
+    for inst in instances {
+        let (project, worktree) = instance_group(inst);
+        let project = project.to_lowercase();
+        for route in &inst.native_routes {
+            if let Some(sub) = &route.endpoint {
+                exact.insert((project.clone(), worktree.clone(), sub.clone()));
+                shared.insert((project.clone(), sub.clone()));
+            }
+        }
+    }
+    (exact, shared)
+}
+
+/// Suppresses docker rows whose `(project, worktree, service)` is a declared
+/// endpoint: those are nested under their parent instead of appearing as
+/// separate top-level rows. A branch-agnostic compose project (e.g. a bare
+/// `gems-infra` with no branch suffix) is grouped by docker under the `shared`
+/// worktree even though its owning instance reports a real branch; for those,
+/// match on project+service alone so they are still nested.
+fn suppress_declared_docker(
+    all_docker: &[ApiService],
+    keys: &DeclaredEndpoints,
+) -> Vec<ApiService> {
+    let (exact, shared) = keys;
+    all_docker
+        .iter()
+        .filter(|e| {
+            let proj = e.project.to_lowercase();
+            let exact_match =
+                exact.contains(&(proj.clone(), e.worktree.clone(), e.service.clone()));
+            let shared_match =
+                e.worktree == "shared" && shared.contains(&(proj, e.service.clone()));
+            !(exact_match || shared_match)
+        })
+        .cloned()
+        .collect()
+}
+
+/// Adds top-level rows for an instance's running native routes. Endpoint routes
+/// are skipped here — they are nested under their parent by
+/// [`attach_declared_endpoints`].
+fn synthesize_native_routes(
+    list: &mut Vec<ApiService>,
+    inst: &FogInstance,
+    project: &str,
+    worktree: &str,
+) {
+    // Build a map of service name -> health for quick lookup.
+    let health_map: std::collections::HashMap<&str, &str> = inst
+        .services
+        .iter()
+        .map(|s| (s.name.as_str(), s.health.as_str()))
+        .collect();
+    for route in &inst.native_routes {
+        // Endpoint routes are nested under their parent (below), never listed
+        // as separate top-level services.
+        if route.endpoint.is_some() {
+            continue;
+        }
+        let Some(svc_status) = inst.services.iter().find(|s| s.name == route.service) else {
+            continue;
+        };
+        if !svc_status.running {
+            continue;
+        }
+        // Resolve host and port templates with this instance's PortMap+branch.
+        let host = match crate::ports::resolve_template(
+            &route.host,
+            &inst.ports,
+            inst.branch.as_deref(),
+        ) {
+            Ok(h) => crate::ports::sanitize_hostname(&h),
+            Err(_) => continue,
+        };
+        let port_str = match crate::ports::resolve_template(
+            &route.port,
+            &inst.ports,
+            inst.branch.as_deref(),
+        ) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        let port: u16 = match port_str.parse() {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        // Native routes are always TLS-enabled (see router.rs), so use https.
+        let url = format!("https://{}/", host);
+        let health = health_map
+            .get(route.service.as_str())
+            .copied()
+            .unwrap_or("unknown");
+        // Avoid duplicating a docker entry that already covers this host (e.g. if a
+        // service is both docker and native in different worktrees, keep both).
+        if list
+            .iter()
+            .any(|e| e.service == route.service && e.worktree == worktree && e.project == project)
+        {
+            continue;
+        }
+        list.push(ApiService {
+            project: project.to_string(),
+            worktree: worktree.to_string(),
+            service: route.service.clone(),
+            container: format!("fog-{}-{}", inst.pid, route.service),
+            status: "running".to_string(),
+            url,
+            ports: vec![format!("0.0.0.0:{}->{}/tcp", port, port)],
+            health: health.to_string(),
+            pid: Some(inst.pid),
+            icon: None,
+            endpoints: Vec::new(),
+        });
+    }
+}
+
+/// Attaches declared endpoints to their parent service's entry, creating the
+/// parent entry when docker/native discovery did not list it (e.g. a
+/// compose-stack launcher that is not itself a container). Also adds running
+/// native services that have no native route so they still appear in the
+/// directory.
+fn attach_declared_endpoints(
+    list: &mut Vec<ApiService>,
+    inst: &FogInstance,
+    project: &str,
+    worktree: &str,
+    all_docker: &[ApiService],
+    docker_entries: &[IndexEntry],
+) {
+    for svc in &inst.services {
+        if !svc.running {
+            continue;
+        }
+        let subs = api_endpoints_for(inst, &svc.name, all_docker, project, worktree);
+        if !subs.is_empty() {
+            if let Some(existing) = list
+                .iter_mut()
+                .find(|e| e.service == svc.name && e.worktree == worktree && e.project == project)
+            {
+                if existing.endpoints.is_empty() {
+                    existing.endpoints = subs;
+                }
+            } else {
+                list.push(ApiService {
+                    project: project.to_string(),
+                    worktree: worktree.to_string(),
+                    service: svc.name.clone(),
+                    container: format!("fog-{}-{}", inst.pid, svc.name),
+                    status: "running".to_string(),
+                    url: String::new(),
+                    ports: Vec::new(),
+                    health: svc.health.clone(),
+                    pid: Some(inst.pid),
+                    icon: None,
+                    endpoints: subs,
+                });
+            }
+            continue;
+        }
+        // Native services with a route are already listed above.
+        if inst.native_routes.iter().any(|r| r.service == svc.name) {
+            continue;
+        }
+        // Show running native services not already listed.
+        let already = list
+            .iter()
+            .any(|e| e.service == svc.name && e.worktree == worktree && e.project == project);
+        if already {
+            continue;
+        }
+        // A service that docker already reported is listed by docker, not here.
+        let is_docker = docker_entries
+            .iter()
+            .any(|e| e.service == svc.name && e.worktree == worktree);
+        if is_docker {
+            continue;
+        }
+        list.push(ApiService {
+            project: project.to_string(),
+            worktree: worktree.to_string(),
+            service: svc.name.clone(),
+            container: format!("fog-{}-{}", inst.pid, svc.name),
+            status: "running".to_string(),
+            url: String::new(),
+            ports: Vec::new(),
+            health: svc.health.clone(),
+            pid: Some(inst.pid),
+            icon: None,
+            endpoints: Vec::new(),
+        });
+    }
+}
+
 fn api_services_with_query(_network: &str, query: Option<&str>) -> Response<RespBody> {
     let with_internal = query
         .map(parse_query)
@@ -2308,7 +2533,7 @@ fn api_services_with_query(_network: &str, query: Option<&str>) -> Response<Resp
                 .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         })
         .unwrap_or(false);
-    // Collect running fog roots once and reuse for docker filtering and native synthesis
+    // Collect running fog roots once and reuse for docker filtering and native synthesis.
     let instances = discover_fog_instances();
     let icons = project_icons(&instances);
     let allowed_roots: std::collections::HashSet<PathBuf> = instances
@@ -2325,198 +2550,19 @@ fn api_services_with_query(_network: &str, query: Option<&str>) -> Response<Resp
         .cloned()
         .map(api_service_from)
         .collect();
-    // Suppress docker entries whose (project, worktree, service) matches a
-    // declared endpoint: those are nested under their parent service below
-    // instead of appearing as separate top-level rows.
-    //
-    // A branch-agnostic compose project (e.g. a bare `gems-infra` with no
-    // branch suffix) is grouped by docker under the `shared` worktree even
-    // though its owning instance reports a real branch. For those, match on
-    // project+service alone so they are still nested.
-    let mut declared_endpoints: std::collections::HashSet<(String, String, String)> =
-        std::collections::HashSet::new();
-    let mut declared_endpoints_shared: std::collections::HashSet<(String, String)> =
-        std::collections::HashSet::new();
+    let declared = declared_endpoint_keys(&instances);
+    let mut list = suppress_declared_docker(&all_docker, &declared);
     for inst in &instances {
-        let project = inst
-            .project
-            .as_deref()
-            .map(project_name_from_common_dir)
-            .unwrap_or_else(|| inst.script.clone())
-            .to_lowercase();
-        let raw_worktree = inst.branch.clone().unwrap_or_else(|| "default".to_string());
-        let worktree = crate::ports::sanitize_hostname(&raw_worktree)
-            .split('.')
-            .next()
-            .unwrap_or("default")
-            .to_string();
-        for route in &inst.native_routes {
-            if let Some(sub) = &route.endpoint {
-                declared_endpoints.insert((project.clone(), worktree.clone(), sub.clone()));
-                declared_endpoints_shared.insert((project.clone(), sub.clone()));
-            }
-        }
-    }
-    let mut list: Vec<ApiService> = all_docker
-        .iter()
-        .filter(|e| {
-            let proj = e.project.to_lowercase();
-            let exact =
-                declared_endpoints.contains(&(proj.clone(), e.worktree.clone(), e.service.clone()));
-            let shared_match = e.worktree == "shared"
-                && declared_endpoints_shared.contains(&(proj, e.service.clone()));
-            !(exact || shared_match)
-        })
-        .cloned()
-        .collect();
-    // Add native services from fog instances (reuse already-fetched `instances`).
-    for inst in &instances {
-        let project = inst
-            .project
-            .as_deref()
-            .map(project_name_from_common_dir)
-            .unwrap_or_else(|| inst.script.clone());
-        let raw_worktree = inst.branch.clone().unwrap_or_else(|| "default".to_string());
-        let worktree = crate::ports::sanitize_hostname(&raw_worktree)
-            .split('.')
-            .next()
-            .unwrap_or("default")
-            .to_string();
-        // Build a map of service name -> health for quick lookup.
-        let health_map: std::collections::HashMap<&str, &str> = inst
-            .services
-            .iter()
-            .map(|s| (s.name.as_str(), s.health.as_str()))
-            .collect();
-        for route in &inst.native_routes {
-            // Endpoint routes are nested under their parent (below), never
-            // listed as separate top-level services.
-            if route.endpoint.is_some() {
-                continue;
-            }
-            let Some(svc_status) = inst.services.iter().find(|s| s.name == route.service) else {
-                continue;
-            };
-            if !svc_status.running {
-                continue;
-            }
-            // Resolve host and port templates with this instance's PortMap+branch.
-            let host = match crate::ports::resolve_template(
-                &route.host,
-                &inst.ports,
-                inst.branch.as_deref(),
-            ) {
-                Ok(h) => crate::ports::sanitize_hostname(&h),
-                Err(_) => continue,
-            };
-            let port_str = match crate::ports::resolve_template(
-                &route.port,
-                &inst.ports,
-                inst.branch.as_deref(),
-            ) {
-                Ok(p) => p,
-                Err(_) => continue,
-            };
-            let port: u16 = match port_str.parse() {
-                Ok(p) => p,
-                Err(_) => continue,
-            };
-            // Native routes are always TLS-enabled (see router.rs), so use https.
-            let url = format!("https://{}/", host);
-            let health = health_map
-                .get(route.service.as_str())
-                .copied()
-                .unwrap_or("unknown");
-            // Avoid duplicating a docker entry that already covers this host (e.g. if a
-            // service is both docker and native in different worktrees, keep both).
-            if list.iter().any(|e| {
-                e.service == route.service && e.worktree == worktree && e.project == project
-            }) {
-                continue;
-            }
-            list.push(ApiService {
-                project: project.clone(),
-                worktree: worktree.clone(),
-                service: route.service.clone(),
-                container: format!("fog-{}-{}", inst.pid, route.service),
-                status: "running".to_string(),
-                url,
-                ports: vec![format!("0.0.0.0:{}->{}/tcp", port, port)],
-                health: health.to_string(),
-                pid: Some(inst.pid),
-                icon: None,
-                endpoints: Vec::new(),
-            });
-        }
-        // Attach declared endpoints to their parent service's entry, creating
-        // the parent entry when docker/native discovery did not list it (e.g. a
-        // compose-stack launcher that is not itself a container).
-        for svc in &inst.services {
-            if !svc.running {
-                continue;
-            }
-            let subs = api_endpoints_for(inst, &svc.name, &all_docker, &project, &worktree);
-            if !subs.is_empty() {
-                if let Some(existing) = list.iter_mut().find(|e| {
-                    e.service == svc.name && e.worktree == worktree && e.project == project
-                }) {
-                    if existing.endpoints.is_empty() {
-                        existing.endpoints = subs;
-                    }
-                } else {
-                    list.push(ApiService {
-                        project: project.clone(),
-                        worktree: worktree.clone(),
-                        service: svc.name.clone(),
-                        container: format!("fog-{}-{}", inst.pid, svc.name),
-                        status: "running".to_string(),
-                        url: String::new(),
-                        ports: Vec::new(),
-                        health: svc.health.clone(),
-                        pid: Some(inst.pid),
-                        icon: None,
-                        endpoints: subs,
-                    });
-                }
-                continue;
-            }
-            // Also include native services that have no native_route but have a port allocation
-            // (e.g. a service with health_check but no Traefik route) — show them with no URL
-            // so they still appear in the directory.
-            if inst.native_routes.iter().any(|r| r.service == svc.name) {
-                continue;
-            }
-            // Only show if this service used a port (heuristic: health target contains port or env PORT)
-            // For now, show all running native services that are not docker and not already listed.
-            let already = list
-                .iter()
-                .any(|e| e.service == svc.name && e.worktree == worktree && e.project == project);
-            if already {
-                continue;
-            }
-            // Check if this service is known to be docker by checking if any docker entry already has it
-            // Reuse the already-fetched docker_entries to avoid re-scanning docker per native service.
-            let is_docker = docker_entries
-                .iter()
-                .any(|e| e.service == svc.name && e.worktree == worktree);
-            if is_docker {
-                continue;
-            }
-            let health = svc.health.as_str();
-            list.push(ApiService {
-                project: project.clone(),
-                worktree: worktree.clone(),
-                service: svc.name.clone(),
-                container: format!("fog-{}-{}", inst.pid, svc.name),
-                status: "running".to_string(),
-                url: String::new(),
-                ports: Vec::new(),
-                health: health.to_string(),
-                pid: Some(inst.pid),
-                icon: None,
-                endpoints: Vec::new(),
-            });
-        }
+        let (project, worktree) = instance_group(inst);
+        synthesize_native_routes(&mut list, inst, &project, &worktree);
+        attach_declared_endpoints(
+            &mut list,
+            inst,
+            &project,
+            &worktree,
+            &all_docker,
+            &docker_entries,
+        );
     }
     // Attach each project's configured icon (if any) to every service in it, so
     // the Services UI can group and show it once per project card.
@@ -2526,11 +2572,6 @@ fn api_services_with_query(_network: &str, query: Option<&str>) -> Response<Resp
         }
     }
     json_response(&list)
-}
-
-#[allow(dead_code)]
-fn api_services(_network: &str) -> Response<RespBody> {
-    api_services_with_query(_network, None)
 }
 
 /// One running fog instance as reported by `GET /api/status`.
