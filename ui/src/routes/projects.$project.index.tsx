@@ -77,10 +77,10 @@ function InstanceRow({
         <span className="min-w-0 truncate font-mono text-xs font-medium">
           {inst.script}
         </span>
-        <span className="text-muted-foreground shrink-0 font-mono text-[11px]">
+        <span className="text-muted-foreground text-2xs shrink-0 font-mono">
           pid {inst.pid}
         </span>
-        <span className="text-muted-foreground ml-auto shrink-0 font-mono text-[11px]">
+        <span className="text-muted-foreground text-2xs ml-auto shrink-0 font-mono">
           {killing ? "killing…" : `${running}/${inst.services.length}`}
         </span>
       </Link>
@@ -104,8 +104,8 @@ function BranchCard({ bucket }: { bucket: BranchBucket }) {
   const only = bucket.instances[0];
 
   return (
-    <Card className="hover:border-primary/40 gap-0 py-0 transition-colors">
-      <CardContent className="flex flex-col gap-3 p-4">
+    <Card interactive spacing="none" padding="none">
+      <CardContent variant="stack" className="flex flex-col">
         <div className="flex items-center justify-between gap-2">
           <Link
             to="/projects/$project/$branch"
@@ -135,7 +135,7 @@ function BranchCard({ bucket }: { bucket: BranchBucket }) {
           ) : null}
         </div>
 
-        <div className="text-muted-foreground flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[11px]">
+        <div className="text-muted-foreground text-2xs flex flex-wrap items-center gap-x-3 gap-y-1 font-mono">
           <span>{stats.total} services</span>
           <span className="text-primary">{stats.running} running</span>
           {multi ? <span>{bucket.instances.length} instances</span> : null}
@@ -147,7 +147,7 @@ function BranchCard({ bucket }: { bucket: BranchBucket }) {
               <span
                 key={svc.name}
                 className={cn(
-                  "border-border rounded-full border px-2 py-0.5 font-mono text-[10px]",
+                  "border-border text-3xs rounded-full border px-2 py-0.5 font-mono",
                   svc.running
                     ? "text-muted-foreground"
                     : "text-muted-foreground/50 border-dashed"
@@ -160,14 +160,14 @@ function BranchCard({ bucket }: { bucket: BranchBucket }) {
         ) : null}
 
         {stats.ports.length > 0 ? (
-          <div className="text-muted-foreground/80 truncate font-mono text-[11px]">
+          <div className="text-muted-foreground/80 text-2xs truncate font-mono">
             {stats.ports.join("  ")}
           </div>
         ) : null}
 
         {multi ? (
           <div className="border-border space-y-2 border-t pt-3">
-            <div className="text-muted-foreground font-mono text-[10px] tracking-wider uppercase">
+            <div className="text-muted-foreground text-3xs font-mono tracking-wider uppercase">
               Instances
             </div>
             {groupByScript(bucket.instances).map(([script, list]) => (
@@ -211,8 +211,8 @@ function LegacyBranchCard({
       search={{}}
       className="focus-visible:ring-ring/60 block min-w-0 rounded-xl outline-none focus-visible:ring-2"
     >
-      <Card className="hover:border-primary/40 h-full gap-0 py-0 transition-colors">
-        <CardContent className="flex flex-col gap-3 p-4">
+      <Card interactive spacing="none" padding="none" className="h-full">
+        <CardContent variant="stack" className="flex flex-col">
           <div className="flex items-center justify-between gap-2">
             <span className="flex min-w-0 items-center gap-2">
               <GitBranch className="text-primary size-4 shrink-0" aria-hidden />
@@ -225,7 +225,7 @@ function LegacyBranchCard({
               aria-hidden
             />
           </div>
-          <div className="text-muted-foreground flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[11px]">
+          <div className="text-muted-foreground text-2xs flex flex-wrap items-center gap-x-3 gap-y-1 font-mono">
             <span>{stats.total} services</span>
             <span className="text-primary">{stats.running} running</span>
           </div>
@@ -233,14 +233,14 @@ function LegacyBranchCard({
             {worktree.services.map((svc) => (
               <span
                 key={svc.container}
-                className="border-border text-muted-foreground rounded-full border px-2 py-0.5 font-mono text-[10px]"
+                className="border-border text-muted-foreground text-3xs rounded-full border px-2 py-0.5 font-mono"
               >
                 {svc.service}
               </span>
             ))}
           </div>
           {stats.ports.length > 0 ? (
-            <div className="text-muted-foreground/80 truncate font-mono text-[11px]">
+            <div className="text-muted-foreground/80 text-2xs truncate font-mono">
               {stats.ports.join("  ")}
             </div>
           ) : null}

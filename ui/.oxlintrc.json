@@ -1,5 +1,6 @@
 {
   "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "jsPlugins": ["@shadcn/lint"],
   "plugins": ["eslint", "typescript", "unicorn", "oxc", "react"],
   "options": {
     "typeAware": true
@@ -20,7 +21,12 @@
       {
         "allowConstantExport": true
       }
-    ]
+    ],
+    "shadcn/no-restyle": ["error", { "allow": ["layout"] }],
+    "shadcn/no-raw-colors": "error",
+    "shadcn/no-arbitrary-values": ["error", { "allow": ["layout"] }],
+    "shadcn/no-inline-styles": "error",
+    "shadcn/require-static-classes": "error"
   },
   "overrides": [
     {
@@ -132,6 +138,20 @@
       "env": {
         "es2022": true,
         "browser": true
+      }
+    },
+    {
+      "files": ["src/components/ui/**"],
+      "rules": {
+        "shadcn/no-restyle": "off",
+        "shadcn/no-arbitrary-values": "off",
+        "shadcn/require-static-classes": "off"
+      }
+    },
+    {
+      "files": ["src/routes/**"],
+      "rules": {
+        "react/only-export-components": "off"
       }
     }
   ]

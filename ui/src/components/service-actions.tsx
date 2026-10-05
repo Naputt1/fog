@@ -3,7 +3,8 @@ import { useState } from "react";
 import { useServiceAction, useServiceActionState } from "@/lib/hooks";
 import type { ServiceAction } from "@/lib/api";
 import type { VariantProps } from "class-variance-authority";
-import { Button, buttonVariants } from "@/components/ui/button";
+import { Button } from "@/components/ui/button";
+import { buttonVariants } from "@/components/ui/button-variants";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -112,12 +113,12 @@ export function ServiceActions({
         </Button>
       </div>
       {killing ? (
-        <span className="text-warning mt-1 block font-mono text-[11px]">
+        <span className="text-warning text-2xs mt-1 block font-mono">
           instance is shutting down…
         </span>
       ) : null}
       {error || refused ? (
-        <span className="text-destructive mt-1 block font-mono text-[11px]">
+        <span className="text-destructive text-2xs mt-1 block font-mono">
           {error?.message ?? refused}
         </span>
       ) : null}

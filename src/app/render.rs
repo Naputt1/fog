@@ -1,11 +1,13 @@
 //! Content-panel rendering: layout, scroll state, and the full `draw` pass.
 
 use super::{ALERT_REPAINT, ALERT_WIDTH, AlertHit, App, Mode};
+use crate::click_tab::TabKind;
 use crate::render;
+use crate::terminal::HealthStatus;
 use crate::worktree;
 use ratatui::{
     Frame,
-    layout::{Alignment, Constraint, Layout, Rect},
+    layout::{Alignment, Constraint, Layout, Margin, Rect},
     style::{Color, Style},
     symbols::border,
     text::{Line, Span, Text},
@@ -165,15 +167,71 @@ impl App {
         )
     }
 
+    /// Name shown in the content panel's top-left title.
+    fn content_title(&self) -> String {
+        self.tabs
+            .entries
+            .get(self.tabs.index)
+            .map(|e| e.name.clone())
+            .unwrap_or_else(|| "fog".to_string())
+    }
+
+    /// Top-right status suffix for the content panel: proxy address, shell
+    /// marker, or the active service's health.
+    fn content_status(&self) -> Line<'static> {
+        let theme = &self.theme;
+        let span = |text: String, color: Color| {
+            Line::from(Span::styled(
+                format!("{text} ─"),
+                Style::default().fg(color).bold(),
+            ))
+        };
+        if self.is_proxy_tab() {
+            return match &self.proxy {
+                Some(p) if p.is_running() => span(format!("● :{}", p.bound_port()), theme.proxy),
+                Some(_) => span("○ stopped".to_string(), theme.stopped),
+                None => span("○ not configured".to_string(), theme.text_muted),
+            };
+        }
+        let entry = self.tabs.entries.get(self.tabs.index);
+        if entry.map(|e| e.kind) == Some(TabKind::Terminal) {
+            return span("$ shell".to_string(), theme.terminal);
+        }
+        match entry {
+            Some(e) if e.pending => span("◌ waiting".to_string(), theme.status_300),
+            Some(e) if e.stopped => span("○ stopped".to_string(), theme.stopped),
+            Some(e) => match e.health_status {
+                HealthStatus::Healthy => span("● healthy".to_string(), theme.status_200),
+                HealthStatus::Starting => span("● starting".to_string(), theme.status_300),
+                HealthStatus::Unhealthy => span("● unhealthy".to_string(), theme.stopped),
+                HealthStatus::Pending => span("◌ pending".to_string(), theme.status_300),
+                HealthStatus::Unknown => span("○ unknown".to_string(), theme.text_muted),
+            },
+            None => span("● up".to_string(), theme.text_muted),
+        }
+    }
+
     pub(crate) fn draw(&mut self, frame: &mut Frame) {
         let area = frame.area();
+
+        // Paint the base background, then compose header / body / status.
+        frame.render_widget(Block::new().style(Style::default().bg(self.theme.bg)), area);
+
+        let rows = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(area);
+        let header_area = rows[0];
+        let body_area = rows[1];
+        let status_area = rows[2];
+
         let sidebar_width = self.tabs.min_width();
-
-        let main =
-            Layout::horizontal([Constraint::Min(1), Constraint::Length(sidebar_width)]).split(area);
-
-        let content_area = main[0];
-        let sidebar_area = main[1];
+        let cols = Layout::horizontal([Constraint::Length(sidebar_width), Constraint::Min(1)])
+            .split(body_area);
+        let sidebar_area = cols[0];
+        let content_area = cols[1];
 
         // Clamp scroll_offset before rendering so a resize or new output that
         // shrinks visible height can never leave offset stranded past the top
@@ -187,6 +245,7 @@ impl App {
             }
         }
 
+        self.draw_header(frame, header_area);
         self.tabs.draw(frame, sidebar_area, &self.theme);
 
         self.content_area = content_area;
@@ -199,18 +258,21 @@ impl App {
             .unwrap_or(false);
         let in_terminal_input = matches!(self.mode, Mode::TerminalInput);
 
-        let instructions = render::draw_instructions(is_proxy, is_shell, in_terminal_input);
-
+        // Content is a bordered panel; the render fns draw the block and pad the
+        // inner text by one cell. The border and title take the active tab's hue.
+        let hue = self.theme.tab_color(self.tabs.index);
         let block = Block::bordered()
+            .border_set(border::ROUNDED)
+            .border_style(Style::default().fg(hue))
+            .style(Style::default().bg(self.theme.bg))
             .title_top(
                 Line::from(Span::styled(
-                    self.panel_title(),
-                    Style::default().fg(self.theme.highlight).bold(),
+                    format!("─┤ {} ├", self.content_title()),
+                    Style::default().fg(hue).bold(),
                 ))
-                .centered(),
+                .alignment(Alignment::Left),
             )
-            .title_bottom(instructions.centered())
-            .border_set(border::THICK);
+            .title_top(self.content_status().alignment(Alignment::Right));
 
         if is_proxy {
             self.content_layout.clear();
@@ -242,25 +304,36 @@ impl App {
             );
         }
 
+        self.draw_status(frame, status_area, is_proxy, is_shell, in_terminal_input);
+
         if self.show_help {
+            let theme = &self.theme;
+            let keycap = |key: &str| {
+                Span::styled(
+                    format!(" {key} "),
+                    Style::default().fg(theme.key).bg(theme.surface_alt).bold(),
+                )
+            };
+            let desc =
+                |d: &str| Span::styled(format!("  {d}"), Style::default().fg(theme.text_muted));
             let help_text = vec![
-                Line::from(vec![Span::raw("  q/Ctrl+q   Quit                ")]),
-                Line::from(vec![Span::raw("  j/Right    Next tab            ")]),
-                Line::from(vec![Span::raw("  k/Left     Previous tab        ")]),
-                Line::from(vec![Span::raw("  i          Terminal input mode ")]),
-                Line::from(vec![Span::raw("  Esc        Exit input mode     ")]),
-                Line::from(vec![Span::raw("  R          Restart service     ")]),
-                Line::from(vec![Span::raw("  t/Ctrl+t   New shell tab       ")]),
-                Line::from(vec![Span::raw("  d          Close shell tab     ")]),
-                Line::from(vec![Span::raw("  s          Switch worktree     ")]),
-                Line::from(vec![Span::raw("  g/Home     Scroll to top       ")]),
-                Line::from(vec![Span::raw("  G/End      Scroll to bottom    ")]),
-                Line::from(vec![Span::raw("  Up/Down    Scroll output       ")]),
-                Line::from(vec![Span::raw("  PgUp/Dn    Scroll by page      ")]),
-                Line::from(vec![Span::raw("  ?          Toggle help         ")]),
+                Line::from(vec![keycap("q / Ctrl+q"), desc("quit")]),
+                Line::from(vec![keycap("j / Right"), desc("next tab")]),
+                Line::from(vec![keycap("k / Left"), desc("previous tab")]),
+                Line::from(vec![keycap("i"), desc("terminal input mode")]),
+                Line::from(vec![keycap("Esc"), desc("exit input mode")]),
+                Line::from(vec![keycap("R"), desc("restart service")]),
+                Line::from(vec![keycap("t / Ctrl+t"), desc("new shell tab")]),
+                Line::from(vec![keycap("d"), desc("close shell tab")]),
+                Line::from(vec![keycap("s"), desc("switch worktree")]),
+                Line::from(vec![keycap("g / Home"), desc("scroll to top")]),
+                Line::from(vec![keycap("G / End"), desc("scroll to bottom")]),
+                Line::from(vec![keycap("Up / Down"), desc("scroll output")]),
+                Line::from(vec![keycap("PgUp / PgDn"), desc("scroll by page")]),
+                Line::from(vec![keycap("?"), desc("toggle help")]),
             ];
 
-            let overlay_width = 40u16.min(area.width.saturating_sub(4));
+            let overlay_width = 44u16.min(area.width.saturating_sub(4));
             let overlay_height = help_text.len() as u16 + 2;
             let overlay_x = (area.width.saturating_sub(overlay_width)) / 2;
             let overlay_y = (area.height.saturating_sub(overlay_height)) / 2;
@@ -272,7 +345,14 @@ impl App {
                 height: overlay_height,
             };
 
-            let block = Block::bordered().title(" Help ").style(Style::default());
+            let block = Block::bordered()
+                .border_set(border::ROUNDED)
+                .border_style(Style::default().fg(self.theme.border))
+                .style(Style::default().bg(self.theme.surface))
+                .title(Span::styled(
+                    " Help ",
+                    Style::default().fg(self.theme.title).bold(),
+                ));
             let help = Paragraph::new(Text::from(help_text))
                 .block(block)
                 .alignment(Alignment::Left);
@@ -281,7 +361,7 @@ impl App {
             frame.render_widget(help, overlay_area);
         }
 
-        self.draw_alerts(frame, area);
+        self.draw_alerts(frame, body_area);
 
         if let Some(popup) = &self.switch_popup {
             let config_dir = self.config_path.parent().unwrap_or_else(|| Path::new("."));
@@ -304,7 +384,7 @@ impl App {
                     .any(|b| wt.branch.as_deref() == Some(b.as_str()));
                 let (prefix, label_style) = if is_current {
                     let p = if i == popup.selected { " >" } else { "  " };
-                    (p, Style::default().fg(Color::Rgb(255, 176, 0)).bold())
+                    (p, Style::default().fg(self.theme.key).bold())
                 } else if i == popup.selected {
                     (" >", Style::default().fg(self.theme.highlight).bold())
                 } else {
@@ -320,11 +400,14 @@ impl App {
                 if is_current {
                     spans.push(Span::styled(
                         " *",
-                        Style::default().fg(Color::Rgb(255, 176, 0)).bold(),
+                        Style::default().fg(self.theme.key).bold(),
                     ));
                 }
                 if is_running {
-                    spans.push(Span::styled(" *", Style::default().fg(Color::Blue).bold()));
+                    spans.push(Span::styled(
+                        " *",
+                        Style::default().fg(self.theme.status_200).bold(),
+                    ));
                 }
                 // Truncate path to single line to avoid wrap-induced overlay overflow.
                 // Reserve space for stars + two spaces + label/prefix already in spans.
@@ -356,10 +439,21 @@ impl App {
                     Style::default().fg(Color::Yellow),
                 )));
             }
-            lines.push(Line::from(Span::styled(
-                " f search   d terminate ",
-                Style::default().dim(),
-            )));
+            let key = |k: &str| {
+                Span::styled(format!(" {k} "), Style::default().fg(self.theme.key).bold())
+            };
+            let desc = |d: &str| {
+                Span::styled(
+                    format!(" {d}  "),
+                    Style::default().fg(self.theme.text_muted),
+                )
+            };
+            lines.push(Line::from(vec![
+                key("f"),
+                desc("search"),
+                key("d"),
+                desc("terminate"),
+            ]));
 
             let status_extra = popup
                 .status
@@ -376,7 +470,14 @@ impl App {
                 height: overlay_height,
             };
 
-            let block = Block::bordered().title(" Switch worktree ");
+            let block = Block::bordered()
+                .border_set(border::ROUNDED)
+                .border_style(Style::default().fg(self.theme.border))
+                .style(Style::default().bg(self.theme.surface))
+                .title(Span::styled(
+                    " Switch worktree ",
+                    Style::default().fg(self.theme.title).bold(),
+                ));
             let widget = Paragraph::new(Text::from(lines))
                 .block(block)
                 .alignment(Alignment::Left)
@@ -385,6 +486,131 @@ impl App {
             frame.render_widget(Clear, overlay_area);
             frame.render_widget(widget, overlay_area);
         }
+    }
+
+    /// One-line header: the `fog` wordmark and project (branch) on the left,
+    /// proxy address and service health on the right.
+    fn draw_header(&self, frame: &mut Frame, area: Rect) {
+        let theme = &self.theme;
+        frame.render_widget(Block::new().style(Style::default().bg(theme.surface)), area);
+        let inner = area.inner(Margin {
+            horizontal: 1,
+            vertical: 0,
+        });
+        if inner.width == 0 || inner.height == 0 {
+            return;
+        }
+
+        let title = self.panel_title();
+        let title = title.trim();
+        let left = Line::from(vec![
+            Span::styled("fog", Style::default().fg(theme.accent).bold()),
+            Span::styled(
+                if title.is_empty() {
+                    String::new()
+                } else {
+                    format!("  {title}")
+                },
+                Style::default().fg(theme.text),
+            ),
+        ]);
+        frame.render_widget(Paragraph::new(left), inner);
+        frame.render_widget(
+            Paragraph::new(self.header_status()).alignment(Alignment::Right),
+            inner,
+        );
+    }
+
+    /// Right-hand header content: proxy state and a per-service health meter.
+    fn header_status(&self) -> Line<'static> {
+        let theme = &self.theme;
+        let mut spans: Vec<Span<'static>> = Vec::new();
+
+        if let Some(p) = &self.proxy {
+            let (label, color) = if p.is_running() {
+                (format!("⬤ proxy :{}", p.bound_port()), theme.proxy)
+            } else {
+                ("○ proxy stopped".to_string(), theme.stopped)
+            };
+            spans.push(Span::styled(label, Style::default().fg(color).bold()));
+        }
+
+        let services: Vec<&crate::click_tab::TabEntry> = self
+            .tabs
+            .entries
+            .iter()
+            .filter(|e| e.kind == TabKind::Service)
+            .collect();
+        if !services.is_empty() {
+            if !spans.is_empty() {
+                spans.push(Span::styled("   ", Style::default()));
+            }
+            for e in &services {
+                let color = if e.pending {
+                    theme.status_300
+                } else {
+                    match e.health_status {
+                        HealthStatus::Healthy => theme.status_200,
+                        HealthStatus::Unhealthy => theme.stopped,
+                        HealthStatus::Starting | HealthStatus::Pending => theme.status_300,
+                        HealthStatus::Unknown => theme.text_muted,
+                    }
+                };
+                spans.push(Span::styled(
+                    if e.pending { "◌" } else { "●" },
+                    Style::default().fg(color),
+                ));
+            }
+            let healthy = services
+                .iter()
+                .filter(|e| e.health_status == HealthStatus::Healthy)
+                .count();
+            let color = if healthy == services.len() {
+                theme.status_200
+            } else {
+                theme.status_300
+            };
+            spans.push(Span::styled(
+                format!(" {healthy}/{} healthy", services.len()),
+                Style::default().fg(color).bold(),
+            ));
+        }
+
+        Line::from(spans)
+    }
+
+    /// One-line status bar: the current mode on the left, contextual key hints
+    /// on the right.
+    fn draw_status(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        is_proxy: bool,
+        is_shell: bool,
+        in_terminal_input: bool,
+    ) {
+        let theme = &self.theme;
+        frame.render_widget(Block::new().style(Style::default().bg(theme.surface)), area);
+        let inner = area.inner(Margin {
+            horizontal: 1,
+            vertical: 0,
+        });
+        if inner.width == 0 || inner.height == 0 {
+            return;
+        }
+
+        let (label, color) = match self.mode {
+            Mode::TerminalInput => ("INPUT", theme.accent),
+            Mode::ProxyFilter => ("FILTER", theme.proxy),
+            Mode::Normal => ("NORMAL", theme.text_muted),
+        };
+        frame.render_widget(
+            Paragraph::new(Span::styled(label, Style::default().fg(color).bold())),
+            inner,
+        );
+
+        let hints = render::draw_instructions(is_proxy, is_shell, in_terminal_input, theme);
+        frame.render_widget(Paragraph::new(hints).alignment(Alignment::Right), inner);
     }
 
     /// Returns `true` when the visible content changed since the last frame.
@@ -477,8 +703,10 @@ impl App {
             };
             let marker = if alert.copied { " ✓ " } else { " ⚠ " };
             let block = Block::bordered()
+                .border_set(border::ROUNDED)
                 .title(Span::styled(marker, Style::default().fg(color).bold()))
-                .border_style(Style::default().fg(color));
+                .border_style(Style::default().fg(color))
+                .style(Style::default().bg(self.theme.surface));
             let para = Paragraph::new(Text::from(Span::styled(
                 text.to_string(),
                 Style::default().fg(color),

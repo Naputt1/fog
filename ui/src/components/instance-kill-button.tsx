@@ -3,7 +3,8 @@ import { Trash2 } from "lucide-react";
 
 import { useKillInstance, useInstanceKillState } from "@/lib/hooks";
 import type { VariantProps } from "class-variance-authority";
-import { Button, buttonVariants } from "@/components/ui/button";
+import { Button } from "@/components/ui/button";
+import { buttonVariants } from "@/components/ui/button-variants";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -64,7 +65,7 @@ export function InstanceKillButton({
         Kill
       </Button>
       {error ? (
-        <span className="text-destructive mt-1 block font-mono text-[11px]">
+        <span className="text-destructive text-2xs mt-1 block font-mono">
           {error.message}
         </span>
       ) : null}

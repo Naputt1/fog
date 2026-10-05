@@ -41,8 +41,8 @@ function ScriptCard({
   const stats = scriptStats(instances);
 
   return (
-    <Card className="hover:border-primary/40 gap-0 py-0 transition-colors">
-      <CardContent className="flex flex-col gap-3 p-4">
+    <Card interactive spacing="none" padding="none">
+      <CardContent variant="stack" className="flex flex-col">
         <Link
           to="/projects/$project/$branch/$script"
           params={{ project, branch, script }}
@@ -58,7 +58,7 @@ function ScriptCard({
           />
         </Link>
 
-        <div className="text-muted-foreground flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[11px]">
+        <div className="text-muted-foreground text-2xs flex flex-wrap items-center gap-x-3 gap-y-1 font-mono">
           <span>{stats.total} services</span>
           <span className="text-primary">{stats.running} running</span>
           {instances.length > 1 ? (
@@ -110,10 +110,10 @@ function ScriptInstanceRow({
         search={{ pid: inst.pid }}
         className="focus-visible:ring-ring/60 flex min-w-0 flex-1 items-center gap-2 rounded outline-none focus-visible:ring-2"
       >
-        <span className="text-muted-foreground shrink-0 font-mono text-[11px]">
+        <span className="text-muted-foreground text-2xs shrink-0 font-mono">
           pid {inst.pid}
         </span>
-        <span className="text-muted-foreground ml-auto shrink-0 font-mono text-[11px]">
+        <span className="text-muted-foreground text-2xs ml-auto shrink-0 font-mono">
           {killing ? "killing…" : `${running}/${inst.services.length}`}
         </span>
       </Link>
@@ -168,7 +168,7 @@ function BranchScriptsPage() {
   if (instances.length === 0) {
     return (
       <Card>
-        <CardContent className="py-10 text-center">
+        <CardContent variant="empty" className="text-center">
           <p className="font-mono text-sm">
             <span className="text-muted-foreground">branch </span>
             <span className="text-foreground">{branch}</span>

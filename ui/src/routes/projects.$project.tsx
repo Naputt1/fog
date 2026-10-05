@@ -38,7 +38,7 @@ function ProjectLayout() {
         <ErrorState message={error?.message} />
       ) : !exists ? (
         <Card>
-          <CardContent className="py-10 text-center">
+          <CardContent variant="empty" className="text-center">
             <p className="font-mono text-sm">
               <span className="text-muted-foreground">project </span>
               <span className="text-foreground">{project}</span>

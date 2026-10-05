@@ -10,15 +10,31 @@ fog supports color customization through the `theme` field in `fog.json`.
 
 | Field | Default | Applies to |
 |-------|---------|------------|
-| `proxy` | `cyan` | Proxy tab name, WebSocket indicator, filter prompt |
-| `terminal` | `green` | Shell terminal tab names in sidebar |
-| `stopped` | `red` | Stopped service indicator dot and name |
-| `highlight` | `magenta` | Selected tab highlight |
-| `status_200` | `green` | HTTP 2xx status codes in proxy log |
-| `status_300` | `yellow` | HTTP 3xx status codes in proxy log |
-| `status_400` | `red` | HTTP 4xx status codes in proxy log |
-| `status_500` | `red` | HTTP 5xx status codes in proxy log |
-| `scrollbar` | `cyan` | Scrollbar thumb (when terminal supports it) |
+| `bg` | `#0d0d0f` | App background |
+| `surface` | `#161619` | Header, sidebar rail, status bar |
+| `surface_alt` | `#1e1e22` | Selected/active row fill |
+| `border` | `#2a2a2f` | Separators and popup borders |
+| `text` | `#e6e6e7` | Primary text |
+| `text_muted` | `#8f8f98` | Dimmed metadata and section labels |
+| `accent` | `#7aa2f7` | Brand, selection bar, focus |
+| `proxy` | `#7dcfff` | Proxy tab name, WebSocket indicator, filter prompt |
+| `terminal` | `#9ece6a` | Shell terminal tab names in sidebar |
+| `stopped` | `#f7768e` | Stopped service indicator dot and name |
+| `highlight` | `#7aa2f7` | Selected tab highlight |
+| `status_200` | `#9ece6a` | HTTP 2xx status codes in proxy log |
+| `status_300` | `#e0af68` | HTTP 3xx status codes in proxy log |
+| `status_400` | `#f7768e` | HTTP 4xx status codes in proxy log |
+| `status_500` | `#f7768e` | HTTP 5xx status codes in proxy log |
+| `scrollbar` | `#3b3b44` | Scrollbar thumb and track |
+| `selection_bg` | `#3b4261` | Selected row fill (sidebar, menus) |
+| `selection_fg` | `#e6e6e7` | Text drawn on the selected row |
+| `title` | `#7aa2f7` | Panel titles embedded in borders |
+| `key` | `#e0af68` | Keybar keycaps |
+| `tab_colors` | `#7dcfff`, `#bb9af7`, `#7aa2f7`, `#9ece6a`, `#e0af68`, `#f7768e` | Per-tab accent hues, assigned by tab order and cycled |
+
+`tab_colors` is an array of colors, not a single value. Each tab's panel border
+and title take the next hue in order (proxy, db, api, web, shells, ...) and wrap
+around when there are more tabs than colors.
 
 ## Color values
 
@@ -65,6 +81,22 @@ Names are case-insensitive (`"GREEN"`, `"green"`, `"Green"` all work).
 Invalid or unrecognized values default to `reset`.
 
 ## Example themes
+
+### Neutral (the default)
+
+```json
+{
+  "theme": {
+    "bg": "#0d0d0f",
+    "surface": "#161619",
+    "surface_alt": "#1e1e22",
+    "border": "#2a2a2f",
+    "text": "#e6e6e7",
+    "text_muted": "#8f8f98",
+    "accent": "#7aa2f7"
+  }
+}
+```
 
 ### Dark theme
 

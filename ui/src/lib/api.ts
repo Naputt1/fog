@@ -183,7 +183,9 @@ async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
     headers.set("Accept", "application/json");
     res = await fetch(path, { ...init, headers });
   } catch (cause) {
-    throw new Error(`Network error fetching ${path}: ${String(cause)}`);
+    throw new Error(`Network error fetching ${path}: ${String(cause)}`, {
+      cause,
+    });
   }
   if (!res.ok) throw await parseErrorResponse(res, path);
   return (await res.json()) as T;
@@ -202,7 +204,9 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
       body: JSON.stringify(body),
     });
   } catch (cause) {
-    throw new Error(`Network error posting ${path}: ${String(cause)}`);
+    throw new Error(`Network error posting ${path}: ${String(cause)}`, {
+      cause,
+    });
   }
   if (!res.ok) throw await parseErrorResponse(res, path);
   return (await res.json()) as T;

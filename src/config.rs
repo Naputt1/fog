@@ -37,6 +37,20 @@ pub struct HealthCheckConfig {
 }
 #[derive(Debug, Deserialize, Clone)]
 pub struct ThemeConfig {
+    /// App background.
+    pub bg: Option<String>,
+    /// Raised surfaces (header, sidebar rail, status bar).
+    pub surface: Option<String>,
+    /// Selected/active row fill.
+    pub surface_alt: Option<String>,
+    /// Separators and popup borders.
+    pub border: Option<String>,
+    /// Primary text.
+    pub text: Option<String>,
+    /// Dimmed metadata and section labels.
+    pub text_muted: Option<String>,
+    /// Single UI accent.
+    pub accent: Option<String>,
     pub proxy: Option<String>,
     pub terminal: Option<String>,
     pub stopped: Option<String>,
@@ -46,6 +60,16 @@ pub struct ThemeConfig {
     pub status_400: Option<String>,
     pub status_500: Option<String>,
     pub scrollbar: Option<String>,
+    /// Selected row fill (sidebar selection, menus).
+    pub selection_bg: Option<String>,
+    /// Text drawn on top of `selection_bg`.
+    pub selection_fg: Option<String>,
+    /// Panel titles embedded in borders.
+    pub title: Option<String>,
+    /// Keybar keycaps.
+    pub key: Option<String>,
+    /// Per-tab accent hues, assigned by tab order and cycled.
+    pub tab_colors: Option<Vec<String>>,
 }
 
 /// Accepts either a single health check object or an array of health checks.

@@ -299,6 +299,13 @@
     "theme": {
       "type": "object",
       "properties": {
+        "bg": { "type": "string", "description": "App background color." },
+        "surface": { "type": "string", "description": "Raised surfaces: header, sidebar rail, status bar." },
+        "surface_alt": { "type": "string", "description": "Selected/active row fill." },
+        "border": { "type": "string", "description": "Separators and popup borders." },
+        "text": { "type": "string", "description": "Primary text color." },
+        "text_muted": { "type": "string", "description": "Dimmed metadata and section labels." },
+        "accent": { "type": "string", "description": "Single UI accent: brand, selection bar, focus." },
         "proxy": { "type": "string" },
         "terminal": { "type": "string" },
         "stopped": { "type": "string" },
@@ -307,7 +314,16 @@
         "status_300": { "type": "string" },
         "status_400": { "type": "string" },
         "status_500": { "type": "string" },
-        "scrollbar": { "type": "string" }
+        "scrollbar": { "type": "string" },
+        "selection_bg": { "type": "string", "description": "Selected row fill." },
+        "selection_fg": { "type": "string", "description": "Text drawn on the selected row." },
+        "title": { "type": "string", "description": "Panel titles embedded in borders." },
+        "key": { "type": "string", "description": "Keybar keycap color." },
+        "tab_colors": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Per-tab accent hues, assigned by tab order and cycled."
+        }
       }
     }
   },

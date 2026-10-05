@@ -310,7 +310,7 @@ impl Terminal {
             parser,
             health_status: Arc::new(Mutex::new(HealthStatus::Unknown)),
             health_stop: Arc::new(AtomicBool::new(false)),
-            screen_generation: Arc::new(AtomicUsize::new(0)),
+            screen_generation,
             line_cache: RefCell::new(None),
             raw_output,
             handler,
@@ -2617,6 +2617,32 @@ mod tests {
         let (rows, cols) = t.parser.lock().expect("mutex poisoned").screen().size();
         assert_eq!(rows, 20, "height must track the visible area");
         assert_eq!(cols, 80, "width must never shrink");
+    }
+
+    /// Regression: the shell terminal must expose the same `screen_generation`
+    /// counter its PTY reader bumps. When it doesn't, the event loop sees no
+    /// change and the shell pane never repaints, so the prompt and command
+    /// output stay invisible until an unrelated event forces a frame.
+    #[cfg(unix)]
+    #[test]
+    fn test_spawn_shell_generation_tracks_reader_output() {
+        let mut t = Terminal::spawn_shell("bash".into(), 100).unwrap();
+        t.write(b"echo fog-shell-test\n");
+        // The reader thread parses the shell's output as it arrives and must
+        // advance the counter the terminal reports (up to ~5s).
+        let mut advanced = false;
+        for _ in 0..50 {
+            if t.screen_generation() > 0 {
+                advanced = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(
+            advanced,
+            "shell output never advanced screen_generation; the reader and the \
+             terminal are not sharing one counter"
+        );
     }
 
     /// Regression: when the terminal screen is wider than the render area (a

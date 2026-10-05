@@ -48,9 +48,9 @@ export function BrandCloud({
           y2="40"
           gradientUnits="userSpaceOnUse"
         >
-          <stop stopColor="#c4b5fd" />
-          <stop offset="0.45" stopColor="#a78bfa" />
-          <stop offset="1" stopColor="#7c3aed" />
+          <stop stopColor="var(--color-brand-1)" />
+          <stop offset="0.45" stopColor="var(--color-brand-2)" />
+          <stop offset="1" stopColor="var(--color-brand-3)" />
         </linearGradient>
       </defs>
       <path fill={`url(#${gradId})`} d={CLOUD_PATH} />

@@ -5,7 +5,7 @@ use crate::theme::Theme;
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Margin, Position, Rect},
-    style::{Style, Stylize},
+    style::Style,
     text::{Line, Span, Text},
     widgets::{Block, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
 };
@@ -271,48 +271,44 @@ pub(crate) fn draw_instructions(
     is_proxy: bool,
     is_shell: bool,
     in_terminal_input: bool,
+    theme: &Theme,
 ) -> Line<'static> {
-    if in_terminal_input {
-        Line::from(vec![
-            " Ctrl+Q ".into(),
-            "quit".blue().bold(),
-            " Esc ".into(),
-            "scroll".blue().bold(),
-        ])
+    let items: &[(&str, &str)] = if in_terminal_input {
+        &[("Ctrl+Q", "quit"), ("Esc", "scroll")]
     } else if is_proxy {
-        Line::from(vec![
-            " Q ".into(),
-            "quit".blue().bold(),
-            " R ".into(),
-            "restart".blue().bold(),
-            " / ".into(),
-            "filter".blue().bold(),
-        ])
+        &[("q", "quit"), ("R", "restart"), ("/", "filter")]
     } else if is_shell {
-        Line::from(vec![
-            " Q ".into(),
-            "quit".blue().bold(),
-            " T ".into(),
-            "new-term".blue().bold(),
-            " I ".into(),
-            "input".blue().bold(),
-            " D ".into(),
-            "close".blue().bold(),
-        ])
+        &[
+            ("q", "quit"),
+            ("t", "new-term"),
+            ("i", "input"),
+            ("d", "close"),
+        ]
     } else {
-        Line::from(vec![
-            " Q ".into(),
-            "quit".blue().bold(),
-            " R ".into(),
-            "restart".blue().bold(),
-            " I ".into(),
-            "input".blue().bold(),
-            " T ".into(),
-            "new-term".blue().bold(),
-            " S ".into(),
-            "switch-wt".blue().bold(),
-        ])
+        &[
+            ("q", "quit"),
+            ("R", "restart"),
+            ("i", "input"),
+            ("t", "new-term"),
+            ("s", "switch-wt"),
+        ]
+    };
+
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for (i, (key, desc)) in items.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(" · ", Style::default().fg(theme.text_muted)));
+        }
+        spans.push(Span::styled(
+            format!(" {key} "),
+            Style::default().fg(theme.key).bg(theme.surface_alt).bold(),
+        ));
+        spans.push(Span::styled(
+            format!(" {desc} "),
+            Style::default().fg(theme.text_muted),
+        ));
     }
+    Line::from(spans)
 }
 
 fn render_scrollbar(

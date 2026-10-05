@@ -88,7 +88,9 @@ export function ServiceTerminal({
             <Button
               variant={showTerminal ? "ghost" : "default"}
               size="sm"
-              className="h-7 font-mono text-xs"
+              font="mono"
+              text="xs"
+              className="h-7"
               onClick={() => onModeChange("logs")}
             >
               Logs (SSE)
@@ -96,7 +98,10 @@ export function ServiceTerminal({
             <Button
               variant={showTerminal ? "default" : "ghost"}
               size="sm"
-              className={cn("h-7 font-mono text-xs", isDocker && "opacity-50")}
+              font="mono"
+              text="xs"
+              dimmed={isDocker}
+              className="h-7"
               onClick={() => onModeChange("terminal")}
               disabled={isDocker}
               title={
@@ -117,7 +122,7 @@ export function ServiceTerminal({
       ) : null}
       {isDocker && showModeToggle ? (
         <div className="text-muted-foreground flex shrink-0 items-center gap-2 font-mono text-xs">
-          <span className="rounded-full bg-amber-500/20 px-2 py-0.5 text-amber-600">
+          <span className="bg-warning/20 text-warning rounded-full px-2 py-0.5">
             docker logs — read-only
           </span>
           <span>PTY not available for container — streaming `docker logs`</span>
