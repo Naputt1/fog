@@ -187,6 +187,29 @@ impl ProxyInstance {
         self
     }
 
+    /// Applies a newly resolved config (from another instance built by
+    /// `ProxyInstance::new`) and restarts the listener iff any field that
+    /// affects it changed. Returns `true` when a restart happened.
+    pub fn reconfigure(&mut self, mut target: ProxyInstance) -> bool {
+        let changed = self.port != target.port
+            || self.host != target.host
+            || self.routes != target.routes
+            || self.max_log_entries != target.max_log_entries
+            || self.tls_cert != target.tls_cert
+            || self.tls_key != target.tls_key;
+        if !changed {
+            return false;
+        }
+        self.port = target.port;
+        self.host = std::mem::take(&mut target.host);
+        self.routes = std::mem::take(&mut target.routes);
+        self.max_log_entries = target.max_log_entries;
+        self.tls_cert = target.tls_cert.take();
+        self.tls_key = target.tls_key.take();
+        self.restart();
+        true
+    }
+
     pub fn start(&mut self) {
         if self.running.load(Ordering::SeqCst) {
             return;
