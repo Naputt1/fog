@@ -2813,7 +2813,8 @@ mod tests {
             branch.map(str::to_string),
             false,
         ));
-        let path = std::env::temp_dir().join(format!("fog-{pid}.sock"));
+        crate::ipc::ensure_instance_dir().unwrap();
+        let path = crate::ipc::socket_path(pid);
         let _ = fs::remove_file(&path);
         let listener = crate::ipc::transport::Listener::bind(&path).unwrap();
         std::thread::spawn(move || {

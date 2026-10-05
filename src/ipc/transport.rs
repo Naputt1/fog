@@ -13,7 +13,9 @@ use std::path::Path;
 
 #[cfg(unix)]
 mod imp {
+    use std::fs;
     use std::io::{self, Read, Write};
+    use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::Path;
     use std::time::Duration;
@@ -26,7 +28,19 @@ mod imp {
 
     impl Listener {
         pub fn bind(path: &Path) -> io::Result<Self> {
-            Ok(Self(UnixListener::bind(path)?))
+            // Ensure the parent exists, but never change its permissions: a
+            // caller may legitimately bind in a shared directory. The dedicated
+            // per-user instance dir is locked to `0700` by
+            // `crate::ipc::ensure_instance_dir` before binding.
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let listener = UnixListener::bind(path)?;
+            // The socket itself is only readable/writable by the owner.
+            let mut perms = fs::metadata(path)?.permissions();
+            perms.set_mode(0o600);
+            fs::set_permissions(path, perms)?;
+            Ok(Self(listener))
         }
 
         pub fn incoming(&self) -> impl Iterator<Item = io::Result<Stream>> + '_ {
@@ -175,6 +189,9 @@ mod imp {
     impl Listener {
         pub fn bind(path: &Path) -> io::Result<Self> {
             // Marker file so `find_instances` can discover this endpoint.
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
             std::fs::write(path, b"")?;
             let name = pipe_name(path);
             match create_instance(&name) {

@@ -13,7 +13,27 @@ use std::time::Duration;
 
 pub fn spawn_server(state: Arc<IpcState>) -> io::Result<()> {
     let path = super::current_socket_path();
-    let _ = fs::remove_file(&path);
+    super::ensure_instance_dir()?;
+
+    // Never steal a socket another live instance is already serving. A socket
+    // file left behind by a crashed instance refuses connections, so it is
+    // safe to replace; a live one accepts them.
+    if path.exists() {
+        match super::transport::connect(&path) {
+            Ok(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::AddrInUse,
+                    format!(
+                        "another fog instance is already listening on {}",
+                        path.display()
+                    ),
+                ));
+            }
+            Err(_) => {
+                let _ = fs::remove_file(&path);
+            }
+        }
+    }
 
     let listener = Listener::bind(&path)?;
 
@@ -478,15 +498,23 @@ pub fn sanitize_service_name(name: &str) -> String {
         .collect()
 }
 
-/// Finds all running fog instances by scanning `$TMPDIR` for `fog-<pid>.sock`.
+/// Finds all running fog instances by scanning the per-user instance
+/// directory for `fog-<pid>.sock`.
 ///
-/// Returns a sorted list of `(pid, socket_path)` pairs.
+/// Returns a sorted list of `(pid, socket_path)` pairs. If the instance
+/// directory does not exist yet (no instance has ever run for this user),
+/// returns an empty list.
 ///
 /// # Errors
-/// Returns an error if the temp directory cannot be read.
+/// Returns an error if the instance directory exists but cannot be read.
 pub fn find_instances() -> io::Result<Vec<(u32, PathBuf)>> {
     let mut instances = Vec::new();
-    for entry in fs::read_dir(std::env::temp_dir())? {
+    let entries = match fs::read_dir(super::instance_dir()) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(instances),
+        Err(e) => return Err(e),
+    };
+    for entry in entries {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
         if let Some(pid_str) = name

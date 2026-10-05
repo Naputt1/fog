@@ -48,7 +48,7 @@ fn parse_color(s: &str) -> Color {
         "light_blue" => Color::LightBlue,
         "light_magenta" => Color::LightMagenta,
         "light_cyan" => Color::LightCyan,
-        hex if hex.starts_with('#') && hex.len() == 7 => {
+        hex if hex.starts_with('#') && hex.len() == 7 && hex.is_ascii() => {
             if let (Ok(r), Ok(g), Ok(b)) = (
                 u8::from_str_radix(&hex[1..3], 16),
                 u8::from_str_radix(&hex[3..5], 16),
@@ -151,6 +151,14 @@ mod tests {
     fn test_parse_color_default() {
         assert_eq!(parse_color("reset"), Color::Reset);
         assert_eq!(parse_color("default"), Color::Reset);
+    }
+
+    #[test]
+    fn test_parse_color_non_ascii_hex() {
+        // 7-byte strings whose bytes are not all ASCII must not be sliced by
+        // byte index (doing so would split a multi-byte char and panic).
+        assert_eq!(parse_color("#日xxx"), Color::Reset);
+        assert_eq!(parse_color("#ab日x"), Color::Reset);
     }
 
     #[test]

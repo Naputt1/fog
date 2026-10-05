@@ -1169,7 +1169,8 @@ mod tests {
             no_share,
         ));
         *state.ports.lock().expect("mutex poisoned") = ports;
-        let path = std::env::temp_dir().join(format!("fog-{pid}.sock"));
+        crate::ipc::ensure_instance_dir().unwrap();
+        let path = crate::ipc::socket_path(pid);
         let _ = std::fs::remove_file(&path);
         let listener = crate::ipc::transport::Listener::bind(&path).unwrap();
         std::thread::spawn(move || {

@@ -175,7 +175,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 /// Normalizes an authority (`host` or `host:port`) for same-origin comparison:
 /// lowercased, with a trailing default port (`:80`/`:443`) removed.
-fn normalize_authority(authority: &str) -> String {
+pub(crate) fn normalize_authority(authority: &str) -> String {
     let a = authority.trim().trim_end_matches('/');
     let a = a
         .strip_suffix(":80")
