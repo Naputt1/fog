@@ -546,6 +546,32 @@ fn make_stop_pipe() -> io::Result<(Fd, Fd)> {
     }
 }
 
+/// Feeds one chunk of PTY output into the shared parser, bumps the generation
+/// counter, appends to the bounded raw-output queue (re-render / scrollback),
+/// and tees it to the optional log file. Shared by every platform's reader.
+fn ingest(
+    parser: &Mutex<vt100::Parser>,
+    generation: &AtomicUsize,
+    raw_output: &Mutex<std::collections::VecDeque<Vec<u8>>>,
+    tee: &mut Option<fs::File>,
+    buf: &[u8],
+) {
+    if let Ok(mut p) = parser.lock() {
+        p.process(buf);
+    }
+    generation.fetch_add(1, Ordering::Relaxed);
+    {
+        let mut q = raw_output.lock().expect("mutex poisoned");
+        if q.len() >= 500 {
+            q.pop_front();
+        }
+        q.push_back(buf.to_vec());
+    }
+    if let Some(file) = tee.as_mut() {
+        let _ = file.write_all(buf);
+    }
+}
+
 /// Spawns a thread that reads PTY output from `fd` and feeds the parser,
 /// stopping when the PTY reaches EOF or the `stop` pipe becomes readable.
 ///
@@ -591,20 +617,13 @@ fn spawn_reader(
                 if n <= 0 {
                     break;
                 }
-                if let Ok(mut p) = parser.lock() {
-                    p.process(&buf[..n as usize]);
-                }
-                generation.fetch_add(1, Ordering::Relaxed);
-                {
-                    let mut q = raw_output.lock().expect("mutex poisoned");
-                    if q.len() >= 500 {
-                        q.pop_front();
-                    }
-                    q.push_back(buf[..n as usize].to_vec());
-                }
-                if let Some(file) = tee.as_mut() {
-                    let _ = file.write_all(&buf[..n as usize]);
-                }
+                ingest(
+                    &parser,
+                    &generation,
+                    &raw_output,
+                    &mut tee,
+                    &buf[..n as usize],
+                );
             } else if pfds[0].revents != 0 {
                 break;
             }
@@ -638,20 +657,7 @@ fn spawn_reader_pty(
             match reader.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
-                    if let Ok(mut p) = parser.lock() {
-                        p.process(&buf[..n]);
-                    }
-                    generation.fetch_add(1, Ordering::Relaxed);
-                    {
-                        let mut q = raw_output.lock().expect("mutex poisoned");
-                        if q.len() >= 500 {
-                            q.pop_front();
-                        }
-                        q.push_back(buf[..n].to_vec());
-                    }
-                    if let Some(file) = tee.as_mut() {
-                        let _ = file.write_all(&buf[..n]);
-                    }
+                    ingest(&parser, &generation, &raw_output, &mut tee, &buf[..n]);
                 }
                 Err(_) => break,
             }
