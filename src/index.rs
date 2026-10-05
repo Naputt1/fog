@@ -10,7 +10,7 @@ use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use std::convert::Infallible;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::{Command, Stdio};
 use std::task::{Context, Poll};
@@ -734,6 +734,24 @@ pub fn index_log_dir(port: u16) -> PathBuf {
     std::env::temp_dir().join(format!("fog-index-{port}.logs"))
 }
 
+/// Restricts `path` to owner-only permissions (`mode`) on Unix; no-op
+/// elsewhere. Mirrors [`crate::ipc::ensure_instance_dir`], so an index log in
+/// the shared temp dir is not readable by other local users.
+#[cfg(unix)]
+fn restrict_permissions(path: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Ok(meta) = std::fs::metadata(path) {
+        let mut perms = meta.permissions();
+        perms.set_mode(mode);
+        let _ = std::fs::set_permissions(path, perms);
+    }
+}
+
+/// Restricts `path` to owner-only permissions (`mode`) on Unix; no-op
+/// elsewhere.
+#[cfg(not(unix))]
+fn restrict_permissions(_path: &Path, _mode: u32) {}
+
 /// Resolves the port for `fog index serve`: explicit `--port` wins, then
 /// `FOG_INDEX_PORT`, then the effective config port (project/global fallback),
 /// then the default.
@@ -775,12 +793,14 @@ pub fn serve_detached(port: u16, network: &str) -> io::Result<()> {
             log_dir.display()
         ))
     })?;
+    restrict_permissions(&log_dir, 0o700);
     let log_file = std::fs::File::create(log_dir.join("daemon.log")).map_err(|e| {
         io::Error::other(format!(
             "could not create {}: {e}",
             log_dir.join("daemon.log").display()
         ))
     })?;
+    restrict_permissions(&log_dir.join("daemon.log"), 0o600);
     // Separate fds for stdout/stderr so both capture the child's diagnostics.
     let log_err = log_file
         .try_clone()
@@ -857,10 +877,12 @@ fn spawn_server(cfg: &RouterConfig) -> Result<(), String> {
     }
     let log_dir = index_log_dir(port);
     let _ = std::fs::create_dir_all(&log_dir);
+    restrict_permissions(&log_dir, 0o700);
     let log_file = std::fs::File::create(log_dir.join("daemon.log")).and_then(|f| {
         let err = f.try_clone()?;
         Ok((f, err))
     });
+    restrict_permissions(&log_dir.join("daemon.log"), 0o600);
     let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("fog"));
     let mut cmd = std::process::Command::new(&exe);
     // `--foreground`: the child must block; this parent does the detaching.

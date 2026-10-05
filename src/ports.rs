@@ -254,8 +254,11 @@ pub fn resolve_template(s: &str, ports: &PortMap, branch: Option<&str>) -> Resul
             out.push_str(&repl);
             i = start + end + 1;
         } else {
-            out.push(bytes[i] as char);
-            i += 1;
+            // Advance by a whole char, not a byte: `bytes[i] as char` would
+            // corrupt any UTF-8 continuation byte (e.g. `é` → `Ã©`).
+            let ch = s[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
         }
     }
     Ok(out)
@@ -302,9 +305,19 @@ fn port_keys(ports: &PortMap) -> String {
     }
 }
 
-/// Returns `true` if `s` contains any `${...}` template.
+/// Returns `true` if `s` contains one of fog's template prefixes.
+///
+/// Only fog's own atoms count; a shell expansion such as `${HOME}` is left to
+/// the shell, so it is not a template.
 pub fn has_template(s: &str) -> bool {
-    s.contains("${")
+    const PREFIXES: [&str; 5] = [
+        "${ports.",
+        "${branch}",
+        "${FOG_BRANCH}",
+        "${branch_raw}",
+        "${FOG_BRANCH_RAW}",
+    ];
+    PREFIXES.iter().any(|p| s.contains(p))
 }
 
 /// Collects every `${ports.<name>}` name referenced by `s` into `out`.
@@ -391,8 +404,8 @@ pub fn validate_native_routes(
                     r.service, e
                 )
             })?;
-        } else if r.port.parse::<u16>().is_ok() {
-            // literal port — ok
+        } else if r.port.trim().parse::<u16>().is_ok() {
+            // literal port (whitespace-padded numerics included) — ok
         } else if r.port.trim().is_empty() {
             return Err(format!(
                 "native_routes for service '{}' has invalid port '{}'",
@@ -401,6 +414,11 @@ pub fn validate_native_routes(
         } else if r.port.contains("${") {
             return Err(format!(
                 "native_routes for service '{}' port '{}' must be '${{ports.<name>}}' or literal port",
+                r.service, r.port
+            ));
+        } else {
+            return Err(format!(
+                "native_routes for service '{}' has invalid port '{}'",
                 r.service, r.port
             ));
         }
@@ -745,5 +763,61 @@ mod tests {
             resolve_template("a${ports.api}b${ports.db}c", &m, None).unwrap(),
             "a3000b5432c"
         );
+    }
+
+    #[test]
+    fn test_resolve_preserves_non_ascii() {
+        let m = pm(&[("api", 3000)]);
+        assert_eq!(
+            resolve_template("café-${ports.api}", &m, None).unwrap(),
+            "café-3000"
+        );
+        // Non-ASCII on both sides of a template.
+        assert_eq!(
+            resolve_template("héllo-${ports.api}-wörld", &m, None).unwrap(),
+            "héllo-3000-wörld"
+        );
+    }
+
+    #[test]
+    fn test_has_template_only_fog_atoms() {
+        // Shell expansions are not fog templates.
+        assert!(!has_template("${HOME}/bin"));
+        assert!(!has_template("$${not_a_template}"));
+        assert!(!has_template("plain"));
+        // Real fog atoms are.
+        assert!(has_template("${ports.api}"));
+        assert!(has_template("${branch}"));
+        assert!(has_template("${FOG_BRANCH}"));
+        assert!(has_template("${branch_raw}"));
+        assert!(has_template("${FOG_BRANCH_RAW}"));
+    }
+
+    fn route(service: &str, port: &str) -> crate::config::NativeRouteConfig {
+        crate::config::NativeRouteConfig {
+            host: "api.acme".to_string(),
+            service: service.to_string(),
+            port: port.to_string(),
+            path_prefix: None,
+            endpoint: None,
+        }
+    }
+
+    #[test]
+    fn test_validate_native_routes_accepts_literal_and_template() {
+        let m = pm(&[("api", 8080)]);
+        assert!(validate_native_routes(&[route("api", "8080")], &m, None).is_ok());
+        assert!(validate_native_routes(&[route("api", "${ports.api}")], &m, None).is_ok());
+        // Whitespace-padded literal port still resolves as a number.
+        assert!(validate_native_routes(&[route("api", " 8080 ")], &m, None).is_ok());
+    }
+
+    #[test]
+    fn test_validate_native_routes_rejects_invalid_literal_ports() {
+        let m = pm(&[]);
+        for port in ["nope", "80x", "80 < 90", "  "] {
+            let err = validate_native_routes(&[route("api", port)], &m, None).unwrap_err();
+            assert!(err.contains("invalid port"), "{port}: {err}");
+        }
     }
 }

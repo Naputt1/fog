@@ -1634,6 +1634,10 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
         &owned_shared,
     )
     .map_err(|e| {
+        // Close any handoff fds we duped that the failed build did not consume.
+        for (_, handoff) in adopted.drain() {
+            fog::fds::close(handoff.fd);
+        }
         // Restore the terminal before reporting so it is usable again.
         if !detached {
             let _ = execute!(stdout(), LeaveAlternateScreen, DisableMouseCapture);
@@ -1686,10 +1690,13 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
     drop(owner_lock);
 
     // A detached daemon has no UI to hot-reload, so the config watcher is skipped.
-    let config_rx = if detached {
-        std::sync::mpsc::channel().1
+    let (config_rx, config_watcher_stop) = if detached {
+        (
+            std::sync::mpsc::channel().1,
+            Arc::new(AtomicBool::new(false)),
+        )
     } else {
-        config_watcher::spawn_config_watcher(config_path.clone(), Arc::new(AtomicBool::new(false)))
+        config_watcher::spawn_config_watcher(config_path.clone())
     };
 
     // Persist setup diagnostics, then surface warnings. Detached runs already
@@ -1720,6 +1727,7 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
         theme,
         config_path,
         config_rx,
+        config_watcher_stop,
         ipc_state,
         config_rel: cli.config.clone(),
         save_logs: cli.save_logs,
@@ -1758,6 +1766,14 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
 fn create_log_dir() -> io::Result<PathBuf> {
     let dir = ipc::instance_log_dir(std::process::id());
     fs::create_dir_all(&dir)?;
+    // Restrict to the owner, matching `ipc::ensure_instance_dir`.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&dir)?.permissions();
+        perms.set_mode(0o700);
+        fs::set_permissions(&dir, perms)?;
+    }
     Ok(dir)
 }
 
