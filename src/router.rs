@@ -321,13 +321,14 @@ pub fn ensure_native_routes(
                 continue;
             }
             if verbose {
+                let prefix = crate::log::INFO_PREFIX;
                 match &r.endpoint {
                     Some(endpoint) => messages.push(format!(
-                        "endpoint route {}.{} -> host.docker.internal:{} (Host: {})",
+                        "{prefix}endpoint route {}.{} -> host.docker.internal:{} (Host: {})",
                         r.service, endpoint, port, host
                     )),
                     None => messages.push(format!(
-                        "native route {} -> host.docker.internal:{} (Host: {})",
+                        "{prefix}native route {} -> host.docker.internal:{} (Host: {})",
                         r.service, port, host
                     )),
                 }
@@ -917,10 +918,10 @@ mod tests {
         let loud = ensure_native_routes(&native_routes(), &ports(), Some("main"), &cfg, true);
         assert_eq!(
             loud,
-            vec![
-                "native route frontend -> host.docker.internal:53123 (Host: main.red-fox)"
-                    .to_string()
-            ]
+            vec![format!(
+                "{}native route frontend -> host.docker.internal:53123 (Host: main.red-fox)",
+                crate::log::INFO_PREFIX
+            )]
         );
         let _ = std::fs::remove_dir_all(&base);
     }

@@ -92,16 +92,6 @@ impl App {
             .unwrap_or(false)
     }
 
-    /// Records a setup warning: shown in the startup overlay (info lines are
-    /// omitted) and always reprinted to stderr once the TUI exits.
-    pub(crate) fn note_setup_message(&mut self, msg: String) {
-        if !crate::log::is_info(&msg) {
-            self.startup_messages.push(msg.clone());
-            self.show_startup_popup = true;
-        }
-        self.errors.push(msg);
-    }
-
     pub(crate) fn new_terminal(&mut self) {
         match Terminal::spawn_shell("bash".to_string(), self.scrollback) {
             Ok(term) => {
@@ -113,9 +103,7 @@ impl App {
                 self.scroll_offset = 0;
                 self.mode = Mode::TerminalInput;
             }
-            Err(e) => self
-                .errors
-                .push(format!("failed to create terminal: {}", e)),
+            Err(e) => self.note_error(format!("failed to create terminal: {}", e)),
         }
     }
 
@@ -146,15 +134,19 @@ impl App {
             }
             return;
         }
+        let mut restart_error = None;
         if let Some(item) = self.service_tab_index().and_then(|i| self.items.get_mut(i))
             && !item.is_shell()
         {
             if let Err(e) = item.restart() {
-                self.errors.push(format!("restart error: {}", e));
+                restart_error = Some(format!("restart error: {}", e));
             }
             if let Some(e) = self.tabs.entries.get_mut(self.tabs.index) {
                 e.stopped = false;
             }
+        }
+        if let Some(e) = restart_error {
+            self.note_error(e);
         }
     }
 }

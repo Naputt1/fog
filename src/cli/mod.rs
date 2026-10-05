@@ -1672,6 +1672,10 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
             startup_messages.extend(messages);
         }
     }
+    // Non-fatal config warnings raised during build (e.g. share without a
+    // health check) surface alongside the other startup warnings.
+    startup_messages.extend(runtime.warnings.iter().cloned());
+
     // Log allocated ports for visibility (also useful for `fog logs`)
     if !port_map.is_empty() {
         let mut names: Vec<&String> = port_map.keys().collect();

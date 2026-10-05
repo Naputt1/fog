@@ -10,7 +10,7 @@ use ratatui::layout::Rect;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 mod switch;
 use switch::SwitchPopup;
@@ -62,6 +62,36 @@ pub struct PendingService {
     pub tab_index: usize,
 }
 
+/// A transient, auto-dismissing notification shown in the bottom-right corner.
+struct Alert {
+    message: String,
+    created: Instant,
+    ttl: Duration,
+    /// Whether the alert was just copied (rendered with a green accent).
+    copied: bool,
+}
+
+/// Screen regions of a visible alert, recorded at draw time for mouse hit-testing.
+struct AlertHit {
+    /// The whole box; clicking here copies the message.
+    body: Rect,
+    /// The `✕` control on the top border; clicking here dismisses the alert.
+    close: Rect,
+    /// Index into [`App::alerts`].
+    index: usize,
+}
+
+/// How long a raised alert stays before auto-dismissing.
+const ALERT_TTL: Duration = Duration::from_secs(8);
+/// How long a copied alert lingers with its green confirmation.
+const ALERT_COPIED_TTL: Duration = Duration::from_millis(1500);
+/// Maximum number of alerts shown at once; older ones are dropped.
+const ALERT_MAX_VISIBLE: usize = 4;
+/// Preferred alert width, clamped to the frame.
+const ALERT_WIDTH: u16 = 60;
+/// Repaint cadence while alerts are visible, so they expire on time.
+const ALERT_REPAINT: Duration = Duration::from_millis(250);
+
 /// Main application state managing terminals, the proxy, tabs, and input handling.
 pub struct App {
     items: Vec<Terminal>,
@@ -107,10 +137,11 @@ pub struct App {
     no_share: bool,
     /// Whether `--verbose` was passed: gates informational setup output.
     verbose: bool,
-    /// Non-fatal startup warnings, shown as a dismissible overlay.
-    startup_messages: Vec<String>,
-    /// Whether the startup-warning overlay is currently visible.
-    show_startup_popup: bool,
+    /// Non-fatal runtime warnings and errors, shown as bottom-right alerts.
+    alerts: Vec<Alert>,
+    /// Screen regions of each visible alert at the last draw, so a mouse click
+    /// can copy the alert body or dismiss it via the close control.
+    alert_areas: Vec<AlertHit>,
     /// Set when something happened that requires the next frame to be drawn
     /// (input, health change, config reload, IPC control, resize).
     force_redraw: bool,
@@ -142,7 +173,7 @@ pub struct AppCreateOpts {
     pub save_logs: bool,
     pub no_share: bool,
     pub verbose: bool,
-    /// Non-fatal startup warnings, shown as a dismissible overlay and
+    /// Non-fatal startup warnings, surfaced as bottom-right alerts and
     /// reprinted to stderr on exit.
     pub startup_messages: Vec<String>,
 }
@@ -169,7 +200,15 @@ impl App {
             verbose,
             startup_messages,
         } = opts;
-        let show_startup_popup = !startup_messages.is_empty();
+        let alerts: Vec<Alert> = startup_messages
+            .iter()
+            .map(|message| Alert {
+                message: message.clone(),
+                created: Instant::now(),
+                ttl: ALERT_TTL,
+                copied: false,
+            })
+            .collect();
         let title_branch = ipc_state.branch.clone();
         let (tabs, proxy_tab_index) = Self::build_tabs(
             &items,
@@ -214,13 +253,51 @@ impl App {
             switch_popup: None,
             no_share,
             verbose,
-            startup_messages,
-            show_startup_popup,
+            alerts,
+            alert_areas: Vec::new(),
             force_redraw: true,
             last_drawn_gen: 0,
             last_drawn_proxy_fp: (0, 0),
             last_draw: Instant::now(),
         }
+    }
+}
+
+impl App {
+    /// Records a runtime warning or error: raised as a bottom-right alert and
+    /// reprinted to stderr once the TUI exits.
+    pub(crate) fn note_error(&mut self, msg: String) {
+        self.push_alert(msg.clone());
+        self.errors.push(msg);
+    }
+
+    /// Pushes an alert, dropping the oldest beyond [`ALERT_MAX_VISIBLE`].
+    ///
+    /// Informational setup lines (see [`crate::log::is_info`]) never become
+    /// alerts; this is the single gate every caller funnels through.
+    pub(crate) fn push_alert(&mut self, msg: String) {
+        if crate::log::is_info(&msg) {
+            return;
+        }
+        self.alerts.push(Alert {
+            message: msg,
+            created: Instant::now(),
+            ttl: ALERT_TTL,
+            copied: false,
+        });
+        if self.alerts.len() > ALERT_MAX_VISIBLE {
+            let drop = self.alerts.len() - ALERT_MAX_VISIBLE;
+            self.alerts.drain(0..drop);
+        }
+        self.force_redraw = true;
+    }
+
+    /// Removes alerts whose lifetime has elapsed. Returns `true` if any were
+    /// removed, so the caller can request a repaint.
+    pub(crate) fn prune_alerts(&mut self) -> bool {
+        let before = self.alerts.len();
+        self.alerts.retain(|a| a.created.elapsed() < a.ttl);
+        before != self.alerts.len()
     }
 }
 
@@ -279,8 +356,8 @@ mod tests {
             switch_popup: None,
             no_share: false,
             verbose: false,
-            startup_messages: vec![],
-            show_startup_popup: false,
+            alerts: vec![],
+            alert_areas: Vec::new(),
             force_redraw: true,
             last_drawn_gen: 0,
             last_drawn_proxy_fp: (0, 0),
@@ -317,66 +394,125 @@ mod tests {
     }
 
     #[test]
-    fn test_startup_popup_dismissed_by_any_key() {
-        let tabs = ClickTab::new(vec!["svc".into()], 10, 30);
-        let mut app = make_app(vec![], None, tabs, Mode::Normal, Rect::default());
-        app.startup_messages = vec!["⚠ docker hung".to_string()];
-        app.show_startup_popup = true;
-
-        app.handle_key(KeyEvent::from(KeyCode::Char('x')));
-
-        assert!(!app.show_startup_popup);
-        assert!(!app.exit);
-    }
-
-    #[test]
-    fn test_startup_popup_quit_key_still_exits() {
-        let tabs = ClickTab::new(vec!["svc".into()], 10, 30);
-        let mut app = make_app(vec![], None, tabs, Mode::Normal, Rect::default());
-        app.startup_messages = vec!["⚠ docker hung".to_string()];
-        app.show_startup_popup = true;
-
-        app.handle_key(KeyEvent::from(KeyCode::Char('q')));
-
-        assert!(!app.show_startup_popup);
-        assert!(app.exit);
-    }
-
-    #[test]
-    fn test_note_setup_message_shows_only_warnings() {
+    fn test_info_lines_never_raise_alerts() {
         let tabs = ClickTab::new(vec!["svc".into()], 10, 30);
         let mut app = make_app(vec![], None, tabs, Mode::Normal, Rect::default());
 
-        app.note_setup_message("  + port web -> 1".to_string());
-        assert!(!app.show_startup_popup, "info lines never open the popup");
+        app.note_error("  + port web -> 1".to_string());
+        assert!(app.alerts.is_empty(), "info lines never raise an alert");
         assert_eq!(app.errors.len(), 1);
 
-        app.note_setup_message("⚠ docker hung".to_string());
-        assert!(app.show_startup_popup);
-        assert_eq!(app.startup_messages.len(), 1);
+        app.note_error("⚠ docker hung".to_string());
+        assert_eq!(app.alerts.len(), 1);
         assert_eq!(app.errors.len(), 2);
     }
 
     #[test]
-    fn test_startup_popup_renders_messages() {
+    fn test_push_alert_caps_and_flags_redraw() {
+        let tabs = ClickTab::new(vec!["svc".into()], 10, 30);
+        let mut app = make_app(vec![], None, tabs, Mode::Normal, Rect::default());
+        app.force_redraw = false;
+
+        for i in 0..6 {
+            app.push_alert(format!("m{i}"));
+        }
+
+        assert_eq!(app.alerts.len(), ALERT_MAX_VISIBLE);
+        assert_eq!(app.alerts.first().unwrap().message, "m2");
+        assert_eq!(app.alerts.last().unwrap().message, "m5");
+        assert!(app.force_redraw);
+    }
+
+    #[test]
+    fn test_prune_alerts_removes_expired() {
+        let tabs = ClickTab::new(vec!["svc".into()], 10, 30);
+        let mut app = make_app(vec![], None, tabs, Mode::Normal, Rect::default());
+        app.push_alert("⚠ boom".to_string());
+        app.alerts[0].created = Instant::now() - Duration::from_secs(60);
+
+        assert!(app.prune_alerts());
+        assert!(app.alerts.is_empty());
+        assert!(!app.prune_alerts());
+    }
+
+    #[test]
+    fn test_alert_click_copies_and_flags() {
+        let tabs = ClickTab::new(vec!["svc".into()], 10, 30);
+        let mut app = make_app(vec![], None, tabs, Mode::Normal, Rect::default());
+        app.push_alert("⚠ boom".to_string());
+        app.alert_areas = vec![AlertHit {
+            body: Rect {
+                x: 0,
+                y: 0,
+                width: 10,
+                height: 3,
+            },
+            close: Rect {
+                x: 8,
+                y: 0,
+                width: 1,
+                height: 1,
+            },
+            index: 0,
+        }];
+
+        assert!(app.handle_alert_click(5, 1));
+        assert!(app.alerts[0].copied);
+        assert_eq!(app.alerts[0].ttl, ALERT_COPIED_TTL);
+        assert!(!app.handle_alert_click(50, 50));
+    }
+
+    #[test]
+    fn test_alert_close_dismisses_without_copying() {
+        let tabs = ClickTab::new(vec!["svc".into()], 10, 30);
+        let mut app = make_app(vec![], None, tabs, Mode::Normal, Rect::default());
+        app.push_alert("⚠ boom".to_string());
+        app.alert_areas = vec![AlertHit {
+            body: Rect {
+                x: 0,
+                y: 0,
+                width: 10,
+                height: 3,
+            },
+            close: Rect {
+                x: 8,
+                y: 0,
+                width: 1,
+                height: 1,
+            },
+            index: 0,
+        }];
+
+        assert!(app.handle_alert_click(8, 0));
+        assert!(app.alerts.is_empty());
+    }
+
+    #[test]
+    fn test_alert_renders_message() {
         use ratatui::Terminal as RatatuiTerminal;
         use ratatui::backend::TestBackend;
 
         let tabs = ClickTab::new(vec!["svc".into()], 10, 30);
         let mut app = make_app(vec![], None, tabs, Mode::Normal, Rect::default());
-        app.startup_messages = vec!["⚠ docker hung".to_string()];
-        app.show_startup_popup = true;
+        app.push_alert("⚠ docker hung".to_string());
 
-        let mut terminal = RatatuiTerminal::new(TestBackend::new(60, 12)).unwrap();
+        let mut terminal = RatatuiTerminal::new(TestBackend::new(60, 24)).unwrap();
         terminal.draw(|f| app.draw(f)).unwrap();
 
         let buf = terminal.backend().buffer();
-        let content: String = (0..12)
+        let content: String = (0..24)
             .flat_map(|y| (0..60).map(move |x| (x, y)))
             .map(|(x, y)| buf[(x, y)].symbol().to_string())
             .collect();
-        assert!(content.contains("Startup"), "overlay title missing");
-        assert!(content.contains("docker hung"), "warning text missing");
+        // Exactly one warning marker: the box title. The message's own `⚠ ` is
+        // stripped from the display, so copy/stderr keep the full text.
+        assert_eq!(
+            content.matches('⚠').count(),
+            1,
+            "expected one marker: {content}"
+        );
+        assert!(content.contains('✕'), "close control missing");
+        assert!(content.contains("docker hung"), "alert text missing");
     }
 
     #[test]
