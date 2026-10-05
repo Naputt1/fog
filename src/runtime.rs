@@ -731,21 +731,6 @@ pub fn build_with_opts(opts: BuildOpts) -> Result<Runtime, String> {
     // otherwise infer from git worktree.
     let branch = branch_override.or_else(|| resolve_branch(config_dir));
 
-    // Validate share + random-port footgun: share services must not use random ports
-    // (they would diverge per instance while sharing one backing resource).
-    // Since ports map is per-instance, a random allocation would be useless for share.
-    // We allow fixed ports only for share services.
-    // Detect via has_template on health_check target/cmd? For now, error if share
-    // service has any template referencing ports with spec 0 is not directly visible,
-    // so we simply forbid share services from using any ${ports.*} template when
-    // the corresponding spec was 0 — but ports map already resolved, so we catch
-    // by checking if the service had a template and ports contains that key: allow.
-    // Simpler: forbid share+template entirely with a warning? Keep as error if
-    // share service uses ports template and concurrency true? For v1, allow but
-    // document risk; we error only if share service references a port that was
-    // allocated as random and health_check uses it — that's actually okay to
-    // diverge? We'll keep lenient and just resolve.
-
     // Clone and template-resolve entries when ports non-empty or branch present.
     let raw_entries = script.service.clone().unwrap_or_default();
     // Which services reference a `${ports.*}` name. Such a service can only be
@@ -820,6 +805,30 @@ pub fn build_with_opts(opts: BuildOpts) -> Result<Runtime, String> {
         let project = project.clone();
         let script_name = script_name.to_string();
 
+        // Every "start it now" arm below performs the same 12-argument spawn
+        // with identical service/identity arguments; capture those once. The
+        // clone captured for the closure leaves the originals free to be moved
+        // onto terminals in the adopting/borrowing arms.
+        let project_for_spawn = project.clone();
+        let script_name_for_spawn = script_name.clone();
+        let spawn_now = |health_checks: Vec<HealthCheckConfig>,
+                         injected_env: HashMap<String, String>| {
+            spawn_checked_terminal(
+                &service_path_str,
+                &entry.cmd,
+                &name,
+                scrollback,
+                save_logs,
+                log_dir.clone(),
+                health_checks,
+                entry.shutdown_cmd.clone(),
+                branch.clone(),
+                project_for_spawn.clone(),
+                &script_name_for_spawn,
+                injected_env,
+            )
+        };
+
         let mut terminal = if shared {
             if let Some(handoff) = adopted.remove(&name) {
                 let mut t = Terminal::adopt(
@@ -846,20 +855,7 @@ pub fn build_with_opts(opts: BuildOpts) -> Result<Runtime, String> {
                 t
             } else if health_checks.is_empty() {
                 let injected_env = entry.env.clone().unwrap_or_default();
-                let t = spawn_checked_terminal(
-                    &service_path_str,
-                    &entry.cmd,
-                    &name,
-                    scrollback,
-                    save_logs,
-                    log_dir.clone(),
-                    health_checks,
-                    entry.shutdown_cmd.clone(),
-                    branch.clone(),
-                    project,
-                    &script_name,
-                    injected_env,
-                );
+                let t = spawn_now(health_checks, injected_env);
                 // build() runs while the TUI is already in raw/alternate-screen
                 // mode, so a config warning must render in the tab instead of
                 // stderr (which would corrupt the layout).
@@ -903,20 +899,7 @@ pub fn build_with_opts(opts: BuildOpts) -> Result<Runtime, String> {
                     reused
                 } else {
                     let injected_env = entry.env.clone().unwrap_or_default();
-                    spawn_checked_terminal(
-                        &service_path_str,
-                        &entry.cmd,
-                        &name,
-                        scrollback,
-                        save_logs,
-                        log_dir.clone(),
-                        health_checks,
-                        entry.shutdown_cmd.clone(),
-                        branch.clone(),
-                        project,
-                        &script_name,
-                        injected_env,
-                    )
+                    spawn_now(health_checks, injected_env)
                 }
             } else {
                 // Nothing is running: start the service immediately instead of
@@ -925,20 +908,7 @@ pub fn build_with_opts(opts: BuildOpts) -> Result<Runtime, String> {
                 // start command output, so no stderr notice is needed (stderr
                 // would corrupt the already-active TUI).
                 let injected_env = entry.env.clone().unwrap_or_default();
-                spawn_checked_terminal(
-                    &service_path_str,
-                    &entry.cmd,
-                    &name,
-                    scrollback,
-                    save_logs,
-                    log_dir.clone(),
-                    health_checks,
-                    entry.shutdown_cmd.clone(),
-                    branch.clone(),
-                    project,
-                    &script_name,
-                    injected_env,
-                )
+                spawn_now(health_checks, injected_env)
             }
         } else if has_deps {
             let deps = entry.depends_on.clone().unwrap_or_default();
@@ -965,20 +935,7 @@ pub fn build_with_opts(opts: BuildOpts) -> Result<Runtime, String> {
             t
         } else {
             let injected_env = entry.env.clone().unwrap_or_default();
-            spawn_checked_terminal(
-                &service_path_str,
-                &entry.cmd,
-                &name,
-                scrollback,
-                save_logs,
-                log_dir.clone(),
-                health_checks,
-                entry.shutdown_cmd.clone(),
-                branch.clone(),
-                project,
-                &script_name,
-                injected_env,
-            )
+            spawn_now(health_checks, injected_env)
         };
         // Mark shared resources so teardown keeps them alive (skips the
         // `shutdown_cmd`) while any sibling instance still serves the same
