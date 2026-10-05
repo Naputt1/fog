@@ -130,7 +130,9 @@
                 "maximum": 65535
               },
               "host": {
-                "type": "string"
+                "type": "string",
+                "default": "127.0.0.1",
+                "description": "Bind address. Defaults to loopback. A non-loopback bind exposes the built-in /ws/terminal gateway, which then requires terminal.auth_token."
               },
               "routes": {
                 "type": "array",

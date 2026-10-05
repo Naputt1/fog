@@ -166,7 +166,7 @@ impl ProxyInstance {
     ) -> Self {
         Self {
             port,
-            host: host.unwrap_or_else(|| "0.0.0.0".to_string()),
+            host: host.unwrap_or_else(|| "127.0.0.1".to_string()),
             routes,
             logs: Arc::new(Mutex::new(VecDeque::with_capacity(max_log_entries))),
             running: Arc::new(AtomicBool::new(false)),
@@ -301,6 +301,7 @@ impl ProxyInstance {
                             let is_tls = tls_acceptor.is_some();
                             let terminal = terminal.clone();
                             let terminal_sessions = terminal_sessions.clone();
+                            let bind_host = host.clone();
 
                             tokio::spawn(async move {
                                 let io = if let Some(ref acceptor) = acceptor {
@@ -339,6 +340,7 @@ impl ProxyInstance {
                                         is_tls,
                                         terminal.clone(),
                                         terminal_sessions.clone(),
+                                        bind_host.clone(),
                                     )
                                 });
                                 if let Err(e) = http1::Builder::new()
@@ -1024,6 +1026,7 @@ async fn handle_request(
     is_tls: bool,
     terminal: Arc<crate::config::TerminalConfig>,
     terminal_sessions: Arc<crate::terminal_ws::SessionsRegistry>,
+    bind_host: String,
 ) -> Result<Response<BoxedBody>, std::convert::Infallible> {
     let method = req.method().to_string();
     let path = req.uri().path().to_string();
@@ -1056,6 +1059,7 @@ async fn handle_request(
             terminal_sessions,
             peer_ip,
             target,
+            &bind_host,
         )
         .await;
     }

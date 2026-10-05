@@ -44,13 +44,26 @@ fn empty_proxy(port: u16) -> ProxyInstance {
 
 /// Builds a minimal RFC 6455 upgrade request for `/ws/terminal`.
 fn ws_upgrade_request(host: &str, query: Option<&str>) -> Vec<u8> {
+    ws_upgrade_request_with_origin(host, query, None)
+}
+
+/// Same, with an optional `Origin` header (browser-style handshake).
+fn ws_upgrade_request_with_origin(
+    host: &str,
+    query: Option<&str>,
+    origin: Option<&str>,
+) -> Vec<u8> {
     let target = match query {
         Some(q) => format!("/ws/terminal?{q}"),
         None => "/ws/terminal".to_string(),
     };
+    let origin = origin
+        .map(|o| format!("Origin: {o}\r\n"))
+        .unwrap_or_default();
     format!(
         "GET {target} HTTP/1.1\r\n\
          Host: {host}\r\n\
+         {origin}\
          Upgrade: websocket\r\n\
          Connection: Upgrade\r\n\
          Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
@@ -194,6 +207,128 @@ fn test_terminal_ws_101_with_valid_auth_token() {
     assert!(
         status_line(&head).contains("101"),
         "valid auth_token must proceed to 101, got: {}",
+        status_line(&head)
+    );
+    drop(stream);
+    proxy.stop();
+}
+
+#[test]
+fn test_terminal_ws_rejects_cross_origin() {
+    let port = find_free_port();
+    let mut proxy = empty_proxy(port);
+    proxy.start();
+
+    let mut stream = connect_retry(port);
+    stream
+        .write_all(&ws_upgrade_request_with_origin(
+            &format!("127.0.0.1:{port}"),
+            None,
+            Some("http://evil.example"),
+        ))
+        .unwrap();
+    let head = read_head(&mut stream);
+    assert!(
+        status_line(&head).contains("403"),
+        "cross-origin upgrade must be rejected with 403, got: {}",
+        status_line(&head)
+    );
+    drop(stream);
+    proxy.stop();
+}
+
+#[test]
+fn test_terminal_ws_rejects_null_origin() {
+    let port = find_free_port();
+    let mut proxy = empty_proxy(port);
+    proxy.start();
+
+    let mut stream = connect_retry(port);
+    stream
+        .write_all(&ws_upgrade_request_with_origin(
+            &format!("127.0.0.1:{port}"),
+            None,
+            Some("null"),
+        ))
+        .unwrap();
+    let head = read_head(&mut stream);
+    assert!(
+        status_line(&head).contains("403"),
+        "opaque `null` origin must be rejected with 403, got: {}",
+        status_line(&head)
+    );
+    drop(stream);
+    proxy.stop();
+}
+
+#[test]
+fn test_terminal_ws_allows_same_origin() {
+    let port = find_free_port();
+    let mut proxy = empty_proxy(port);
+    proxy.start();
+
+    let mut stream = connect_retry(port);
+    stream
+        .write_all(&ws_upgrade_request_with_origin(
+            &format!("127.0.0.1:{port}"),
+            None,
+            Some(&format!("http://127.0.0.1:{port}")),
+        ))
+        .unwrap();
+    let head = read_head(&mut stream);
+    assert!(
+        status_line(&head).contains("101"),
+        "same-origin upgrade must proceed to 101, got: {}",
+        status_line(&head)
+    );
+    drop(stream);
+    proxy.stop();
+}
+
+#[test]
+fn test_terminal_ws_rejects_non_loopback_without_token() {
+    let port = find_free_port();
+    // Bind all interfaces with no token: the gateway must refuse rather than
+    // expose an unauthenticated shell on the LAN/tailnet.
+    let mut proxy = ProxyInstance::new(port, Some("0.0.0.0".to_string()), vec![], 1000, None, None);
+    proxy.start();
+
+    let mut stream = connect_retry(port);
+    stream
+        .write_all(&ws_upgrade_request(&format!("127.0.0.1:{port}"), None))
+        .unwrap();
+    let head = read_head(&mut stream);
+    assert!(
+        status_line(&head).contains("403"),
+        "non-loopback bind without a token must be rejected with 403, got: {}",
+        status_line(&head)
+    );
+    drop(stream);
+    proxy.stop();
+}
+
+#[test]
+fn test_terminal_ws_allows_non_loopback_with_token() {
+    let port = find_free_port();
+    let cfg = TerminalConfig {
+        auth_token: Some("s3cret".to_string()),
+        ..TerminalConfig::default()
+    };
+    let mut proxy = ProxyInstance::new(port, Some("0.0.0.0".to_string()), vec![], 1000, None, None)
+        .with_terminal_config(cfg);
+    proxy.start();
+
+    let mut stream = connect_retry(port);
+    stream
+        .write_all(&ws_upgrade_request(
+            &format!("127.0.0.1:{port}"),
+            Some("auth_token=s3cret"),
+        ))
+        .unwrap();
+    let head = read_head(&mut stream);
+    assert!(
+        status_line(&head).contains("101"),
+        "non-loopback bind with a valid token must proceed to 101, got: {}",
         status_line(&head)
     );
     drop(stream);

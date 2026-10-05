@@ -305,7 +305,7 @@ The `"docker"` kind checks the actual container from the service's compose file 
 | Field | Required | Type | Default | Description |
 |-------|----------|------|---------|-------------|
 | `port` | **Yes** | `integer` | — | Port to listen on (1–65535) |
-| `host` | No | `string` | `"0.0.0.0"` | Host address to bind to |
+| `host` | No | `string` | `"127.0.0.1"` | Host address to bind to. Defaults to loopback. Binding a non-loopback address (`"0.0.0.0"`) exposes the built-in `/ws/terminal` gateway on that interface and therefore requires `terminal.auth_token` to be set. |
 | `routes` | **Yes** | `array` | — | List of route definitions |
 | `tls_cert` | No | `string` | `null` | Path to PEM-encoded TLS certificate |
 | `tls_key` | No | `string` | `null` | Path to PEM-encoded PKCS8 private key |

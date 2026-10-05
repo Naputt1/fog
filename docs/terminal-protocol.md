@@ -22,6 +22,15 @@ The request must be a standard WebSocket upgrade:
 The endpoint is served **before** route matching, so it is always available
 regardless of configured routes or host rules.
 
+### Browser origin
+
+Browsers do not apply the same-origin policy to WebSocket handshakes, so every
+upgrade is checked against its `Origin`. When the header is present it must
+match the request's `Host` (same host and port), otherwise the upgrade is
+rejected with `403 Forbidden`. Requests without an `Origin` header
+(non-browser clients such as `websocat` or `curl`) are allowed, since an
+attack always carries one. `Origin: null` is rejected.
+
 ### Authentication (optional)
 
 When `terminal.auth_token` is set in the script config, every upgrade request
@@ -32,7 +41,15 @@ GET /ws/terminal?auth_token=s3cret
 ```
 
 A request without the parameter, or with a mismatched value, is rejected with
-`401 Unauthorized` before any socket or PTY is created.
+`401 Unauthorized` before any socket or PTY is created. The comparison is
+constant-time.
+
+Because the gateway is served before route matching, it is reachable on
+whatever address the proxy binds to. When the proxy binds a **non-loopback**
+address (`proxy.host` other than `127.0.0.1`/`localhost`),
+`terminal.auth_token` must be set or every terminal upgrade is rejected with
+`403 Forbidden`. This prevents an unauthenticated shell from being exposed on
+the LAN or tailnet.
 
 ### Handshake
 

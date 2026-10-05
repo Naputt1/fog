@@ -60,6 +60,31 @@ fn apply(
     }
 }
 
+/// Validates a configured domain before it is interpolated into a filesystem
+/// path or a dnsmasq config line. Accepts a lowercase dotted hostname whose
+/// labels are `[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?`, which rejects path
+/// separators, quotes, whitespace, shell metacharacters, uppercase, and `..`.
+fn validate_domain(domain: &str) -> Result<(), String> {
+    let bad = || format!("invalid domain {domain:?}: must be a lowercase hostname");
+    if domain.is_empty() || domain.len() > 253 || domain.starts_with('.') || domain.ends_with('.') {
+        return Err(bad());
+    }
+    let is_alnum = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
+    for label in domain.split('.') {
+        if label.is_empty() || label.len() > 63 {
+            return Err(bad());
+        }
+        let bytes = label.as_bytes();
+        if !is_alnum(bytes[0]) || !is_alnum(bytes[bytes.len() - 1]) {
+            return Err(bad());
+        }
+        if !bytes.iter().all(|b| is_alnum(*b) || *b == b'-') {
+            return Err(bad());
+        }
+    }
+    Ok(())
+}
+
 /// macOS (Homebrew) dnsmasq: config lives under `/opt/homebrew` or
 /// `/usr/local`, and per-zone resolvers live in `/etc/resolver`.
 #[cfg(target_os = "macos")]
@@ -110,6 +135,7 @@ fn apply_macos_at(
 
     // Write one idempotent file per domain.
     for domain in &cfg.domains {
+        validate_domain(domain)?;
         let line = format!("address=/.{}/{}", domain, cfg.address);
         let file = dnsmasq_d.join(format!("fog-{domain}.conf"));
         if !read_optional(&file)?.lines().any(|l| l.trim() == line) {
@@ -183,6 +209,7 @@ fn apply_linux(
 
     let mut changed = false;
     for domain in &cfg.domains {
+        validate_domain(domain)?;
         let line = format!("address=/.{}/{}", domain, cfg.address);
         let file = dnsmasq_d.join(format!("fog-{domain}.conf"));
         match sudo_read_contains(&file, &line, non_interactive) {
@@ -286,6 +313,25 @@ fn append_line(path: &Path, line: &str) -> Result<(), String> {
     writeln!(f, "{line}").map_err(|e| format!("could not write {}: {}", path.display(), e))
 }
 
+/// Builds the argument vectors `sudo_write` invokes: `install(1)` to move the
+/// staged file into place as root, then `rm -f` to remove the staging file.
+/// Argument vectors are used so a path from config is never interpreted by a
+/// shell.
+fn sudo_write_argv(tmp: &Path, path: &Path) -> [Vec<String>; 2] {
+    let tmp = tmp.to_string_lossy().into_owned();
+    let dest = path.to_string_lossy().into_owned();
+    [
+        vec![
+            "install".to_string(),
+            "-m".to_string(),
+            "644".to_string(),
+            tmp.clone(),
+            dest,
+        ],
+        vec!["rm".to_string(), "-f".to_string(), tmp],
+    ]
+}
+
 /// Writes `content` to `path`, escalating to `sudo` when the path is not
 /// writable. In non-interactive mode sudo runs with `-n` so it cannot block on
 /// a password prompt.
@@ -309,19 +355,14 @@ fn sudo_write(path: &Path, content: &str, non_interactive: bool) -> Result<(), S
             .as_nanos()
     ));
     fs::write(&tmp, content).map_err(|e| format!("could not stage {}: {}", tmp.display(), e))?;
-    let res = run_sudo(
-        &[
-            "sh",
-            "-c",
-            &format!(
-                "install -m 644 '{}' '{}' && rm -f '{}'",
-                tmp.display(),
-                path.display(),
-                tmp.display()
-            ),
-        ],
-        non_interactive,
-    );
+    // Run as argv, never through a shell, so a config-derived `path` cannot
+    // inject commands into a root shell.
+    let argv = sudo_write_argv(&tmp, path);
+    let install: Vec<&str> = argv[0].iter().map(String::as_str).collect();
+    let res = run_sudo(&install, non_interactive);
+    // Clean up the staging file whether or not the install succeeded.
+    let cleanup: Vec<&str> = argv[1].iter().map(String::as_str).collect();
+    let _ = run_sudo(&cleanup, non_interactive);
     if res.is_ok() {
         Ok(())
     } else {
@@ -578,6 +619,44 @@ mod tests {
         let c = cfg(&["red-fox"]);
         let line = format!("address=/.{}/{}", c.domains[0], c.address);
         assert_eq!(line, "address=/.red-fox/127.0.0.1");
+    }
+
+    #[test]
+    fn test_validate_domain_rejects_shell_injection() {
+        let err = validate_domain("x'; touch /tmp/pwned; '").unwrap_err();
+        assert!(err.contains("invalid domain"), "unexpected error: {err}");
+        assert!(validate_domain("../etc/passwd").is_err());
+        assert!(validate_domain("").is_err());
+    }
+
+    #[test]
+    fn test_validate_domain_accepts_hostname() {
+        assert!(validate_domain("red-fox").is_ok());
+        assert!(validate_domain("dev.local").is_ok());
+        assert!(validate_domain("a1.b2-c3").is_ok());
+    }
+
+    #[test]
+    fn test_sudo_write_argv_is_not_a_shell_command() {
+        let argv = sudo_write_argv(
+            Path::new("/tmp/fog-stage-1"),
+            Path::new("/etc/resolver/red-fox"),
+        );
+        for cmd in &argv {
+            assert!(
+                !cmd.iter().any(|a| a == "sh" || a == "-c"),
+                "argv must not invoke a shell: {cmd:?}"
+            );
+        }
+        assert_eq!(argv[0][0], "install");
+        assert_eq!(
+            argv[1],
+            vec![
+                "rm".to_string(),
+                "-f".to_string(),
+                "/tmp/fog-stage-1".to_string()
+            ]
+        );
     }
 
     #[cfg(target_os = "macos")]

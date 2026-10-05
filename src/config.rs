@@ -174,7 +174,9 @@ pub struct ProxyRoute {
 pub struct ProxyConfig {
     /// The port the reverse proxy listens on.
     pub port: u16,
-    /// Optional host address to bind to (default: 0.0.0.0).
+    /// Optional host address to bind to (default: 127.0.0.1, loopback only).
+    /// Remote access requires an explicit non-loopback host plus a
+    /// `terminal.auth_token`, since the terminal gateway is served here too.
     pub host: Option<String>,
     /// The list of route definitions.
     pub routes: Vec<ProxyRoute>,
