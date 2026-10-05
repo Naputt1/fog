@@ -1,5 +1,6 @@
-use super::{App, PendingService};
+use super::{App, Mode, PendingService};
 use crate::click_tab::{ClickTab, TabKind};
+use crate::selection;
 use crate::terminal::Terminal;
 
 impl App {
@@ -58,5 +59,102 @@ impl App {
     /// Maps the currently selected tab to an index into `self.items`.
     pub(crate) fn service_tab_index(&self) -> Option<usize> {
         self.item_index_for_tab(self.tabs.index)
+    }
+}
+
+impl App {
+    pub(crate) fn on_tab_switch(&mut self) {
+        self.scroll_offset = 0;
+        self.scrollbar_dragging = false;
+        self.auto_scrolling = None;
+        self.content_layout.clear();
+        selection::clear_selection(
+            &mut self.selecting,
+            &mut self.select_start,
+            &mut self.select_end,
+        );
+        self.proxy_filter.clear();
+        if self.is_proxy_tab() {
+            self.mode = Mode::Normal;
+        } else if let Some(item) = self.service_tab_index().and_then(|i| self.items.get(i)) {
+            self.mode = if item.is_shell() {
+                Mode::TerminalInput
+            } else {
+                Mode::Normal
+            };
+        }
+    }
+
+    pub(crate) fn is_shell_tab(&self, idx: usize) -> bool {
+        self.item_index_for_tab(idx)
+            .and_then(|i| self.items.get(i))
+            .map(|t| t.is_shell())
+            .unwrap_or(false)
+    }
+
+    /// Records a setup warning: shown in the startup overlay (info lines are
+    /// omitted) and always reprinted to stderr once the TUI exits.
+    pub(crate) fn note_setup_message(&mut self, msg: String) {
+        if !crate::log::is_info(&msg) {
+            self.startup_messages.push(msg.clone());
+            self.show_startup_popup = true;
+        }
+        self.errors.push(msg);
+    }
+
+    pub(crate) fn new_terminal(&mut self) {
+        match Terminal::spawn_shell("bash".to_string(), self.scrollback) {
+            Ok(term) => {
+                let insertion_idx = self.tabs.entries.len();
+                self.items.push(term);
+                self.tabs
+                    .insert_at(insertion_idx, "bash".to_string(), TabKind::Terminal);
+                self.tabs.index = insertion_idx;
+                self.scroll_offset = 0;
+                self.mode = Mode::TerminalInput;
+            }
+            Err(e) => self
+                .errors
+                .push(format!("failed to create terminal: {}", e)),
+        }
+    }
+
+    pub(crate) fn close_tab(&mut self) {
+        if self.items.len() <= 1 {
+            return;
+        }
+        if !self.is_shell_tab(self.tabs.index) {
+            return;
+        }
+        let Some(item_idx) = self.service_tab_index() else {
+            return;
+        };
+        self.items.remove(item_idx);
+        self.tabs.remove(self.tabs.index);
+        self.scroll_offset = 0;
+        if self.is_shell_tab(self.tabs.index) {
+            self.mode = Mode::TerminalInput;
+        } else {
+            self.mode = Mode::Normal;
+        }
+    }
+
+    pub(crate) fn restart_current(&mut self) {
+        if self.is_proxy_tab() {
+            if let Some(ref mut p) = self.proxy {
+                p.restart();
+            }
+            return;
+        }
+        if let Some(item) = self.service_tab_index().and_then(|i| self.items.get_mut(i))
+            && !item.is_shell()
+        {
+            if let Err(e) = item.restart() {
+                self.errors.push(format!("restart error: {}", e));
+            }
+            if let Some(e) = self.tabs.entries.get_mut(self.tabs.index) {
+                e.stopped = false;
+            }
+        }
     }
 }
