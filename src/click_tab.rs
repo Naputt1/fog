@@ -2,10 +2,11 @@ use crate::terminal::HealthStatus;
 use crate::theme::Theme;
 use ratatui::{
     Frame,
-    layout::{Position, Rect},
-    style::{Color, Style},
+    layout::{Alignment, Margin, Position, Rect},
+    style::Style,
+    symbols::border,
     text::{Line, Span},
-    widgets::{List, ListItem, ListState},
+    widgets::{Block, List, ListItem, ListState},
 };
 
 /// The type of tab entry in the sidebar.
@@ -185,13 +186,38 @@ impl ClickTab {
         }
     }
 
-    /// Renders the tab sidebar into the given frame and area.
+    /// Renders the tab sidebar as a titled, bordered panel.
+    ///
+    /// The selected row is filled with `selection_bg`; rows show a status dot
+    /// followed by the tab name, and non-healthy states are labelled.
     ///
     /// # Arguments
     /// * `frame` - The ratatui frame to render into.
     /// * `area` - The rectangular area for the sidebar.
     pub fn draw(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
-        self.area = Some(area);
+        let block = Block::bordered()
+            .border_set(border::ROUNDED)
+            .border_style(Style::default().fg(theme.border))
+            .style(Style::default().bg(theme.surface))
+            .title_top(
+                Line::from(Span::styled(
+                    "─┤ services ├",
+                    Style::default().fg(theme.title).bold(),
+                ))
+                .alignment(Alignment::Left),
+            );
+        frame.render_widget(block, area);
+
+        // Inside the border; `inner` is the list/click region so hit-testing
+        // maps 1:1.
+        let inner = area.inner(Margin {
+            horizontal: 1,
+            vertical: 1,
+        });
+        self.area = Some(inner);
+        if inner.width == 0 || inner.height == 0 {
+            return;
+        }
 
         let items: Vec<ListItem> = self
             .entries
@@ -201,51 +227,75 @@ impl ClickTab {
                 let name = e.display_name();
                 let is_selected = i == self.index;
 
-                let status_span = if e.pending {
-                    Span::styled("◌", Style::default().fg(Color::Yellow).bold())
+                let (dot, dot_style) = if e.pending {
+                    ("◌", Style::default().fg(theme.status_300).bold())
                 } else if e.stopped {
-                    Span::styled("○", Style::default().fg(theme.stopped))
+                    ("○", Style::default().fg(theme.stopped))
+                } else if e.kind == TabKind::Proxy {
+                    ("●", Style::default().fg(theme.proxy))
                 } else if e.health_status == HealthStatus::Unhealthy {
-                    Span::styled("●", Style::default().fg(Color::Red).bold())
+                    ("●", Style::default().fg(theme.stopped).bold())
                 } else if e.health_status == HealthStatus::Starting {
-                    Span::styled("●", Style::default().fg(Color::Yellow))
+                    ("●", Style::default().fg(theme.status_300))
                 } else if e.process_running {
-                    Span::styled("●", Style::default().fg(Color::Green))
+                    ("●", Style::default().fg(theme.status_200))
                 } else {
-                    Span::styled("●", Style::default().fg(Color::DarkGray))
+                    ("●", Style::default().fg(theme.border))
                 };
 
                 let name_style = if is_selected {
-                    Style::default().fg(theme.highlight).on_black().bold()
+                    Style::default().fg(theme.selection_fg).bold()
                 } else {
                     match e.kind {
                         TabKind::Terminal => Style::default().fg(theme.terminal),
                         TabKind::Service if e.stopped => Style::default().fg(theme.stopped).dim(),
                         TabKind::Proxy if e.stopped => Style::default().fg(theme.stopped).dim(),
                         TabKind::Proxy => Style::default().fg(theme.proxy),
-                        _ => Style::default(),
+                        _ => Style::default().fg(theme.text),
                     }
                 };
 
-                let prefix_style = if is_selected {
-                    Style::default().fg(theme.highlight).on_black().bold()
-                } else {
-                    Style::default()
-                };
-
-                let prefix = if is_selected { "▸ " } else { "  " };
-                let prefix_span = Span::styled(prefix, prefix_style);
-                let name_span = Span::styled(format!(" {}", name), name_style);
-
-                let line = Line::from(vec![prefix_span, status_span, name_span]);
-                ListItem::new(line)
+                // One column of padding inside the border.
+                let mut spans = vec![
+                    Span::raw(" "),
+                    Span::styled(dot, dot_style),
+                    Span::styled(format!(" {}", name), name_style),
+                ];
+                if let Some(label) = health_label(e) {
+                    let label_style = if is_selected {
+                        Style::default().fg(theme.selection_fg).dim()
+                    } else {
+                        Style::default().fg(theme.text_muted)
+                    };
+                    spans.push(Span::styled(format!("  {label}"), label_style));
+                }
+                ListItem::new(Line::from(spans))
             })
             .collect();
 
-        let list = List::new(items);
+        let list = List::new(items)
+            .highlight_style(Style::default().bg(theme.selection_bg))
+            .highlight_symbol("");
 
         self.list_state.select(Some(self.index));
-        frame.render_stateful_widget(list, area, &mut self.list_state);
+        frame.render_stateful_widget(list, inner, &mut self.list_state);
+    }
+}
+
+/// A short label for a row that is not simply "running healthy", so problems
+/// stand out at a glance. Healthy rows stay unlabelled.
+fn health_label(e: &TabEntry) -> Option<&'static str> {
+    if e.pending {
+        return Some("waiting");
+    }
+    if e.stopped {
+        return Some("stopped");
+    }
+    match e.health_status {
+        HealthStatus::Unhealthy => Some("unhealthy"),
+        HealthStatus::Starting => Some("starting"),
+        HealthStatus::Pending => Some("pending"),
+        _ => None,
     }
 }
 
