@@ -12,12 +12,22 @@ use std::time::{Duration, Instant};
 /// Spawns a command and waits at most `timeout` for it to exit.
 ///
 /// stdout and stderr are captured. Returns `None` if the child does not exit
-/// within `timeout` (the child is killed and reaped) or if it cannot be spawned.
-/// A command that rejects piped stdio, such as a PTY-bound runner, is not a
-/// fit for this helper.
+/// within `timeout` (the child and its process tree are killed and reaped) or
+/// if it cannot be spawned. A command that rejects piped stdio, such as a
+/// PTY-bound runner, is not a fit for this helper.
 pub fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Option<Output> {
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    // Run the child in its own process group so a timeout can signal the whole
+    // tree with `kill(-pid, …)`. A grandchild that inherits the stdout/stderr
+    // pipes keeps them open after the direct child is killed, which would block
+    // the reader joins below until the grandchild exits on its own.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
     let mut child = cmd.spawn().ok()?;
+    let pid = child.id();
 
     // Drain both pipes on dedicated threads. A child that writes more than the
     // pipe buffer (~64 KiB) blocks until a reader consumes it; if we only read
@@ -44,6 +54,7 @@ pub fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Option<Output> {
             Ok(Some(status)) => break status,
             Ok(None) => {
                 if Instant::now() >= deadline {
+                    signal_tree(pid, Signal::Kill);
                     let _ = child.kill();
                     let _ = child.wait();
                     join_reader(stdout_handle);
@@ -53,6 +64,7 @@ pub fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Option<Output> {
                 std::thread::sleep(Duration::from_millis(25));
             }
             Err(_) => {
+                signal_tree(pid, Signal::Kill);
                 let _ = child.kill();
                 let _ = child.wait();
                 join_reader(stdout_handle);
