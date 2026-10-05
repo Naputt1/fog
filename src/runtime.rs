@@ -348,78 +348,55 @@ pub fn spawn_checked_terminal_with_opts(opts: TerminalSpawnOpts) -> Terminal {
     }
 }
 
+/// Resolves a single string field when it contains a `${...}` template,
+/// otherwise clones it, wrapping any resolution error with `describe()`'s
+/// service-level label.
+fn resolve_templated(
+    value: &str,
+    ports: &crate::ports::PortMap,
+    branch: Option<&str>,
+    describe: impl FnOnce() -> String,
+) -> Result<String, String> {
+    if !crate::ports::has_template(value) {
+        return Ok(value.to_string());
+    }
+    crate::ports::resolve_template(value, ports, branch)
+        .map_err(|err| format!("{}: {}", describe(), err))
+}
+
 fn resolve_service_templates(
     entry: &ConfigEntry,
     ports: &crate::ports::PortMap,
     branch: Option<&str>,
 ) -> Result<ConfigEntry, String> {
     let mut e = entry.clone();
-    // cmd
-    if crate::ports::has_template(&e.cmd) {
-        e.cmd = crate::ports::resolve_template(&e.cmd, ports, branch).map_err(|err| {
-            format!(
-                "service '{}' cmd template error: {}",
-                e.name.as_deref().unwrap_or("?"),
-                err
-            )
-        })?;
-    }
-    if let Some(cmd) = &e.shutdown_cmd
-        && crate::ports::has_template(cmd)
-    {
-        e.shutdown_cmd = Some(crate::ports::resolve_template(cmd, ports, branch).map_err(
-            |err| {
-                format!(
-                    "service '{}' shutdown_cmd template error: {}",
-                    e.name.as_deref().unwrap_or("?"),
-                    err
-                )
-            },
-        )?);
+    let name = e.name.clone().unwrap_or_else(|| "?".to_string());
+    let svc = |field: &str| format!("service '{name}' {field} template error");
+    let ep = |ep_name: &str, field: &str| {
+        format!("service '{name}' endpoint '{ep_name}' {field} template error")
+    };
+
+    e.cmd = resolve_templated(&e.cmd, ports, branch, || svc("cmd"))?;
+    if let Some(cmd) = &e.shutdown_cmd {
+        e.shutdown_cmd = Some(resolve_templated(cmd, ports, branch, || {
+            svc("shutdown_cmd")
+        })?);
     }
     if let Some(env) = &e.env {
         let mut resolved = HashMap::new();
         for (k, v) in env {
-            let rv = if crate::ports::has_template(v) {
-                crate::ports::resolve_template(v, ports, branch).map_err(|err| {
-                    format!(
-                        "service '{}' env.{} template error: {}",
-                        e.name.as_deref().unwrap_or("?"),
-                        k,
-                        err
-                    )
-                })?
-            } else {
-                v.clone()
-            };
+            let rv = resolve_templated(v, ports, branch, || svc(&format!("env.{k}")))?;
             resolved.insert(k.clone(), rv);
         }
         e.env = Some(resolved);
     }
     let resolve_one = |c: &HealthCheckConfig| -> Result<HealthCheckConfig, String> {
         let mut nc = c.clone();
-        if crate::ports::has_template(&nc.target) {
-            nc.target =
-                crate::ports::resolve_template(&nc.target, ports, branch).map_err(|err| {
-                    format!(
-                        "service '{}' health_check.target template error: {}",
-                        e.name.as_deref().unwrap_or("?"),
-                        err
-                    )
-                })?;
-        }
-        if let Some(f) = &nc.compose_file
-            && crate::ports::has_template(f)
-        {
-            nc.compose_file = Some(crate::ports::resolve_template(f, ports, branch).map_err(
-                |err| {
-                    format!(
-                        "service '{}' health_check.compose_file template error: {}",
-                        e.name.as_deref().unwrap_or("?"),
-                        err
-                    )
-                },
-            )?);
+        nc.target = resolve_templated(&nc.target, ports, branch, || svc("health_check.target"))?;
+        if let Some(f) = &nc.compose_file {
+            nc.compose_file = Some(resolve_templated(f, ports, branch, || {
+                svc("health_check.compose_file")
+            })?);
         }
         Ok(nc)
     };
@@ -427,11 +404,7 @@ fn resolve_service_templates(
         e.health_check = Some(match hc {
             HealthCheckSpec::Single(c) => HealthCheckSpec::Single(resolve_one(c)?),
             HealthCheckSpec::Multiple(v) => {
-                let mut out = Vec::new();
-                for c in v {
-                    out.push(resolve_one(c)?);
-                }
-                HealthCheckSpec::Multiple(out)
+                HealthCheckSpec::Multiple(v.iter().map(&resolve_one).collect::<Result<_, _>>()?)
             }
         });
     }
@@ -439,58 +412,27 @@ fn resolve_service_templates(
         let mut resolved = Vec::with_capacity(subs.len());
         for sub in subs {
             let mut s = sub.clone();
-            if let Some(host) = &s.host
-                && crate::ports::has_template(host)
-            {
-                s.host = Some(crate::ports::resolve_template(host, ports, branch).map_err(
-                    |err| {
-                        format!(
-                            "service '{}' endpoint '{}' host template error: {}",
-                            e.name.as_deref().unwrap_or("?"),
-                            s.name,
-                            err
-                        )
-                    },
-                )?);
+            if let Some(host) = &s.host {
+                s.host = Some(resolve_templated(host, ports, branch, || {
+                    ep(&s.name, "host")
+                })?);
             }
-            if let Some(port) = &s.port
-                && crate::ports::has_template(port)
-            {
-                s.port = Some(crate::ports::resolve_template(port, ports, branch).map_err(
-                    |err| {
-                        format!(
-                            "service '{}' endpoint '{}' port template error: {}",
-                            e.name.as_deref().unwrap_or("?"),
-                            s.name,
-                            err
-                        )
-                    },
-                )?);
+            if let Some(port) = &s.port {
+                s.port = Some(resolve_templated(port, ports, branch, || {
+                    ep(&s.name, "port")
+                })?);
             }
-            if let Some(prefix) = &s.path_prefix
-                && crate::ports::has_template(prefix)
-            {
-                s.path_prefix = Some(
-                    crate::ports::resolve_template(prefix, ports, branch).map_err(|err| {
-                        format!(
-                            "service '{}' endpoint '{}' path_prefix template error: {}",
-                            e.name.as_deref().unwrap_or("?"),
-                            s.name,
-                            err
-                        )
-                    })?,
-                );
+            if let Some(prefix) = &s.path_prefix {
+                s.path_prefix = Some(resolve_templated(prefix, ports, branch, || {
+                    ep(&s.name, "path_prefix")
+                })?);
             }
             if let Some(hc) = &s.health_check {
                 s.health_check = Some(match hc {
                     HealthCheckSpec::Single(c) => HealthCheckSpec::Single(resolve_one(c)?),
-                    HealthCheckSpec::Multiple(v) => {
-                        let mut out = Vec::new();
-                        for c in v {
-                            out.push(resolve_one(c)?);
-                        }
-                        HealthCheckSpec::Multiple(out)
-                    }
+                    HealthCheckSpec::Multiple(v) => HealthCheckSpec::Multiple(
+                        v.iter().map(&resolve_one).collect::<Result<_, _>>()?,
+                    ),
                 });
             }
             resolved.push(s);
@@ -968,18 +910,14 @@ pub fn build_with_opts(opts: BuildOpts) -> Result<Runtime, String> {
         Some(mut pc) => {
             // Resolve upstream/host templates with ports+branch
             for route in &mut pc.routes {
-                if crate::ports::has_template(&route.upstream) {
-                    route.upstream =
-                        crate::ports::resolve_template(&route.upstream, ports, branch.as_deref())
-                            .map_err(|e| format!("proxy upstream template error: {e}"))?;
-                }
-                if let Some(h) = &route.host
-                    && crate::ports::has_template(h)
-                {
-                    route.host = Some(
-                        crate::ports::resolve_template(h, ports, branch.as_deref())
-                            .map_err(|e| format!("proxy host template error: {e}"))?,
-                    );
+                route.upstream =
+                    resolve_templated(&route.upstream, ports, branch.as_deref(), || {
+                        "proxy upstream template error".to_string()
+                    })?;
+                if let Some(h) = &route.host {
+                    route.host = Some(resolve_templated(h, ports, branch.as_deref(), || {
+                        "proxy host template error".to_string()
+                    })?);
                 }
             }
             let routes: Vec<RouteEntry> = pc
