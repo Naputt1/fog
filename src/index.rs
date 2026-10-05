@@ -1082,6 +1082,75 @@ fn json_content_type_allowed(headers: &hyper::HeaderMap) -> bool {
     }
 }
 
+/// Rebuilds a terminal-gateway response with this server's body type. The
+/// gateway's responses are fully buffered (empty body on 101, short text on
+/// 401/429), so collecting is cheap and lossless.
+async fn rebuild_response<B>(resp: hyper::Response<B>) -> Response<RespBody>
+where
+    B: hyper::body::Body<Data = Bytes>,
+{
+    let (parts, body) = resp.into_parts();
+    let bytes = match body.collect().await {
+        Ok(collected) => collected.to_bytes(),
+        Err(_) => Bytes::new(),
+    };
+    Response::from_parts(parts, Full::new(bytes).boxed())
+}
+
+/// Handles the built-in `/ws/terminal` WebSocket upgrade.
+///
+/// `?service=<name>` attaches to a running service; `?live=1` requests live
+/// emulation of the same PTY the TUI is showing (bidirectional, same process),
+/// rather than a fresh shell in the service's workdir.
+async fn handle_terminal_route(
+    req: Request<Incoming>,
+    terminal: std::sync::Arc<crate::config::TerminalConfig>,
+    terminal_sessions: std::sync::Arc<crate::terminal_ws::SessionsRegistry>,
+    peer_ip: String,
+) -> Response<RespBody> {
+    let service = query_param(req.uri().query(), "service");
+    let live = query_param(req.uri().query(), "live")
+        .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+    if live && service.is_some() {
+        let svc = service.clone().unwrap();
+        // Live attach must be a known running service, else 404.
+        let running = discover_fog_instances()
+            .iter()
+            .any(|i| i.services.iter().any(|s| s.name == svc && s.running));
+        if !running {
+            return api_error(StatusCode::NOT_FOUND, "unknown or not running service");
+        }
+        let resp = crate::terminal_ws::handle_live_terminal_upgrade(
+            req,
+            terminal,
+            terminal_sessions,
+            peer_ip,
+            svc,
+            "127.0.0.1",
+        )
+        .await
+        .expect("live terminal upgrade handler is infallible");
+        return rebuild_response(resp).await;
+    }
+    let target = service.as_ref().and_then(|s| resolve_service_target(s));
+    // An explicitly requested service that could not be resolved (not a
+    // running service, or its workdir is unknown) is a 404, not a shell.
+    if service.is_some() && target.is_none() {
+        return api_error(StatusCode::NOT_FOUND, "unknown or not running service");
+    }
+    let resp = crate::terminal_ws::handle_terminal_upgrade(
+        req,
+        terminal,
+        terminal_sessions,
+        peer_ip,
+        target,
+        "127.0.0.1",
+    )
+    .await
+    .expect("terminal upgrade handler is infallible");
+    rebuild_response(resp).await
+}
+
 /// Routes embedded-server requests:
 ///   - `/ws/terminal` → the built-in terminal WebSocket gateway (live PTY)
 ///   - `/logs/stream` → SSE stream of a container's `docker logs -f`
@@ -1126,70 +1195,7 @@ async fn serve_index(
     // `/ws/terminal` upgrade would be answered with the SPA fallback and the
     // connection would fail immediately.
     if crate::terminal_ws::is_terminal_upgrade(&req) {
-        // Optional `?service=<name>` attach target, resolved against running
-        // fog instances + the matching fog config. `?live=1` requests live
-        // emulation of the same PTY the TUI is showing (bidirectional, same
-        // process), not a fresh shell in the service's workdir.
-        let service = query_param(req.uri().query(), "service");
-        let live = query_param(req.uri().query(), "live")
-            .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
-        if live && service.is_some() {
-            let svc = service.clone().unwrap();
-            // Live attach must be a known running service, else 404.
-            let running = discover_fog_instances()
-                .iter()
-                .any(|i| i.services.iter().any(|s| s.name == svc && s.running));
-            if !running {
-                return Ok(api_error(
-                    StatusCode::NOT_FOUND,
-                    "unknown or not running service",
-                ));
-            }
-            let resp = crate::terminal_ws::handle_live_terminal_upgrade(
-                req,
-                terminal,
-                terminal_sessions,
-                peer_ip,
-                svc,
-                "127.0.0.1",
-            )
-            .await
-            .expect("live terminal upgrade handler is infallible");
-            let (parts, body) = resp.into_parts();
-            let bytes = match body.collect().await {
-                Ok(collected) => collected.to_bytes(),
-                Err(_) => Bytes::new(),
-            };
-            return Ok(Response::from_parts(parts, Full::new(bytes).boxed()));
-        }
-        let target = service.as_ref().and_then(|s| resolve_service_target(s));
-        // An explicitly requested service that could not be resolved (not a
-        // running service, or its workdir is unknown) is a 404, not a shell.
-        if service.is_some() && target.is_none() {
-            return Ok(api_error(
-                StatusCode::NOT_FOUND,
-                "unknown or not running service",
-            ));
-        }
-        let resp = crate::terminal_ws::handle_terminal_upgrade(
-            req,
-            terminal,
-            terminal_sessions,
-            peer_ip,
-            target,
-            "127.0.0.1",
-        )
-        .await
-        .expect("terminal upgrade handler is infallible");
-        // Rebuild the response with this server's body type. The gateway's
-        // responses are fully buffered (empty body on 101, short text on
-        // 401/429), so collecting is cheap and lossless.
-        let (parts, body) = resp.into_parts();
-        let bytes = match body.collect().await {
-            Ok(collected) => collected.to_bytes(),
-            Err(_) => Bytes::new(),
-        };
-        return Ok(Response::from_parts(parts, Full::new(bytes).boxed()));
+        return Ok(handle_terminal_route(req, terminal, terminal_sessions, peer_ip).await);
     }
 
     // The action route consumes the request body (and forwards to a blocking
