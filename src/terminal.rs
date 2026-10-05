@@ -777,12 +777,12 @@ impl Terminal {
             .take_writer()
             .map_err(|e| io::Error::other(e.to_string()))?;
 
-        let parser = Arc::new(Mutex::new(vt100::Parser::new(24, 80, scrollback)));
-        let screen_generation = Arc::new(AtomicUsize::new(0));
-        let raw_output = Arc::new(Mutex::new(std::collections::VecDeque::new()));
-
+        // PTY-reader setup runs before `spawn_command` above, so the only
+        // remaining fallible step is taking the master fd. Doing it now, while
+        // `child`/`master` are still locals, means an early return drops and
+        // reaps the child instead of leaking it (no `Terminal` owns them yet).
         #[cfg(unix)]
-        let (handler, stop_w) = {
+        let (reader_fd, stop_r, stop_w) = {
             let master_fd = pair
                 .master
                 .as_raw_fd()
@@ -793,16 +793,24 @@ impl Terminal {
             if reader_fd < 0 {
                 return Err(io::Error::last_os_error());
             }
-            let handler = spawn_reader(
-                parser.clone(),
-                screen_generation.clone(),
-                raw_output.clone(),
-                reader_fd,
-                stop_r,
-                None,
-            );
-            (Some(handler), Some(stop_w))
+            (reader_fd, stop_r, stop_w)
         };
+
+        let parser = Arc::new(Mutex::new(vt100::Parser::new(24, 80, scrollback)));
+        let screen_generation = Arc::new(AtomicUsize::new(0));
+        let raw_output = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+
+        #[cfg(unix)]
+        let handler = Some(spawn_reader(
+            parser.clone(),
+            screen_generation.clone(),
+            raw_output.clone(),
+            reader_fd,
+            stop_r,
+            None,
+        ));
+        #[cfg(unix)]
+        let stop_w = Some(stop_w);
 
         #[cfg(windows)]
         let (handler, stop_w) = {
@@ -1377,6 +1385,25 @@ impl Terminal {
             .as_deref()
             .and_then(|dir| open_log_file(dir, &self.name).ok());
 
+        // PTY-reader setup runs before `spawn_command` above, so the only
+        // remaining fallible step is taking the master fd. Doing it now, while
+        // `child`/`master` are still locals, means an early return drops and
+        // reaps the child instead of leaking it (no `Terminal` owns them yet).
+        #[cfg(unix)]
+        let (reader_fd, stop_r, stop_w) = {
+            let master_fd = pair
+                .master
+                .as_raw_fd()
+                .ok_or_else(|| io::Error::other("pty master has no fd"))?;
+            let (stop_r, stop_w) = make_stop_pipe()?;
+            // SAFETY: dup creates a new independent descriptor for the thread.
+            let reader_fd = unsafe { libc::dup(master_fd) };
+            if reader_fd < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            (reader_fd, stop_r, stop_w)
+        };
+
         self.parser = Arc::new(Mutex::new(vt100::Parser::new(
             24,
             INITIAL_COLS,
@@ -1389,16 +1416,6 @@ impl Terminal {
 
         #[cfg(unix)]
         {
-            let master_fd = pair
-                .master
-                .as_raw_fd()
-                .ok_or_else(|| io::Error::other("pty master has no fd"))?;
-            let (stop_r, stop_w) = make_stop_pipe()?;
-            // SAFETY: dup creates a new independent descriptor for the thread.
-            let reader_fd = unsafe { libc::dup(master_fd) };
-            if reader_fd < 0 {
-                return Err(io::Error::last_os_error());
-            }
             self.handler = Some(spawn_reader(
                 self.parser.clone(),
                 self.screen_generation.clone(),

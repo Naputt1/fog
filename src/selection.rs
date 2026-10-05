@@ -162,19 +162,15 @@ pub(crate) fn copy_selection(
         let Some(text) = lines.get(i) else {
             continue;
         };
+        // Selection columns are terminal cells, not `char`s. Slicing by
+        // `chars()` mis-copies at wide characters, tabs, and combining
+        // sequences; map the cell range onto grapheme boundaries instead.
         if sel_start.0 == sel_end.0 {
-            let s: String = text
-                .chars()
-                .skip(sel_start.1)
-                .take(sel_end.1 - sel_start.1)
-                .collect();
-            selected.push_str(&s);
+            selected.push_str(&slice_cells(text, sel_start.1, sel_end.1));
         } else if i == sel_start.0 {
-            let s: String = text.chars().skip(sel_start.1).collect();
-            selected.push_str(&s);
+            selected.push_str(&slice_cells(text, sel_start.1, usize::MAX));
         } else if i == sel_end.0 {
-            let s: String = text.chars().take(sel_end.1).collect();
-            selected.push_str(&s);
+            selected.push_str(&slice_cells(text, 0, sel_end.1));
         } else {
             selected.push_str(text);
         }
@@ -187,6 +183,41 @@ pub(crate) fn copy_selection(
         let _ = write!(std::io::stdout(), "\x1b]52;c;{}\x07", encoded);
         let _ = std::io::stdout().flush();
     }
+}
+
+/// Splits `text` into display graphemes paired with their cell width, using the
+/// same grapheme segmentation and control-character filtering as rendering
+/// (`StyledGrapheme`). This keeps cell-column arithmetic consistent with what is
+/// actually drawn on screen.
+fn graphemes_with_width(text: &str) -> Vec<(String, usize)> {
+    Span::raw(text)
+        .styled_graphemes(Style::default())
+        .map(|g| (g.symbol.to_string(), g.symbol.cell_width() as usize))
+        .collect()
+}
+
+/// Returns the substring of `text` spanning cell columns `[from, to)`.
+///
+/// `to == usize::MAX` means end of line. Wide graphemes occupy two columns and
+/// are never split: a range boundary falling inside one includes the whole
+/// grapheme. Zero-width graphemes are included only when strictly inside the
+/// range, matching how they render.
+fn slice_cells(text: &str, from: usize, to: usize) -> String {
+    let mut out = String::new();
+    let mut col = 0usize;
+    for (symbol, width) in graphemes_with_width(text) {
+        let start = col;
+        let end = col + width;
+        col = end;
+        if end <= from {
+            continue;
+        }
+        if start >= to {
+            break;
+        }
+        out.push_str(&symbol);
+    }
+    out
 }
 
 /// Applies visual selection highlighting (reversed style) to a slice of
@@ -232,42 +263,44 @@ pub(crate) fn apply_sel(
         let lo = sc.saturating_sub(col_off).min(chunk_width);
         let hi = ec.saturating_sub(col_off).min(chunk_width);
         if lo < hi {
-            apply_reversed(line, lo, hi);
+            apply_reversed_cells(line, col_off, sc, ec);
         }
     }
 }
 
-/// Reverses the spans of a line over the character range `[lo, hi)`.
-fn apply_reversed(line: &mut Line<'static>, lo: usize, hi: usize) {
+/// Reverses the style of the graphemes of `line` whose cell columns fall within
+/// `[sc, ec)`, preserving each span's original style everywhere else.
+///
+/// `col_start` is the cell column at which the line's first grapheme begins
+/// (the wrapped chunk's offset). Cells, not `char`s, are the unit of selection,
+/// so wide characters, tabs, and combining clusters stay aligned.
+fn apply_reversed_cells(line: &mut Line<'static>, col_start: usize, sc: usize, ec: usize) {
     let spans = std::mem::take(&mut line.spans);
-    let mut new_spans = Vec::new();
-    let mut char_off = 0;
+    let mut new_spans: Vec<Span<'static>> = Vec::new();
+    let mut col = col_start;
     for span in spans {
-        let span_len = span.content.chars().count();
-        let span_start = char_off;
-        let span_end = span_start + span_len;
-        if span_end <= lo || span_start >= hi {
-            new_spans.push(span);
-        } else {
-            let content = span.content.into_owned();
-            let orig_style = span.style;
-            let chars: Vec<char> = content.chars().collect();
-            let before_end = lo.saturating_sub(span_start).min(chars.len());
-            let after_start = hi.saturating_sub(span_start).min(chars.len());
-            if before_end > 0 {
-                let before: String = chars[..before_end].iter().collect();
-                new_spans.push(Span::styled(before, orig_style));
-            }
-            if before_end < after_start {
-                let sel: String = chars[before_end..after_start].iter().collect();
-                new_spans.push(Span::styled(sel, Style::new().reversed()));
-            }
-            if after_start < chars.len() {
-                let after: String = chars[after_start..].iter().collect();
-                new_spans.push(Span::styled(after, orig_style));
+        let orig_style = span.style;
+        let content = span.content.into_owned();
+        let grapheme_span = Span::raw(content.as_str());
+        for g in grapheme_span.styled_graphemes(Style::default()) {
+            let width = g.symbol.cell_width() as usize;
+            let start = col;
+            let end = col + width;
+            col = end;
+            let selected = end > sc && start < ec;
+            let style = if selected {
+                Style::new().reversed()
+            } else {
+                orig_style
+            };
+            if let Some(last) = new_spans.last_mut()
+                && last.style == style
+            {
+                last.content.to_mut().push_str(g.symbol);
+            } else {
+                new_spans.push(Span::styled(g.symbol.to_string(), style));
             }
         }
-        char_off += span_len;
     }
     line.spans = new_spans;
 }
@@ -488,6 +521,56 @@ mod tests {
             .filter(|s| s.style == Style::new().reversed())
             .map(|s| s.content.to_string())
             .collect()
+    }
+
+    #[test]
+    fn test_slice_cells_wide_char() {
+        // "あ" occupies two cells; selecting either cell yields the whole char
+        // rather than splitting it or shifting onto the neighbour.
+        assert_eq!(slice_cells("aあb", 1, 3), "あ");
+        assert_eq!(slice_cells("aあb", 1, 2), "あ");
+        assert_eq!(slice_cells("aあb", 2, 3), "あ");
+        assert_eq!(slice_cells("aあb", 3, 4), "b");
+    }
+
+    #[test]
+    fn test_slice_cells_tab() {
+        // A tab is filtered from rendering and consumes no cell, so it must not
+        // shift the copy by a character slot.
+        assert_eq!(slice_cells("a\tb", 1, 2), "b");
+        assert_eq!(slice_cells("a\tb", 0, 2), "ab");
+    }
+
+    #[test]
+    fn test_slice_cells_combining_sequence() {
+        // "e" + combining acute is a single grapheme occupying one cell.
+        assert_eq!(slice_cells("e\u{301}x", 1, 2), "x");
+        assert_eq!(slice_cells("e\u{301}x", 0, 1), "e\u{301}");
+    }
+
+    #[test]
+    fn test_apply_sel_wide_char_highlights_whole_grapheme() {
+        // Selecting the second cell of a wide char must still reverse it.
+        let lines = vec![Line::from("aあb")];
+        let (mut rows, layout) = build_layout(&lines, 0, 100);
+        apply_sel(&mut rows, &layout, Some((0, 1)), Some((0, 2)));
+        assert_eq!(reversed_chunks(&rows[0]), vec!["あ"]);
+    }
+
+    #[test]
+    fn test_apply_sel_combining_sequence() {
+        let lines = vec![Line::from("e\u{301}x")];
+        let (mut rows, layout) = build_layout(&lines, 0, 100);
+        apply_sel(&mut rows, &layout, Some((0, 1)), Some((0, 2)));
+        assert_eq!(reversed_chunks(&rows[0]), vec!["x"]);
+    }
+
+    #[test]
+    fn test_apply_sel_tab_does_not_shift() {
+        let lines = vec![Line::from("a\tb")];
+        let (mut rows, layout) = build_layout(&lines, 0, 100);
+        apply_sel(&mut rows, &layout, Some((0, 1)), Some((0, 2)));
+        assert_eq!(reversed_chunks(&rows[0]), vec!["b"]);
     }
 
     #[test]

@@ -347,21 +347,44 @@ impl App {
 
         // crossterm's event reader is not thread-safe: exactly one thread may
         // read from it. This reader owns the terminal input for the whole run.
+        // `event::read` blocks indefinitely, so it polls with a short timeout and
+        // checks a stop flag to become joinable on exit.
+        let input_stop = Arc::new(AtomicBool::new(false));
         let input_tx = event_tx.clone();
-        thread::spawn(move || {
-            while let Ok(ev) = event::read() {
-                if input_tx.send(AppEvent::Input(ev)).is_err() {
-                    break;
+        let input_stop_thread = input_stop.clone();
+        let input_handle = thread::spawn(move || {
+            while !input_stop_thread.load(Ordering::SeqCst) {
+                match event::poll(Duration::from_millis(50)) {
+                    Ok(true) => match event::read() {
+                        Ok(ev) => {
+                            if input_tx.send(AppEvent::Input(ev)).is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    },
+                    Ok(false) => {}
+                    Err(_) => break,
                 }
             }
         });
         // Bridge health pings onto the same channel so the loop wakes the moment
         // a dependency becomes ready instead of waiting out the poll timeout.
+        // `recv_timeout` (rather than a blocking `recv`) makes the thread
+        // joinable when the loop sets its stop flag.
+        let health_stop = Arc::new(AtomicBool::new(false));
         let health_tx = event_tx.clone();
-        thread::spawn(move || {
-            while health_rx.recv().is_ok() {
-                if health_tx.send(AppEvent::Health).is_err() {
-                    break;
+        let health_stop_thread = health_stop.clone();
+        let health_handle = thread::spawn(move || {
+            while !health_stop_thread.load(Ordering::SeqCst) {
+                match health_rx.recv_timeout(Duration::from_millis(50)) {
+                    Ok(()) => {
+                        if health_tx.send(AppEvent::Health).is_err() {
+                            break;
+                        }
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                 }
             }
         });
@@ -420,13 +443,34 @@ impl App {
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             }
             // Drain any queued input without blocking so bursts stay responsive.
-            while let Ok(AppEvent::Input(ev)) = event_rx.try_recv() {
-                self.handle_event(ev)?;
-                self.force_redraw = true;
+            // This drain must handle every `AppEvent` variant: stopping at the
+            // first one it does not recognise would drop it and skip its effect
+            // (e.g. a `Health` refresh_now).
+            loop {
+                match event_rx.try_recv() {
+                    Ok(AppEvent::Input(ev)) => {
+                        self.handle_event(ev)?;
+                        self.force_redraw = true;
+                    }
+                    Ok(AppEvent::Health) => {
+                        refresh_now = true;
+                        self.force_redraw = true;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+                }
             }
             self.handle_auto_scroll();
         }
         self.clear_reuse_skip_shutdown_cmds();
+        // Stop and join the input and health threads. They poll/recv with a
+        // timeout, so setting the flags lets both exit within ~50ms; joining
+        // guarantees no reader survives into terminal teardown and frees the
+        // crossterm reader for any later run.
+        input_stop.store(true, Ordering::SeqCst);
+        health_stop.store(true, Ordering::SeqCst);
+        let _ = input_handle.join();
+        let _ = health_handle.join();
         let _ = execute!(std::io::stdout(), DisableMouseCapture);
         if !self.errors.is_empty() {
             for err in &self.errors {
@@ -1678,12 +1722,7 @@ impl App {
                 let used = prefix_len + label_len + stars_len + 2; // 2 = "  " before path
                 let avail = inner_width.saturating_sub(used);
                 let path_str = wt.path.display().to_string();
-                let truncated = if path_str.len() > avail && avail > 3 {
-                    // show tail with ellipsis, keeps worktree id visible
-                    format!("...{}", &path_str[path_str.len() - (avail - 3)..])
-                } else {
-                    path_str
-                };
+                let truncated = truncate_path_tail(&path_str, avail);
                 spans.push(Span::styled(
                     format!("  {truncated}"),
                     Style::default().dim(),
@@ -2117,6 +2156,22 @@ fn panel_title_text(project: Option<&str>, branch: Option<&str>) -> String {
     }
 }
 
+/// Truncates a worktree path to its last `avail` display characters, prefixed
+/// with `"..."`, when it is longer than `avail` and at least four columns are
+/// available (so the ellipsis itself fits).
+///
+/// Slicing is done over `char`s, not bytes: a byte offset can fall inside a
+/// multi-byte character (non-ASCII worktree paths) and panic.
+fn truncate_path_tail(path: &str, avail: usize) -> String {
+    let chars: Vec<char> = path.chars().collect();
+    if chars.len() > avail && avail > 3 {
+        let start = chars.len().saturating_sub(avail.saturating_sub(3));
+        format!("...{}", chars[start..].iter().collect::<String>())
+    } else {
+        path.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2175,6 +2230,25 @@ mod tests {
             last_drawn_proxy_fp: (0, 0),
             last_draw: Instant::now(),
         }
+    }
+
+    #[test]
+    fn test_truncate_path_tail_non_ascii() {
+        // A multi-byte worktree path must never be cut mid-character.
+        let path = "/Users/naputt/dev/日本語-プロジェクト";
+        let out = truncate_path_tail(path, 10);
+        assert_eq!(out, "...-プロジェクト");
+        assert_eq!(out.chars().count(), 10);
+    }
+
+    #[test]
+    fn test_truncate_path_tail_short_and_threshold() {
+        // Fits: returned verbatim, no ellipsis.
+        assert_eq!(truncate_path_tail("/a/b", 10), "/a/b");
+        // Not enough room for the "..." prefix: left untouched.
+        assert_eq!(truncate_path_tail("/a/b/c/d", 3), "/a/b/c/d");
+        // Exact fit boundary.
+        assert_eq!(truncate_path_tail("abcde", 5), "abcde");
     }
 
     #[test]

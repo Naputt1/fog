@@ -1727,12 +1727,15 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
         verbose: cli.verbose,
         startup_messages: startup_warnings,
     });
-    if detached {
-        app.run_headless()?;
+    let run_result = if detached {
+        app.run_headless()
     } else {
-        ratatui::run(|terminal| app.run(terminal))?;
-    }
+        ratatui::run(|terminal| app.run(terminal))
+    };
 
+    // Run cleanup even when the TUI returned an error, so the index server,
+    // IPC socket, and native routes are not left behind. The run error (if any)
+    // is propagated after cleanup.
     if config.effective_should_serve_index() {
         fog::log::emit(&fog::index::ensure_for_config(&config), cli.verbose);
     }
@@ -1749,6 +1752,8 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
     // port is torn down correctly.
     let port = config.effective_index_port();
     fog::index::maybe_terminate_on_port(port);
+
+    run_result?;
 
     Ok(())
 }
