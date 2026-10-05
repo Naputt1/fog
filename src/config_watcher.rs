@@ -8,6 +8,54 @@ use crate::config::Config;
 use crate::proxy::{ProxyInstance, RouteEntry};
 use crate::theme::Theme;
 
+/// Builds a [`ProxyInstance`] from a script's proxy config, mirroring what the
+/// startup path in `runtime::build_with_opts` does: template routes are resolved
+/// against the live port map and branch, then the proxy is constructed (but not
+/// started — the caller starts it).
+///
+/// Reload cannot re-resolve `${ports.*}` templates reliably (the port map is a
+/// startup snapshot), so a config introducing templates is rejected rather than
+/// silently forwarding to an unresolved `${...}` upstream.
+fn proxy_from_config(
+    pc: &crate::config::ProxyConfig,
+    terminal_cfg: Option<crate::config::TerminalConfig>,
+    ports: &crate::ports::PortMap,
+    branch: Option<&str>,
+) -> Result<ProxyInstance, String> {
+    let mut routes = Vec::with_capacity(pc.routes.len());
+    for r in &pc.routes {
+        let mut upstream = r.upstream.clone();
+        if crate::ports::has_template(&upstream) {
+            upstream = crate::ports::resolve_template(&upstream, ports, branch)
+                .map_err(|e| format!("proxy upstream template error: {e}"))?;
+        }
+        let mut host = r.host.clone();
+        if let Some(h) = &host
+            && crate::ports::has_template(h)
+        {
+            host = Some(
+                crate::ports::resolve_template(h, ports, branch)
+                    .map_err(|e| format!("proxy host template error: {e}"))?,
+            );
+        }
+        routes.push(RouteEntry {
+            path: r.path.clone(),
+            host,
+            upstream,
+            ws: r.ws.unwrap_or(false),
+        });
+    }
+    Ok(ProxyInstance::new(
+        pc.port,
+        pc.host.clone(),
+        routes,
+        pc.max_log_entries.unwrap_or(1000),
+        pc.tls_cert.clone(),
+        pc.tls_key.clone(),
+    )
+    .with_terminal_config(terminal_cfg.unwrap_or_default()))
+}
+
 /// How long the watcher waits for a burst of save events to settle before
 /// forwarding a single "reload" signal. Editor saves emit several events;
 /// without this every one would trigger a proxy restart (each blocking).
@@ -103,47 +151,161 @@ pub fn spawn_config_watcher(config_path: PathBuf) -> (mpsc::Receiver<()>, Arc<At
 }
 
 /// Reloads configuration from a file and applies changes to the running app state.
+///
+/// On success returns the resolved [`Config`]. On failure returns an error that
+/// names the offending path and the underlying reason; the previous config is
+/// left in effect (nothing is mutated before parsing succeeds).
+///
+/// Proxy presence is reconciled: a new `proxy` block starts one, removing it
+/// stops (and frees) the running one, and changing an existing one restarts it.
 pub fn reload_config(
-    config_path: &PathBuf,
+    config_path: &Path,
     script_name: &str,
     proxy: &mut Option<ProxyInstance>,
     theme: &mut Theme,
-) {
-    let contents = match std::fs::read_to_string(config_path) {
-        Ok(c) => c,
-        Err(_) => return,
-    };
-    let config: Config = match serde_json::from_str(&contents) {
-        Ok(c) => c,
-        Err(_) => return,
+    ports: &crate::ports::PortMap,
+    branch: Option<&str>,
+) -> Result<Config, String> {
+    let contents = std::fs::read_to_string(config_path).map_err(|e| {
+        format!(
+            "config reload: cannot read '{}': {e}",
+            config_path.display()
+        )
+    })?;
+    let config: Config = serde_json::from_str(&contents).map_err(|e| {
+        format!(
+            "config reload: invalid JSON in '{}': {e}",
+            config_path.display()
+        )
+    })?;
+
+    let pc = config
+        .scripts
+        .get(script_name)
+        .and_then(|s| s.proxy.as_ref());
+    let terminal_cfg = config
+        .scripts
+        .get(script_name)
+        .and_then(|s| s.terminal.clone());
+
+    // Resolve the target proxy *before* mutating any live state, so a template
+    // error leaves the previous config (and theme) fully in effect.
+    let target = match pc {
+        Some(pc) => Some(proxy_from_config(pc, terminal_cfg, ports, branch)?),
+        None => None,
     };
 
     if let Some(tc) = &config.theme {
         *theme = Theme::from_config(Some(tc));
     }
 
-    if let Some(pc) = config
-        .scripts
-        .get(script_name)
-        .and_then(|s| s.proxy.as_ref())
-        && let Some(p) = proxy
-    {
-        let new_routes: Vec<RouteEntry> = pc
-            .routes
-            .iter()
-            .map(|r| RouteEntry {
-                path: r.path.clone(),
-                host: r.host.clone(),
-                upstream: r.upstream.clone(),
-                ws: r.ws.unwrap_or(false),
-            })
-            .collect();
-        let new_host = pc.host.clone().unwrap_or_else(|| "127.0.0.1".to_string());
-        if pc.port != p.port || new_host != p.host || new_routes != p.routes {
-            p.port = pc.port;
-            p.host = new_host;
-            p.routes = new_routes;
-            p.restart();
+    match (target, proxy.as_mut()) {
+        // Existing proxy: reconfigure in place, restarting only when a field
+        // that affects the running listener changed.
+        (Some(target), Some(p)) => {
+            p.reconfigure(target);
         }
+        // `None -> Some`: the config added a proxy; start it now.
+        (Some(mut target), None) => {
+            target.start();
+            *proxy = Some(target);
+        }
+        // `Some -> None`: the config dropped the proxy; shut it down. Replacing
+        // the `Option` drops the old instance, which joins its listener thread.
+        (None, Some(_)) => {
+            *proxy = None;
+        }
+        (None, None) => {}
+    }
+
+    Ok(config)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_config(dir: &Path, json: &str) -> PathBuf {
+        let path = dir.join("fog.json");
+        std::fs::write(&path, json).unwrap();
+        path
+    }
+
+    fn proxy_config(port: u16) -> String {
+        format!(r#"{{"scripts":{{"dev":{{"proxy":{{"port":{port},"routes":[]}}}}}}}}"#)
+    }
+
+    #[test]
+    fn test_reload_invalid_json_returns_error_and_preserves_state() {
+        let dir = std::env::temp_dir().join(format!("fog-reload-invalid-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = write_config(&dir, "this is not json");
+
+        let mut proxy: Option<ProxyInstance> = None;
+        let mut theme = Theme::from_config(None);
+        let ports = crate::ports::PortMap::new();
+
+        let err = reload_config(&path, "dev", &mut proxy, &mut theme, &ports, None)
+            .expect_err("invalid JSON must surface an error");
+        assert!(
+            err.contains("invalid JSON") && err.contains("fog.json"),
+            "error should name the cause and path: {err}"
+        );
+        // Nothing was mutated: no proxy was started from the bad config.
+        assert!(proxy.is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_reload_toggles_proxy_presence() {
+        let dir = std::env::temp_dir().join(format!("fog-reload-toggle-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ports = crate::ports::PortMap::new();
+        let mut theme = Theme::from_config(None);
+        let mut proxy: Option<ProxyInstance> = None;
+
+        // None -> Some: config adds a proxy (port 0 = OS-assigned, no conflict
+        // with any other test's listener).
+        let path = write_config(&dir, &proxy_config(0));
+        reload_config(&path, "dev", &mut proxy, &mut theme, &ports, None).unwrap();
+        assert!(
+            proxy.is_some(),
+            "proxy must be started when added to config"
+        );
+        assert!(proxy.as_ref().unwrap().is_running());
+
+        // Some -> None: config drops the proxy.
+        let path = write_config(&dir, r#"{"scripts":{"dev":{}}}"#);
+        reload_config(&path, "dev", &mut proxy, &mut theme, &ports, None).unwrap();
+        assert!(proxy.is_none(), "proxy must be shut down when removed");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_reload_updates_existing_proxy_in_place() {
+        let dir = std::env::temp_dir().join(format!("fog-reload-update-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ports = crate::ports::PortMap::new();
+        let mut theme = Theme::from_config(None);
+        let mut proxy: Option<ProxyInstance> = None;
+
+        let path = write_config(&dir, &proxy_config(0));
+        reload_config(&path, "dev", &mut proxy, &mut theme, &ports, None).unwrap();
+        assert!(proxy.as_ref().unwrap().is_running());
+
+        // A route change restarts the existing instance; presence is unchanged.
+        let path = write_config(
+            &dir,
+            r#"{"scripts":{"dev":{"proxy":{"port":0,"routes":[{"path":"/","upstream":"http://127.0.0.1:9"}]}}}}"#,
+        );
+        reload_config(&path, "dev", &mut proxy, &mut theme, &ports, None).unwrap();
+        assert!(proxy.is_some());
+        let p = proxy.as_ref().unwrap();
+        assert_eq!(p.routes.len(), 1);
+        assert_eq!(p.routes[0].upstream, "http://127.0.0.1:9");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

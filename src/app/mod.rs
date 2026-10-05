@@ -298,12 +298,37 @@ impl App {
     /// # Errors
     /// Returns an error if terminal rendering or event polling fails.
     fn reload_config(&mut self) {
-        config_watcher::reload_config(
+        let ports = self.ipc_state.ports.lock().expect("mutex poisoned").clone();
+        let branch =
+            runtime::resolve_branch(self.config_path.parent().unwrap_or_else(|| Path::new(".")));
+        let had_proxy = self.proxy.is_some();
+        match config_watcher::reload_config(
             &self.config_path,
             &self.ipc_state.script,
             &mut self.proxy,
             &mut self.theme,
-        );
+            &ports,
+            branch.as_deref(),
+        ) {
+            Ok(_) => {
+                let has_proxy = self.proxy.is_some();
+                if had_proxy != has_proxy {
+                    // Reconcile the proxy tab with the proxy's new presence.
+                    if has_proxy {
+                        self.tabs.insert_at(0, "proxy".to_string(), TabKind::Proxy);
+                        self.proxy_tab_index = Some(0);
+                    } else {
+                        self.tabs.remove(0);
+                        self.proxy_tab_index = None;
+                    }
+                    self.last_drawn_proxy_fp = (0, 0);
+                }
+                // Keep the IPC-exposed live log handle in step with the proxy.
+                *self.ipc_state.proxy_logs.lock().expect("mutex poisoned") =
+                    self.proxy.as_ref().map(|p| p.logs_handle());
+            }
+            Err(e) => self.errors.push(e),
+        }
     }
 
     /// Extracts live services requested for handover by a replacing instance
