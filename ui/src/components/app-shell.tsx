@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import {
   Link,
   useLocation,
@@ -184,15 +184,20 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     ignoreScope: SERVICE_SWIPE_SCOPE,
   });
 
+  // Stable context identity: setters from useState are stable, so consumers
+  // only re-run when `open`/`enabled` actually change.
+  const rightSidebar = useMemo(
+    () => ({
+      open: rightOpen,
+      setOpen: setRightOpen,
+      enabled: rightEnabled,
+      setEnabled: setRightEnabled,
+    }),
+    [rightOpen, rightEnabled]
+  );
+
   return (
-    <RightSidebarContext.Provider
-      value={{
-        open: rightOpen,
-        setOpen: setRightOpen,
-        enabled: rightEnabled,
-        setEnabled: setRightEnabled,
-      }}
-    >
+    <RightSidebarContext.Provider value={rightSidebar}>
       <div className="bg-background text-foreground flex h-dvh w-full flex-col overflow-hidden md:flex-row">
         <a
           href="#main"

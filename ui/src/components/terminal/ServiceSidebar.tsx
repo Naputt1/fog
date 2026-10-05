@@ -142,11 +142,13 @@ export function ServiceSidebar(props: ServiceSidebarProps) {
     0
   );
   const ctx = useRightSidebar();
+  const setEnabled = ctx?.setEnabled;
 
   useEffect(() => {
-    ctx?.setEnabled(true);
-    return () => ctx?.setEnabled(false);
-  }, [ctx]);
+    if (!setEnabled) return;
+    setEnabled(true);
+    return () => setEnabled(false);
+  }, [setEnabled]);
 
   const handleSelect = (container: string) => {
     onSelect(container);

@@ -34,6 +34,7 @@ import {
 import {
   applyServiceAction,
   isInstanceKilling,
+  restoreService,
   type KillIntentState,
 } from "@/lib/action-cache";
 
@@ -130,11 +131,19 @@ export function useServiceAction() {
         id: serviceToastId(pid, name),
       });
       await queryClient.cancelQueries({ queryKey: ["status"] });
-      const previous = queryClient.getQueryData<StatusSnapshot>(["status"]);
+      const snapshot = queryClient.getQueryData<StatusSnapshot>(["status"]);
+      // Capture only the target's running/health so a rollback cannot clobber
+      // a concurrent action's optimistic patch on another service.
+      const target = snapshot?.instances
+        .find((inst) => inst.pid === pid)
+        ?.services.find((svc) => svc.name === name);
+      const restore = target
+        ? { running: target.running, health: target.health }
+        : undefined;
       queryClient.setQueryData<StatusSnapshot>(["status"], (old) =>
         applyServiceAction(old, pid, name, action)
       );
-      return { previous };
+      return { restore };
     },
     onSuccess: (result, { pid, name, action }, context) => {
       const id = serviceToastId(pid, name);
@@ -143,8 +152,11 @@ export function useServiceAction() {
         return;
       }
       // The instance refused the action: drop the optimistic patch and say why.
-      if (context?.previous !== undefined) {
-        queryClient.setQueryData(["status"], context.previous);
+      const restore = context?.restore;
+      if (restore) {
+        queryClient.setQueryData<StatusSnapshot>(["status"], (old) =>
+          restoreService(old, pid, name, restore)
+        );
       }
       toast.warning(`Could not ${action} "${name}"`, {
         id,
@@ -152,8 +164,11 @@ export function useServiceAction() {
       });
     },
     onError: (error, { pid, name, action }, context) => {
-      if (context?.previous !== undefined) {
-        queryClient.setQueryData(["status"], context.previous);
+      const restore = context?.restore;
+      if (restore) {
+        queryClient.setQueryData<StatusSnapshot>(["status"], (old) =>
+          restoreService(old, pid, name, restore)
+        );
       }
       toast.error(`Could not ${action} "${name}"`, {
         id: serviceToastId(pid, name),

@@ -64,6 +64,7 @@ export function LogView({
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const [connected, setConnected] = useState(false);
+  const [lost, setLost] = useState(false);
   const [fitted, setFitted] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(true);
@@ -88,6 +89,9 @@ export function LogView({
     service: "",
     pid: null,
   });
+  // Bumped on every service switch/unmount so an in-flight history load cannot
+  // write into a terminal that has since been reset or disposed.
+  const epochRef = useRef(0);
 
   const bumpCount = useCallback((n: number) => {
     const now = Date.now();
@@ -114,6 +118,7 @@ export function LogView({
     if (!term || loadingMoreRef.current || !hasMoreRef.current) return;
     const q = queryRef.current;
     if (!q.service) return;
+    const epoch = epochRef.current;
     loadingMoreRef.current = true;
     setLoadingMore(true);
     try {
@@ -123,6 +128,9 @@ export function LogView({
         tail: HISTORY_PAGE,
         offset,
       });
+      // The service may have switched or the view unmounted while this history
+      // page was in flight; never write into a reset/disposed terminal.
+      if (epoch !== epochRef.current || !termRef.current) return;
       if (res.lines.length === 0) {
         hasMoreRef.current = false;
         setHasMore(false);
@@ -147,6 +155,7 @@ export function LogView({
       const prepended = trimmed.length - prevLen;
       if (prepended > 0) term.scrollLines(prepended);
     } catch (e) {
+      if (epoch !== epochRef.current || !termRef.current) return;
       term.writeln(`\x1b[33m[log] history load failed: ${String(e)}\x1b[0m`);
     } finally {
       loadingMoreRef.current = false;
@@ -292,6 +301,7 @@ export function LogView({
   }, [fit, loadMore, handleTouchStart, handleTouchMove, handleTouchEnd]);
 
   useEffect(() => {
+    epochRef.current += 1;
     const term = termRef.current;
     if (!term) return;
     if (!container && !service) {
@@ -320,12 +330,14 @@ export function LogView({
       `\x1b[90m[log] connecting ${logService}${pid != null ? ` (pid ${pid})` : ""} …\x1b[0m`
     );
     setConnected(false);
+    setLost(false);
 
     const unsub = subscribeLogs(logService, {
       pid,
       tail: INITIAL_TAIL,
       onOpen: () => {
         setConnected(true);
+        setLost(false);
         term.writeln("\x1b[32m[log] connected\x1b[0m");
       },
       onLine: (line) => {
@@ -346,11 +358,23 @@ export function LogView({
         bumpCount(linesRef.current.length);
         if (stickRef.current) term.scrollToBottom();
       },
-      onError: () => setConnected(false),
+      onError: (event) => {
+        setConnected(false);
+        // EventSource auto-reconnects on transient errors, but a CLOSED source
+        // will not. Surface a one-line notice so the user knows the stream died
+        // instead of waiting forever on "connecting…".
+        const target = event.target as EventSource | null;
+        if (target?.readyState === EventSource.CLOSED) {
+          setLost(true);
+          term.writeln("\x1b[33m[log] stream lost\x1b[0m");
+        }
+      },
     });
     return () => {
+      epochRef.current += 1;
       unsub();
       setConnected(false);
+      setLost(false);
     };
   }, [container, pid, service, bumpCount]);
 
@@ -376,11 +400,15 @@ export function LogView({
             aria-hidden="true"
             className={cn(
               "size-2 rounded-full",
-              connected ? "bg-emerald-500" : "animate-pulse bg-amber-400"
+              lost
+                ? "bg-destructive"
+                : connected
+                  ? "bg-emerald-500"
+                  : "animate-pulse bg-amber-400"
             )}
           />
           <span className="text-muted-foreground" aria-live="polite">
-            {connected ? "streaming" : "connecting…"}
+            {lost ? "stream lost" : connected ? "streaming" : "connecting…"}
           </span>
           <span
             aria-hidden="true"

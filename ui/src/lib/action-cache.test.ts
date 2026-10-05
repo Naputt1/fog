@@ -6,6 +6,7 @@ import {
   isInstanceKilling,
   KILL_GRACE_MS,
   optimisticServicePatch,
+  restoreService,
   type KillIntentState,
 } from "./action-cache";
 
@@ -92,6 +93,68 @@ describe("applyServiceAction", () => {
 
   it("passes through undefined", () => {
     expect(applyServiceAction(undefined, 1, "web", "start")).toBeUndefined();
+  });
+});
+
+describe("restoreService", () => {
+  it("restores only the touched service's running/health", () => {
+    const before = snapshot();
+    const after = applyServiceAction(before, 1, "web", "stop");
+    const restored = restoreService(after, 1, "web", {
+      running: true,
+      health: "healthy",
+    });
+
+    expect(restored?.instances[0].services[0]).toEqual({
+      name: "web",
+      running: true,
+      health: "healthy",
+    });
+    // Other services are unaffected by the restore.
+    expect(restored?.instances[0].services[1]).toEqual(
+      before.instances[0].services[1]
+    );
+    expect(restored?.instances[1]).toEqual(before.instances[1]);
+  });
+
+  it("keeps a concurrent patch on another service when one action fails", () => {
+    // A + B applied optimistically, then A is rolled back.
+    const withBoth = applyServiceAction(
+      applyServiceAction(snapshot(), 1, "web", "stop"),
+      1,
+      "db",
+      "start"
+    );
+    const afterRollback = restoreService(withBoth, 1, "web", {
+      running: true,
+      health: "healthy",
+    });
+
+    // A (web) is back to its pre-action state.
+    expect(afterRollback?.instances[0].services[0]).toEqual({
+      name: "web",
+      running: true,
+      health: "healthy",
+    });
+    // B (db) keeps its successful optimistic patch.
+    expect(afterRollback?.instances[0].services[1]).toEqual({
+      name: "db",
+      running: true,
+      health: "starting",
+    });
+  });
+
+  it("returns the same snapshot when nothing matches", () => {
+    const before = snapshot();
+    expect(
+      restoreService(before, 999, "web", { running: true, health: "healthy" })
+    ).toBe(before);
+  });
+
+  it("passes through undefined", () => {
+    expect(
+      restoreService(undefined, 1, "web", { running: true, health: "healthy" })
+    ).toBeUndefined();
   });
 });
 

@@ -8,6 +8,7 @@ import {
   projectStats,
   type ProjectBucket,
 } from "@/lib/services";
+import { isSafeImageUrl } from "@/lib/utils";
 import { PageHeader, LoadingState, ErrorState } from "@/components/page-state";
 import { Card, CardContent } from "@/components/ui/card";
 
@@ -17,11 +18,12 @@ export const Route = createFileRoute("/")({
 
 /**
  * Project icon from config (`project.icon`). Renders the configured image and
- * falls back to the default glyph when unset or if the image fails to load.
+ * falls back to the default glyph when unset, unsafe, or if the image fails to
+ * load. The server filters icons too; this is defense in depth.
  */
 function ProjectIcon({ icon }: { icon: string | null }) {
   const [failed, setFailed] = useState(false);
-  if (icon && !failed) {
+  if (icon && isSafeImageUrl(icon) && !failed) {
     return (
       <img
         src={icon}

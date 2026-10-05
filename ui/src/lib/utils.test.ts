@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { toDisplayEndpointUrl } from "./utils";
+import {
+  isSafeImageUrl,
+  toDisplayEndpointUrl,
+  toDisplayUrl,
+} from "./utils";
 
 /** Stub the browser host the endpoint URL logic reads from. */
 function setHost(hostname: string): void {
@@ -62,5 +66,56 @@ describe("toDisplayEndpointUrl", () => {
     expect(toDisplayEndpointUrl("http://192.168.1.10:53123/", "53123")).toBe(
       "http://192.168.1.10:53123/"
     );
+  });
+
+  it("rejects unsafe URL schemes", () => {
+    setHost("192.168.1.10");
+    expect(toDisplayEndpointUrl("javascript:alert(1)", "9000")).toBe("");
+    expect(toDisplayEndpointUrl("data:text/html,<script/>", "9000")).toBe("");
+    expect(toDisplayEndpointUrl("file:///etc/passwd", "9000")).toBe("");
+  });
+
+  it("still passes through https", () => {
+    setHost("192.168.1.10");
+    expect(toDisplayEndpointUrl("https://web.main.acme/", "")).toBe(
+      "https://web.main.acme/"
+    );
+  });
+});
+
+describe("toDisplayUrl", () => {
+  it("passes https through", () => {
+    setHost("192.168.1.10");
+    expect(toDisplayUrl("https://web.main.acme/")).toBe(
+      "https://web.main.acme/"
+    );
+  });
+
+  it("rejects unsafe URL schemes", () => {
+    setHost("192.168.1.10");
+    expect(toDisplayUrl("javascript:alert(1)")).toBe("");
+    expect(toDisplayUrl("data:text/html,<script/>")).toBe("");
+    expect(toDisplayUrl("file:///etc/passwd")).toBe("");
+  });
+
+  it("leaves an empty url unchanged", () => {
+    expect(toDisplayUrl("")).toBe("");
+  });
+});
+
+describe("isSafeImageUrl", () => {
+  it("allows http(s)", () => {
+    expect(isSafeImageUrl("https://cdn.acme/logo.png")).toBe(true);
+    expect(isSafeImageUrl("http://cdn.acme/logo.png")).toBe(true);
+  });
+
+  it("allows image data URIs only", () => {
+    expect(isSafeImageUrl("data:image/png;base64,AAAA")).toBe(true);
+    expect(isSafeImageUrl("data:text/html,<script/>")).toBe(false);
+  });
+
+  it("rejects javascript: and other schemes", () => {
+    expect(isSafeImageUrl("javascript:alert(1)")).toBe(false);
+    expect(isSafeImageUrl("file:///etc/passwd")).toBe(false);
   });
 });

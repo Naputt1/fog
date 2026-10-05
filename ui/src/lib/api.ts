@@ -346,8 +346,9 @@ export interface LogStreamOptions {
  * `/logs/stream?service=NAME[&tail=N]` (docker) or `?pid=PID&service=NAME`
  * (native fog). Returns an unsubscribe function. EventSource reconnects
  * automatically and the browser fires `error` while reconnecting — callers
- * should treat errors as transient and rely on `onOpen` / line events for
- * true data.
+ * should treat those as transient. When the source gives up, `onError` is
+ * called with `event.target.readyState === EventSource.CLOSED`; callers should
+ * surface that as a terminal "stream lost" state.
  */
 export function subscribeLogs(
   service: string,

@@ -69,6 +69,36 @@ export function applyServiceAction(
   return changed ? { ...snapshot, instances } : snapshot;
 }
 
+/**
+ * Returns a copy of `snapshot` with only `pid`/`name`'s `running`/`health`
+ * restored to `previous`. Scoping the rollback to the touched service means a
+ * concurrent action on another service keeps its optimistic patch.
+ */
+export function restoreService(
+  snapshot: StatusSnapshot | undefined,
+  pid: number,
+  name: string,
+  previous: Pick<InstanceServiceStatus, "running" | "health">
+): StatusSnapshot | undefined {
+  if (!snapshot) return snapshot;
+
+  let changed = false;
+  const instances = snapshot.instances.map((inst) => {
+    if (inst.pid !== pid) return inst;
+    let instanceChanged = false;
+    const services = inst.services.map((svc) => {
+      if (svc.name !== name) return svc;
+      instanceChanged = true;
+      return { ...svc, running: previous.running, health: previous.health };
+    });
+    if (!instanceChanged) return inst;
+    changed = true;
+    return { ...inst, services };
+  });
+
+  return changed ? { ...snapshot, instances } : snapshot;
+}
+
 /** One kill mutation's projected variables/status, as read from the cache. */
 export interface KillIntentState {
   pid?: number;

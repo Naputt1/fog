@@ -746,7 +746,19 @@ impl TerminalSession {
                                 break;
                             }
                         }
-                        None => break,
+                        None => {
+                            // PTY reached EOF: the shell exited on its own.
+                            // Send a normal close frame so the browser does not
+                            // treat the drop as a transient failure and respawn
+                            // a shell.
+                            let _ = ws_sink
+                                .send(Message::Close(Some(CloseFrame {
+                                    code: CloseCode::Normal,
+                                    reason: "shell exited".into(),
+                                })))
+                                .await;
+                            break;
+                        }
                     }
                 }
                 _ = ping.tick() => {

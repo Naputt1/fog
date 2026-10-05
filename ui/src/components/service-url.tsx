@@ -94,6 +94,14 @@ export function ServiceUrl({
   const dnsOnly =
     isDnsOnly(svc.url, svc.ports) && !isLocalHost(getRequestHostname());
 
+  if (!displayUrl) {
+    return (
+      <span className={cn("text-muted-foreground font-mono", className)}>
+        —
+      </span>
+    );
+  }
+
   return (
     <div className={cn("flex min-w-0 items-center gap-1", className)}>
       <a

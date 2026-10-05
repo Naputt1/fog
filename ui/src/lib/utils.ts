@@ -1,5 +1,28 @@
 export { cn } from "cn";
 
+/** URL schemes safe to place in an `href`. */
+const SAFE_SCHEMES = new Set(["http:", "https:"]);
+
+/** Whether `raw` parses as a URL with an allow-listed scheme. */
+function hasSafeScheme(raw: string): boolean {
+  try {
+    return SAFE_SCHEMES.has(new URL(raw).protocol);
+  } catch {
+    return false;
+  }
+}
+
+/** Whether `raw` is safe for an `<img src>`: http(s), or an image `data:` URI. */
+export function isSafeImageUrl(raw: string): boolean {
+  try {
+    const u = new URL(raw);
+    if (SAFE_SCHEMES.has(u.protocol)) return true;
+    return u.protocol === "data:" && /^data:image\//i.test(raw);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Host-aware URL helpers.
  *
@@ -82,6 +105,7 @@ function extractEndpointPort(port: string): string | null {
  * - no usable port → return `url` unchanged.
  */
 export function toDisplayEndpointUrl(url: string, port: string): string {
+  if (url && !hasSafeScheme(url)) return "";
   if (typeof window === "undefined") return url;
   const reqHost = window.location.hostname;
   const hostPort = extractEndpointPort(port);
@@ -110,6 +134,7 @@ export function toDisplayEndpointUrl(url: string, port: string): string {
  */
 export function toDisplayUrl(url: string, ports: string[] = []): string {
   if (!url) return url;
+  if (!hasSafeScheme(url)) return "";
   if (typeof window === "undefined") return url;
   const reqHost = window.location.hostname;
   if (!reqHost || isLocalHost(reqHost)) return url;

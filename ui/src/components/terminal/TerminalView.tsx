@@ -26,8 +26,15 @@ const MAX_RECONNECT_MS = 8_000;
 /** Debounce window for FitAddon on window/container resize. */
 const FIT_DEBOUNCE_MS = 100;
 
-/** Close codes treated as permanent errors: do not auto-reconnect. */
-const PERMANENT_CLOSE_CODES = new Set([1008, 1009, 1011]);
+/**
+ * Close codes treated as permanent: the session ended intentionally, so do not
+ * auto-reconnect. `src/terminal_ws.rs` sends `1000` when the PTY shell exits,
+ * `1001` (away) when a live-attach service is not running, and a codeless
+ * close (`1005`) on idle timeout. `1008`/`1009`/`1011` are protocol/error
+ * closes. A bare `1006` (transport dropped with no close frame) stays
+ * retryable.
+ */
+const PERMANENT_CLOSE_CODES = new Set([1000, 1001, 1005, 1008, 1009, 1011]);
 
 /**
  * Dark theme tuned to the fog dashboard palette (GitHub-dark-ish).
