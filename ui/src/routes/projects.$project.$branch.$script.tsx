@@ -25,7 +25,7 @@ import {
   ServiceTerminal,
   type TerminalMode,
 } from "@/components/terminal/ServiceTerminal";
-import { buttonVariants } from "@/components/ui/button";
+import { buttonVariants } from "@/components/ui/button-variants";
 import { Card, CardContent } from "@/components/ui/card";
 import {
   Sheet,

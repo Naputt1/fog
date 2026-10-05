@@ -3,7 +3,8 @@ import { Trash2 } from "lucide-react";
 
 import { useKillInstance, useInstanceKillState } from "@/lib/hooks";
 import type { VariantProps } from "class-variance-authority";
-import { Button, buttonVariants } from "@/components/ui/button";
+import { Button } from "@/components/ui/button";
+import { buttonVariants } from "@/components/ui/button-variants";
 import {
   AlertDialog,
   AlertDialogAction,

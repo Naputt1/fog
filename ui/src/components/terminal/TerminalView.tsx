@@ -85,7 +85,6 @@ export function TerminalView({
   const touchOnScrollbarRef = useRef(false);
 
   const [connState, setConnState] = useState<ConnState>("connecting");
-  const [fitted, setFitted] = useState(false);
   // Bumped to force a fresh terminal + socket mount (auto or manual reconnect).
   const [attempt, setAttempt] = useState(0);
 
@@ -103,7 +102,7 @@ export function TerminalView({
   const fitImmediate = useCallback(() => {
     try {
       fitAddonRef.current?.fit();
-      setFitted(true);
+      if (containerRef.current) containerRef.current.style.visibility = "";
     } catch {
       /* container not measurable yet; fall back to PTY default size */
     }
@@ -206,7 +205,6 @@ export function TerminalView({
       termRef.current = null;
     }
     fitAddonRef.current = null;
-    setFitted(false);
     clearTimers();
     if (containerRef.current) {
       containerRef.current.innerHTML = "";
@@ -239,9 +237,8 @@ export function TerminalView({
     try {
       fitAddon.fit();
       el.style.visibility = "";
-      setFitted(true);
     } catch {
-      el.style.visibility = "";
+      /* keep hidden; fitImmediate reveals it on the next resize */
     }
     term.focus();
 
@@ -347,8 +344,10 @@ export function TerminalView({
   }, [
     attempt,
     fit,
+    fitImmediate,
     teardown,
     service,
+    live,
     handleTouchStart,
     handleTouchMove,
     handleTouchEnd,
@@ -439,7 +438,7 @@ export function TerminalView({
       copyText,
       focus: () => termRef.current?.focus(),
     }),
-    [ref, sendKey, scrollByLines, copyText]
+    [sendKey, scrollByLines, copyText]
   );
 
   const handleScrollTop = useCallback(() => termRef.current?.scrollToTop(), []);
@@ -504,7 +503,7 @@ export function TerminalView({
       <div className="flex min-h-0 flex-1 bg-terminal p-2">
         <div
           ref={containerRef}
-          className={cn("h-full min-h-0 w-full", !fitted && "opacity-0")}
+          className="h-full min-h-0 w-full"
         />
       </div>
     </div>

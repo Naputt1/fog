@@ -3,7 +3,8 @@ import { useState } from "react";
 import { useServiceAction, useServiceActionState } from "@/lib/hooks";
 import type { ServiceAction } from "@/lib/api";
 import type { VariantProps } from "class-variance-authority";
-import { Button, buttonVariants } from "@/components/ui/button";
+import { Button } from "@/components/ui/button";
+import { buttonVariants } from "@/components/ui/button-variants";
 import {
   AlertDialog,
   AlertDialogAction,

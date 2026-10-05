@@ -64,10 +64,21 @@ export function LogView({
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const [connected, setConnected] = useState(false);
-  const [fitted, setFitted] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(true);
   const [lineCount, setLineCount] = useState(0);
+
+  // Reset per-stream UI state during render when the target changes. This is
+  // React's recommended alternative to calling setState from an effect.
+  const streamId = JSON.stringify([container, pid, service]);
+  const [prevStreamId, setPrevStreamId] = useState(streamId);
+  if (prevStreamId !== streamId) {
+    setPrevStreamId(streamId);
+    setConnected(false);
+    setLoadingMore(false);
+    setHasMore(true);
+    setLineCount(0);
+  }
   // Touch-scroll bookkeeping.
   const touchLastYRef = useRef<number | null>(null);
   const touchAccumRef = useRef(0);
@@ -100,6 +111,7 @@ export function LogView({
   const fit = useCallback(() => {
     try {
       fitRef.current?.fit();
+      if (elRef.current) elRef.current.style.visibility = "";
     } catch {
       /* not measurable yet */
     }
@@ -255,9 +267,8 @@ export function LogView({
     try {
       fitAddon.fit();
       el.style.visibility = "";
-      setFitted(true);
     } catch {
-      el.style.visibility = "";
+      /* keep hidden; the ResizeObserver's fit() reveals it once measurable */
     }
     termRef.current = term;
     fitRef.current = fitAddon;
@@ -311,16 +322,11 @@ export function LogView({
     hasMoreRef.current = true;
     loadingMoreRef.current = false;
     stickRef.current = true;
-    setHasMore(true);
-    setLoadingMore(false);
-    setLineCount(0);
 
     term.clear();
     term.writeln(
       `\x1b[90m[log] connecting ${logService}${pid != null ? ` (pid ${pid})` : ""} …\x1b[0m`
     );
-    setConnected(false);
-
     const unsub = subscribeLogs(logService, {
       pid,
       tail: INITIAL_TAIL,
@@ -435,7 +441,7 @@ export function LogView({
       <div className="flex min-h-0 flex-1 bg-terminal p-2">
         <div
           ref={elRef}
-          className={cn("h-full min-h-0 w-full", !fitted && "opacity-0")}
+          className="h-full min-h-0 w-full"
         />
       </div>
     </div>
