@@ -1,4 +1,5 @@
 pub mod app;
+pub mod cli;
 pub mod click_tab;
 pub mod completion;
 pub mod config;
