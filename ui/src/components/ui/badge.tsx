@@ -18,9 +18,30 @@ const badgeVariants = cva(
         ghost: "[a&]:hover:bg-accent [a&]:hover:text-accent-foreground",
         link: "text-primary underline-offset-4 [a&]:hover:underline",
       },
+      /** Service/lifecycle tones. Pair with `variant="outline"`. */
+      tone: {
+        default: "",
+        running: "bg-primary/15 text-primary border-primary/30",
+        healthy: "bg-success/15 text-success border-success/30",
+        starting: "bg-info/15 text-info border-info/30",
+        stopped: "bg-muted text-muted-foreground border-border",
+        stopping: "bg-warning/15 text-warning border-warning/30",
+        killing: "bg-warning/15 text-warning border-warning/30",
+        unhealthy: "bg-destructive/15 text-destructive border-destructive/30",
+        unknown: "border-border text-muted-foreground",
+      },
+      size: {
+        default: "",
+        /** Status pill: mono, capitalized label with roomier gap. */
+        status: "gap-1.5 font-mono capitalize",
+        /** Monospace label only. */
+        mono: "font-mono",
+      },
     },
     defaultVariants: {
       variant: "default",
+      tone: "default",
+      size: "default",
     },
   }
 );
@@ -28,13 +49,16 @@ const badgeVariants = cva(
 function Badge({
   className,
   variant = "default",
+  tone = "default",
+  size = "default",
   ...props
 }: React.ComponentProps<"span"> & VariantProps<typeof badgeVariants>) {
   return (
     <span
       data-slot="badge"
       data-variant={variant}
-      className={cn(badgeVariants({ variant }), className)}
+      data-tone={tone}
+      className={cn(badgeVariants({ variant, tone, size }), className)}
       {...props}
     />
   );

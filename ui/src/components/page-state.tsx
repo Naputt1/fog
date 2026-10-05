@@ -1,5 +1,4 @@
 import { AlertCircle, Loader2 } from "lucide-react";
-import { cn } from "@/lib/utils";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 
@@ -53,8 +52,8 @@ export function ErrorState({
   className?: string;
 }) {
   return (
-    <Card className={cn("border-destructive/40", className)}>
-      <CardContent className="flex min-w-0 items-center gap-3 py-4">
+    <Card tone="destructive" className={className}>
+      <CardContent variant="inline" className="flex min-w-0 items-center">
         <AlertCircle className="text-destructive size-4 shrink-0" />
         <div className="text-muted-foreground min-w-0 font-mono text-sm">
           {message ?? "Failed to load data."}

@@ -1,4 +1,5 @@
 import * as React from "react";
+import { cva, type VariantProps } from "class-variance-authority";
 import { XIcon } from "lucide-react";
 import { Dialog as DialogPrimitive } from "@base-ui/react/dialog";
 
@@ -45,10 +46,15 @@ function SheetContent({
   children,
   side = "right",
   showCloseButton = true,
+  spacing = "default",
+  shape = "default",
   ...props
 }: DialogPrimitive.Popup.Props & {
   side?: SheetSide;
   showCloseButton?: boolean;
+  /** `none` removes the gap between children (full-bleed layouts). */
+  spacing?: "default" | "none";
+  shape?: "default" | "roundedTop";
 }) {
   return (
     <SheetPortal>
@@ -57,6 +63,8 @@ function SheetContent({
         data-slot="sheet-content"
         className={cn(
           "bg-background fixed z-50 flex flex-col gap-4 shadow-lg transition-transform duration-300 ease-in-out",
+          spacing === "none" && "gap-0",
+          shape === "roundedTop" && "rounded-t-2xl",
           SIDE_CLASSES[side],
           className
         )}
@@ -74,21 +82,60 @@ function SheetContent({
   );
 }
 
-function SheetHeader({ className, ...props }: React.ComponentProps<"div">) {
+const sheetHeaderVariants = cva("flex flex-col", {
+  variants: {
+    variant: {
+      default: "gap-1.5 p-4",
+      /** Boarding header: bordered, padded bar. */
+      bar: "gap-1.5 border-b border-border px-4 py-3",
+      /** `bar` plus top safe-area padding (edge-anchored sheets). */
+      barSafe: "gap-1.5 border-b border-border pt-safe px-4 py-3",
+    },
+    spacing: {
+      default: "",
+      roomy: "gap-2",
+    },
+  },
+  defaultVariants: { variant: "default", spacing: "default" },
+});
+
+function SheetHeader({
+  className,
+  variant = "default",
+  spacing = "default",
+  ...props
+}: React.ComponentProps<"div"> & VariantProps<typeof sheetHeaderVariants>) {
   return (
     <div
       data-slot="sheet-header"
-      className={cn("flex flex-col gap-1.5 p-4", className)}
+      className={cn(sheetHeaderVariants({ variant, spacing }), className)}
       {...props}
     />
   );
 }
 
-function SheetTitle({ className, ...props }: DialogPrimitive.Title.Props) {
+const sheetTitleVariants = cva("text-foreground font-semibold", {
+  variants: {
+    variant: {
+      default: "",
+      /** Mono title, truncated (record names). */
+      strip: "font-mono text-sm truncate",
+      /** Small uppercase mono label (section headings). */
+      label: "font-mono text-xs tracking-wider uppercase",
+    },
+  },
+  defaultVariants: { variant: "default" },
+});
+
+function SheetTitle({
+  className,
+  variant = "default",
+  ...props
+}: DialogPrimitive.Title.Props & VariantProps<typeof sheetTitleVariants>) {
   return (
     <DialogPrimitive.Title
       data-slot="sheet-title"
-      className={cn("text-foreground font-semibold", className)}
+      className={cn(sheetTitleVariants({ variant }), className)}
       {...props}
     />
   );

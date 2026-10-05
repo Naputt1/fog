@@ -461,8 +461,8 @@ export function TerminalView({
             aria-hidden="true"
             className={cn(
               "size-2 rounded-full",
-              connState === "connected" && "bg-emerald-500",
-              connState === "connecting" && "animate-pulse bg-amber-400",
+              connState === "connected" && "bg-success",
+              connState === "connecting" && "animate-pulse bg-warning",
               connState === "disconnected" && "bg-destructive"
             )}
           />
@@ -501,7 +501,7 @@ export function TerminalView({
           </Button>
         </div>
       </div>
-      <div className="flex min-h-0 flex-1 bg-[#0d1117] p-2">
+      <div className="flex min-h-0 flex-1 bg-terminal p-2">
         <div
           ref={containerRef}
           className={cn("h-full min-h-0 w-full", !fitted && "opacity-0")}

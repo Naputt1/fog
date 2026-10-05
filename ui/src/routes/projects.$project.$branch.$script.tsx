@@ -206,7 +206,7 @@ function ScriptServicesPage() {
   if (scriptInstances.length === 0) {
     return (
       <Card>
-        <CardContent className="py-10 text-center">
+        <CardContent variant="empty" className="text-center">
           <p className="font-mono text-sm">
             <span className="text-muted-foreground">script </span>
             <span className="text-foreground">{script}</span>
@@ -289,7 +289,7 @@ function ScriptServicesPage() {
       {instances.map((inst) => (
         <section key={inst.pid} className="space-y-2">
           {multi ? (
-            <div className="text-muted-foreground flex items-center gap-2 font-mono text-[11px]">
+            <div className="text-muted-foreground flex items-center gap-2 font-mono text-2xs">
               <span className="text-foreground font-semibold">
                 pid {inst.pid}
               </span>
@@ -302,7 +302,7 @@ function ScriptServicesPage() {
 
           {inst.services.length === 0 ? (
             <Card>
-              <CardContent className="text-muted-foreground py-6 text-center font-mono text-xs">
+              <CardContent variant="note" className="text-center">
                 No services in this instance.
               </CardContent>
             </Card>
@@ -364,10 +364,10 @@ function ScriptServicesPage() {
               </div>
 
               {/* Desktop: dense, clickable table */}
-              <Card className="hidden overflow-hidden py-0 lg:block">
+              <Card padding="none" className="hidden overflow-hidden lg:block">
                 <div className="overflow-auto">
                   <Table className="min-w-[820px]">
-                    <TableHeader className="[&_th]:bg-card sticky top-0 z-10 [&_th]:shadow-[inset_0_-1px_0_var(--color-border)]">
+                    <TableHeader variant="card" className="sticky top-0 z-10">
                       <TableRow>
                         <TableHead className="w-44">Service</TableHead>
                         <TableHead className="w-24">Status</TableHead>
@@ -387,14 +387,15 @@ function ScriptServicesPage() {
                                 selected?.svc.name === svc.name &&
                                 selected?.inst.pid === inst.pid
                               }
-                              className={cn(
-                                "cursor-pointer",
+                              variant={
                                 selected?.svc.name === svc.name &&
-                                  selected?.inst.pid === inst.pid &&
-                                  "bg-accent/60 hover:bg-accent/60"
-                              )}
+                                selected?.inst.pid === inst.pid
+                                  ? "accent"
+                                  : "default"
+                              }
+                              className="cursor-pointer"
                             >
-                              <TableCell className="font-mono font-medium">
+                              <TableCell variant="monoStrong">
                                 {svc.name}
                               </TableCell>
                               <TableCell>
@@ -409,7 +410,7 @@ function ScriptServicesPage() {
                                   "—"
                                 )}
                               </TableCell>
-                              <TableCell className="text-muted-foreground font-mono">
+                              <TableCell variant="monoMuted">
                                 {svc.service && svc.service.ports.length
                                   ? svc.service.ports.join(", ")
                                   : "—"}
@@ -424,8 +425,8 @@ function ScriptServicesPage() {
                               </TableCell>
                             </TableRow>
                             {endpoints.length > 0 ? (
-                              <TableRow className="hover:bg-transparent">
-                                <TableCell colSpan={5} className="pt-0">
+                              <TableRow variant="static">
+                                <TableCell colSpan={5} padding="flush">
                                   <EndpointList svc={svc} />
                                 </TableCell>
                               </TableRow>
@@ -452,7 +453,9 @@ function ScriptServicesPage() {
         <SheetContent
           side="bottom"
           showCloseButton={false}
-          className="h-[85dvh] max-h-[85dvh] gap-0 rounded-t-2xl p-0"
+          spacing="none"
+          shape="roundedTop"
+          className="h-[85dvh] max-h-[85dvh]"
         >
           {selected ? (
             <>
@@ -460,17 +463,21 @@ function ScriptServicesPage() {
                 aria-hidden
                 className="bg-muted-foreground/30 mx-auto mt-2 h-1 w-10 shrink-0 rounded-full"
               />
-              <SheetHeader className="border-border flex-row items-center gap-2 border-b px-4 py-3">
+              <SheetHeader
+                variant="bar"
+                spacing="roomy"
+                className="flex-row items-center"
+              >
                 <div className="flex min-w-0 flex-col">
                   <div className="flex min-w-0 items-center gap-2">
-                    <SheetTitle className="truncate font-mono text-sm">
+                    <SheetTitle variant="strip">
                       {selected.svc.name}
                     </SheetTitle>
                     <StatusBadge
                       status={selected.svc.running ? "running" : "stopped"}
                     />
                   </div>
-                  <span className="text-muted-foreground truncate font-mono text-[11px]">
+                  <span className="text-muted-foreground truncate font-mono text-2xs">
                     {projectName} @ {label} · {script} pid {selected.inst.pid}
                   </span>
                 </div>

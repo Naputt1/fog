@@ -29,7 +29,7 @@ export function BottomNav() {
                 activeOptions={{ exact: item.match === "" }}
                 aria-current={active ? "page" : undefined}
                 className={cn(
-                  "text-muted-foreground focus-visible:ring-ring/60 flex min-h-14 flex-col items-center justify-center gap-1 px-1 text-[11px] font-medium transition-colors outline-none focus-visible:ring-2 focus-visible:ring-inset",
+                  "text-muted-foreground focus-visible:ring-ring/60 flex min-h-14 flex-col items-center justify-center gap-1 px-1 text-2xs font-medium transition-colors outline-none focus-visible:ring-2 focus-visible:ring-inset",
                   active && "text-primary"
                 )}
               >

@@ -23,7 +23,6 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import type { InstanceServiceStatus, InstanceStatus } from "@/lib/api";
-import { cn } from "@/lib/utils";
 
 export const Route = createFileRoute("/status")({
   component: StatusPage,
@@ -35,10 +34,7 @@ const KNOWN_HEALTH = ["running", "healthy", "starting", "stopped", "unhealthy"];
 function HealthBadge({ health }: { health: string | null }) {
   if (!health) {
     return (
-      <Badge
-        variant="outline"
-        className="border-border text-muted-foreground gap-1.5 font-mono capitalize"
-      >
+      <Badge variant="outline" tone="unknown" size="status">
         <span className="bg-muted-foreground/70 size-1.5 rounded-full" />
         unknown
       </Badge>
@@ -102,7 +98,7 @@ function ServiceTable({
           <TableBody>
             {services.map((svc) => (
               <TableRow key={svc.name}>
-                <TableCell className="font-mono font-medium">
+                <TableCell variant="monoStrong">
                   {svc.name}
                   <Endpoints svc={svc} />
                 </TableCell>
@@ -157,7 +153,7 @@ function ServiceTable({
 
 /** Tailwind classes shared by the native selects in the launch card. */
 const selectClass =
-  "border-input dark:bg-input/30 h-9 w-full min-w-0 rounded-md border bg-transparent px-3 py-1 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50";
+  "border-input dark:bg-input/30 h-9 w-full min-w-0 rounded-md border bg-transparent px-3 py-1 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-3 disabled:cursor-not-allowed disabled:opacity-50";
 
 /** Tiny stacked field label above a select/input, wired to its control id. */
 function FieldLabel({
@@ -170,7 +166,7 @@ function FieldLabel({
   return (
     <label
       htmlFor={htmlFor}
-      className="text-muted-foreground mb-1 block font-mono text-[11px] tracking-wide uppercase"
+      className="text-muted-foreground mb-1 block font-mono text-2xs tracking-wide uppercase"
     >
       {children}
     </label>
@@ -229,9 +225,9 @@ function LaunchCard() {
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="font-mono text-sm">Start instance</CardTitle>
+        <CardTitle variant="mono">Start instance</CardTitle>
       </CardHeader>
-      <CardContent className="space-y-6">
+      <CardContent spacing="loose">
         {/* Known project */}
         <div className="space-y-3">
           <div className="text-foreground font-mono text-xs font-semibold">
@@ -274,7 +270,7 @@ function LaunchCard() {
                   ))}
                 </select>
                 {selectedProject && launchable.length === 0 ? (
-                  <p className="text-muted-foreground mt-1 font-mono text-[11px]">
+                  <p className="text-muted-foreground mt-1 font-mono text-2xs">
                     No worktree with scripts on this project.
                   </p>
                 ) : null}
@@ -351,7 +347,7 @@ function LaunchCard() {
                 id={`${fieldId}-new-path`}
                 value={newPath}
                 placeholder="/abs/path/to/project"
-                className="font-mono"
+                font="mono"
                 disabled={isPending}
                 onChange={(e) => setNewPath(e.target.value)}
               />
@@ -362,7 +358,7 @@ function LaunchCard() {
                 id={`${fieldId}-new-script`}
                 value={newScript}
                 placeholder="dev"
-                className="font-mono"
+                font="mono"
                 disabled={isPending}
                 onChange={(e) => setNewScript(e.target.value)}
               />
@@ -375,7 +371,7 @@ function LaunchCard() {
                 id={`${fieldId}-new-branch`}
                 value={newBranch}
                 placeholder="feature-x"
-                className="font-mono"
+                font="mono"
                 disabled={isPending}
                 onChange={(e) => setNewBranch(e.target.value)}
               />
@@ -398,7 +394,7 @@ function LaunchCard() {
             Starting instance…
           </p>
         ) : result?.ok && result.pid != null ? (
-          <p className="font-mono text-xs text-emerald-500">
+          <p className="font-mono text-xs text-success">
             Started pid {result.pid}
           </p>
         ) : launchError ? (
@@ -423,9 +419,16 @@ function InstanceCard({
   const { killing } = useInstanceKillState(inst.pid, inst.script);
 
   return (
-    <Card className={cn("gap-3 py-4", killing && "opacity-60")}>
-      <CardHeader className="flex-row flex-wrap items-center justify-between gap-2 px-5">
-        <CardTitle className="flex flex-wrap items-baseline gap-x-2 font-mono text-sm">
+    <Card spacing="compact" padding="compact" dimmed={killing}>
+      <CardHeader
+        padding="narrow"
+        className="flex-row flex-wrap items-center justify-between"
+      >
+        <CardTitle
+          variant="mono"
+          spacing="inline"
+          className="flex flex-wrap items-baseline"
+        >
           {inst.script}
           <span className="text-muted-foreground font-mono text-xs">
             pid {inst.pid}
@@ -441,7 +444,7 @@ function InstanceCard({
           {killing ? (
             <StatusBadge status="killing" />
           ) : (
-            <Badge variant="outline" className="font-mono">
+            <Badge variant="outline" size="mono">
               {running}/{inst.services.length} running
             </Badge>
           )}
@@ -453,7 +456,7 @@ function InstanceCard({
           />
         </div>
       </CardHeader>
-      <CardContent className="px-5">
+      <CardContent padding="narrow">
         {inst.services.length === 0 ? (
           <p className="text-muted-foreground font-mono text-xs">
             No services in this instance.
@@ -481,7 +484,7 @@ function StatusPage() {
         title="Status"
         description="IPC status snapshot of the running fog instances and their services."
         actions={
-          <span className="border-border bg-card text-muted-foreground flex items-center gap-1.5 rounded-full border px-2.5 py-1 font-mono text-[11px]">
+          <span className="border-border bg-card text-muted-foreground flex items-center gap-1.5 rounded-full border px-2.5 py-1 font-mono text-2xs">
             <span className="bg-primary size-1.5 animate-pulse rounded-full" />
             poll 5s
           </span>
@@ -496,7 +499,7 @@ function StatusPage() {
         <ErrorState message={error?.message} />
       ) : instances.length === 0 ? (
         <Card>
-          <CardContent className="text-muted-foreground py-8 text-center font-mono text-sm">
+          <CardContent variant="message" className="text-center">
             No instances reported.
           </CardContent>
         </Card>

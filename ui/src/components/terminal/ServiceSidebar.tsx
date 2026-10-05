@@ -39,7 +39,7 @@ function ServiceButton({
       className={cn(
         "focus-visible:ring-ring/60 flex min-h-9 w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left font-mono text-xs transition-colors outline-none focus-visible:ring-2",
         active
-          ? "bg-accent text-accent-foreground shadow-[inset_0_0_0_1px_var(--color-primary)/20]"
+          ? "bg-accent text-accent-foreground ring-1 ring-inset ring-primary/20"
           : "text-muted-foreground hover:bg-accent/60 hover:text-foreground"
       )}
     >
@@ -47,7 +47,7 @@ function ServiceButton({
         aria-hidden="true"
         className={cn(
           "size-1.5 shrink-0 rounded-full",
-          running ? "bg-emerald-500" : "bg-muted-foreground/50"
+          running ? "bg-success" : "bg-muted-foreground/50"
         )}
       />
       <span className="min-w-0 flex-1 truncate">{svc.service}</span>
@@ -93,13 +93,13 @@ function SidebarContent({
     <div className="space-y-4 p-2">
       {groups.map((project) => (
         <div key={project.project}>
-          <div className="text-primary/80 px-2 py-1 font-mono text-[11px] tracking-wider uppercase">
+          <div className="text-primary/80 px-2 py-1 font-mono text-2xs tracking-wider uppercase">
             {project.project}
           </div>
           <div className="space-y-2">
             {project.worktrees.map((wt) => (
               <Fragment key={`${project.project}:${wt.worktree}`}>
-                <div className="text-muted-foreground px-2 pt-1 font-mono text-[10px] tracking-wider uppercase">
+                <div className="text-muted-foreground px-2 pt-1 font-mono text-3xs tracking-wider uppercase">
                   {wt.worktree || "default"} · {wt.services.length}
                 </div>
                 <div className="space-y-0.5">
@@ -161,7 +161,7 @@ export function ServiceSidebar(props: ServiceSidebarProps) {
           <span className="text-muted-foreground font-mono text-xs tracking-wider uppercase">
             Services
           </span>
-          <span className="bg-muted text-muted-foreground ml-auto rounded-full px-1.5 py-0.5 font-mono text-[10px]">
+          <span className="bg-muted text-muted-foreground ml-auto rounded-full px-1.5 py-0.5 font-mono text-3xs">
             {isLoading ? "…" : count}
           </span>
         </div>
@@ -183,9 +183,9 @@ export function ServiceSidebar(props: ServiceSidebarProps) {
 
       {/* Mobile: sheet controlled by header button */}
       <Sheet open={ctx?.open ?? false} onOpenChange={(o) => ctx?.setOpen(o)}>
-        <SheetContent side="right" className="w-72 gap-0 p-0">
-          <SheetHeader className="border-border pt-safe border-b px-4 py-3">
-            <SheetTitle className="font-mono text-xs tracking-wider uppercase">
+        <SheetContent side="right" spacing="none" className="w-72">
+          <SheetHeader variant="barSafe">
+            <SheetTitle variant="label">
               Services
             </SheetTitle>
           </SheetHeader>
@@ -224,7 +224,7 @@ function ProjectDropdown({
     <div className="border-b px-2 py-2">
       <label
         htmlFor={selectId}
-        className="text-muted-foreground mb-1 block font-mono text-[10px] tracking-wider uppercase"
+        className="text-muted-foreground mb-1 block font-mono text-3xs tracking-wider uppercase"
       >
         Project
       </label>

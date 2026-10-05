@@ -376,7 +376,7 @@ export function LogView({
             aria-hidden="true"
             className={cn(
               "size-2 rounded-full",
-              connected ? "bg-emerald-500" : "animate-pulse bg-amber-400"
+              connected ? "bg-success" : "animate-pulse bg-warning"
             )}
           />
           <span className="text-muted-foreground" aria-live="polite">
@@ -432,7 +432,7 @@ export function LogView({
           </Button>
         </div>
       </div>
-      <div className="flex min-h-0 flex-1 bg-[#0d1117] p-2">
+      <div className="flex min-h-0 flex-1 bg-terminal p-2">
         <div
           ref={elRef}
           className={cn("h-full min-h-0 w-full", !fitted && "opacity-0")}

@@ -19,6 +19,10 @@ const buttonVariants = cva(
         ghost:
           "hover:bg-accent hover:text-accent-foreground dark:hover:bg-accent/50",
         link: "text-primary underline-offset-4 hover:underline",
+        /** Muted icon/label that brightens on hover. */
+        muted: "text-muted-foreground hover:text-foreground",
+        /** Latched/toggled state (e.g. a copy button that just fired). */
+        active: "bg-primary/20 text-primary",
       },
       size: {
         default: "h-9 px-4 py-2 has-[>svg]:px-3",
@@ -29,11 +33,33 @@ const buttonVariants = cva(
         "icon-xs": "size-6 rounded-md [&_svg:not([class*='size-'])]:size-3",
         "icon-sm": "size-8",
         "icon-lg": "size-10",
+        /** On-screen keyboard letter/digit key. */
+        keypad: "size-6 rounded-md px-1 [&_svg:not([class*='size-'])]:size-3",
+        /** On-screen keyboard action key. */
+        keypadAction: "size-8 gap-1",
+      },
+      /** Typography stack. */
+      font: {
+        default: "",
+        mono: "font-mono",
+      },
+      /** Explicit text size override (independent of control height). */
+      text: {
+        default: "",
+        xs: "text-xs",
+      },
+      /** Dim to signal an unavailable-but-rendered control. */
+      dimmed: {
+        true: "opacity-50",
+        false: "",
       },
     },
     defaultVariants: {
       variant: "default",
       size: "default",
+      font: "default",
+      text: "default",
+      dimmed: false,
     },
   }
 );
@@ -47,6 +73,9 @@ function Button({
   className,
   variant = "default",
   size = "default",
+  font = "default",
+  text = "default",
+  dimmed = false,
   loading = false,
   loadingLabel,
   disabled,
@@ -64,7 +93,9 @@ function Button({
       data-size={size}
       disabled={disabled || loading}
       aria-busy={loading || undefined}
-      className={cn(buttonVariants({ variant, size, className }))}
+      className={cn(
+        buttonVariants({ variant, size, font, text, dimmed, className })
+      )}
       {...props}
     >
       {loading ? <Loader2 className="animate-spin" aria-hidden /> : null}

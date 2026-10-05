@@ -167,7 +167,7 @@ export function TerminalKeypad({
       )}
     >
       {anyLatched && (
-        <div className="text-primary flex w-full items-center gap-1.5 pb-0.5 font-mono text-[11px]">
+        <div className="text-primary flex w-full items-center gap-1.5 pb-0.5 font-mono text-2xs">
           <SquareTerminal className="size-3" />
           {[mods.ctrl && "Ctrl", mods.alt && "Alt"]
             .filter(Boolean)
@@ -183,13 +183,14 @@ export function TerminalKeypad({
               key={ch}
               type="button"
               variant="ghost"
-              size="icon-xs"
+              size="keypad"
+              font="mono"
               disabled={!enabled}
               onPointerDown={(e) => {
                 e.preventDefault();
                 handleLetter(ch);
               }}
-              className="min-w-7 px-1 font-mono"
+              className="min-w-7"
             >
               {ch}
             </Button>
@@ -199,13 +200,14 @@ export function TerminalKeypad({
               key={ch}
               type="button"
               variant="ghost"
-              size="icon-xs"
+              size="keypad"
+              font="mono"
               disabled={!enabled}
               onPointerDown={(e) => {
                 e.preventDefault();
                 handleLetter(ch);
               }}
-              className="min-w-7 px-1 font-mono"
+              className="min-w-7"
             >
               {ch}
             </Button>
@@ -258,7 +260,7 @@ export function TerminalKeypad({
           enabled={enabled}
           onActivate={handleCopy}
           title="Copy terminal output"
-          className={copied ? "bg-primary/20 text-primary" : undefined}
+          highlight={copied}
         >
           {copied ? <Check className="size-4" /> : <Copy className="size-4" />}
         </KeypadButton>
@@ -298,6 +300,7 @@ export function TerminalKeypad({
 function KeypadButton({
   enabled,
   active = false,
+  highlight = false,
   onActivate,
   className,
   children,
@@ -305,6 +308,7 @@ function KeypadButton({
 }: {
   enabled: boolean;
   active?: boolean;
+  highlight?: boolean;
   onActivate: () => void;
   className?: string;
   children: React.ReactNode;
@@ -313,15 +317,16 @@ function KeypadButton({
   return (
     <Button
       type="button"
-      variant={active ? "default" : "ghost"}
-      size="icon-sm"
+      variant={active ? "default" : highlight ? "active" : "ghost"}
+      size="keypadAction"
+      font="mono"
       disabled={!enabled}
       title={title}
       onPointerDown={(e) => {
         e.preventDefault();
         onActivate();
       }}
-      className={cn("min-w-11 flex-1 gap-1 font-mono", className)}
+      className={cn("min-w-11 flex-1", className)}
     >
       {children}
     </Button>

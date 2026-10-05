@@ -46,8 +46,8 @@ function ProjectCard({ project }: { project: ProjectBucket }) {
       params={{ project: project.project }}
       className="focus-visible:ring-ring/60 block min-w-0 rounded-xl outline-none focus-visible:ring-2"
     >
-      <Card className="hover:border-primary/40 h-full gap-0 py-0 transition-colors">
-        <CardContent className="flex flex-col gap-3 p-4">
+      <Card interactive spacing="none" padding="none" className="h-full">
+        <CardContent variant="stack" className="flex flex-col">
           <div className="flex items-center justify-between gap-2">
             <span className="flex min-w-0 items-center gap-2">
               <ProjectIcon icon={project.icon} />
@@ -60,7 +60,7 @@ function ProjectCard({ project }: { project: ProjectBucket }) {
               aria-hidden
             />
           </div>
-          <div className="text-muted-foreground flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[11px]">
+          <div className="text-muted-foreground flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-2xs">
             <span>
               {branches} {branches === 1 ? "branch" : "branches"}
             </span>
@@ -68,7 +68,7 @@ function ProjectCard({ project }: { project: ProjectBucket }) {
             <span className="text-primary">{stats.running} running</span>
           </div>
           {stats.ports.length > 0 ? (
-            <div className="text-muted-foreground/80 truncate font-mono text-[11px]">
+            <div className="text-muted-foreground/80 truncate font-mono text-2xs">
               {stats.ports.join("  ")}
             </div>
           ) : null}
@@ -105,7 +105,7 @@ function ServicesPage() {
         <ErrorState message={error?.message} />
       ) : groups.length === 0 ? (
         <Card>
-          <CardContent className="py-10 text-center">
+          <CardContent variant="empty" className="text-center">
             <div className="text-muted-foreground font-mono text-sm">
               <span className="text-primary">$</span> docker ps
               <span className="text-muted-foreground/60">

@@ -25,10 +25,7 @@ const KNOWN_HEALTH = ["running", "healthy", "starting", "stopped", "unhealthy"];
 function HealthBadge({ health }: { health: string | null }) {
   if (!health) {
     return (
-      <Badge
-        variant="outline"
-        className="border-border text-muted-foreground gap-1.5 font-mono capitalize"
-      >
+      <Badge variant="outline" tone="unknown" size="status">
         <span className="bg-muted-foreground/70 size-1.5 rounded-full" />
         unknown
       </Badge>
@@ -48,7 +45,7 @@ function StatChip({
   tone?: "healthy" | "unhealthy";
 }) {
   return (
-    <span className="border-border bg-card flex items-center gap-1.5 rounded-full border px-2.5 py-1 font-mono text-[11px]">
+    <span className="border-border bg-card flex items-center gap-1.5 rounded-full border px-2.5 py-1 font-mono text-2xs">
       <span
         className={cn(
           "size-1.5 rounded-full",
@@ -85,11 +82,11 @@ function HealthCardList({ results }: { results: HealthItem[] }) {
           </div>
           <div className="mt-2 flex flex-wrap items-center gap-1.5">
             <HealthBadge health={h.health} />
-            <span className="border-border text-muted-foreground rounded-full border px-2 py-0.5 font-mono text-[11px]">
+            <span className="border-border text-muted-foreground rounded-full border px-2 py-0.5 font-mono text-2xs">
               pid {h.pid}
             </span>
           </div>
-          <div className="text-muted-foreground mt-2 flex min-w-0 flex-wrap gap-x-2 font-mono text-[11px]">
+          <div className="text-muted-foreground mt-2 flex min-w-0 flex-wrap gap-x-2 font-mono text-2xs">
             <span className="truncate">{h.script}</span>
             {h.project ? <span>· {h.project}</span> : null}
             {h.branch ? <span>@{h.branch}</span> : null}
@@ -126,7 +123,7 @@ function HealthPage() {
         title="Health"
         description="Per-service health check results across all fog instances."
         actions={
-          <span className="border-border bg-card text-muted-foreground flex items-center gap-1.5 rounded-full border px-2.5 py-1 font-mono text-[11px]">
+          <span className="border-border bg-card text-muted-foreground flex items-center gap-1.5 rounded-full border px-2.5 py-1 font-mono text-2xs">
             <span className="bg-primary size-1.5 animate-pulse rounded-full" />
             poll 5s
           </span>
@@ -139,7 +136,7 @@ function HealthPage() {
         <ErrorState message={error?.message} />
       ) : total === 0 ? (
         <Card>
-          <CardContent className="text-muted-foreground py-8 text-center font-mono text-sm">
+          <CardContent variant="message" className="text-center">
             No health results yet.
           </CardContent>
         </Card>
@@ -155,11 +152,11 @@ function HealthPage() {
           </div>
 
           <div className="hidden lg:block">
-            <Card className="gap-3 py-4">
-              <CardHeader className="gap-0.5 px-5">
-                <CardTitle className="font-mono text-sm">results</CardTitle>
+            <Card spacing="compact" padding="compact">
+              <CardHeader spacing="tight" padding="narrow">
+                <CardTitle variant="mono">results</CardTitle>
               </CardHeader>
-              <CardContent className="px-5">
+              <CardContent padding="narrow">
                 <div className="max-h-[70vh] min-w-full overflow-auto">
                   <Table className="min-w-[700px]">
                     <TableHeader>
@@ -176,19 +173,19 @@ function HealthPage() {
                     <TableBody>
                       {results.map((h) => (
                         <TableRow key={`${h.pid}/${h.script}/${h.service}`}>
-                          <TableCell className="text-muted-foreground font-mono">
+                          <TableCell variant="monoMuted">
                             {h.script}
                           </TableCell>
-                          <TableCell className="text-muted-foreground font-mono">
+                          <TableCell variant="monoMuted">
                             {h.project ?? ""}
                           </TableCell>
-                          <TableCell className="text-muted-foreground font-mono">
+                          <TableCell variant="monoMuted">
                             {h.branch ?? ""}
                           </TableCell>
-                          <TableCell className="font-mono font-medium">
+                          <TableCell variant="monoStrong">
                             {h.service}
                           </TableCell>
-                          <TableCell className="text-muted-foreground font-mono">
+                          <TableCell variant="monoMuted">
                             pid {h.pid}
                           </TableCell>
                           <TableCell>

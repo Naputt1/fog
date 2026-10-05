@@ -56,13 +56,13 @@ export function CopyUrlButton({ url }: { url: string }) {
 
   return (
     <Button
-      variant="ghost"
+      variant="muted"
       size="icon-xs"
       type="button"
       onClick={onCopy}
       aria-label={copied ? "Copied" : `Copy ${url}`}
       title={copied ? "Copied" : "Copy URL"}
-      className="text-muted-foreground hover:text-foreground shrink-0"
+      className="shrink-0"
     >
       {copied ? <Check className="text-primary" /> : <Copy />}
     </Button>
@@ -113,7 +113,7 @@ export function ServiceUrl({
       {dnsOnly ? (
         <span
           title="Traefik-only, no host port published — reachable via DNS (*.gems/*.red-fox) or add ports: [8080] in compose"
-          className="border-warning/30 bg-warning/10 text-warning shrink-0 rounded-full border px-1.5 py-0.5 font-mono text-[9px] tracking-wide uppercase"
+          className="border-warning/30 bg-warning/10 text-warning shrink-0 rounded-full border px-1.5 py-0.5 font-mono text-4xs tracking-wide uppercase"
         >
           DNS
         </span>
