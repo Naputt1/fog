@@ -3,7 +3,7 @@ use crate::fds::Fd;
 use crate::process::{self, Signal};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize};
 use ratatui::{
-    style::{Color, Modifier, Style},
+    style::Style,
     text::{Line, Span},
 };
 use std::{
@@ -18,6 +18,9 @@ use std::{
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
+
+mod style;
+use self::style::{cell_style, scrollback_len};
 
 const INITIAL_COLS: u16 = 256;
 
@@ -238,14 +241,6 @@ impl std::fmt::Debug for Terminal {
             .field("child", &self.child)
             .finish()
     }
-}
-
-fn scrollback_len(screen: &mut vt100::Screen) -> usize {
-    let prev = screen.scrollback();
-    screen.set_scrollback(usize::MAX);
-    let n = screen.scrollback();
-    screen.set_scrollback(prev);
-    n
 }
 
 /// Probes a single health-check target. Both `tcp` and `http` kinds use a TCP
@@ -484,36 +479,6 @@ fn spawn_health_loop(
             }
         }
     });
-}
-
-fn cell_style(cell: &vt100::Cell) -> Style {
-    let mut style = Style::default();
-    style = match cell.fgcolor() {
-        vt100::Color::Default => style,
-        vt100::Color::Idx(i) => style.fg(Color::Indexed(i)),
-        vt100::Color::Rgb(r, g, b) => style.fg(Color::Rgb(r, g, b)),
-    };
-    style = match cell.bgcolor() {
-        vt100::Color::Default => style,
-        vt100::Color::Idx(i) => style.bg(Color::Indexed(i)),
-        vt100::Color::Rgb(r, g, b) => style.bg(Color::Rgb(r, g, b)),
-    };
-    if cell.bold() {
-        style = style.add_modifier(Modifier::BOLD);
-    }
-    if cell.italic() {
-        style = style.add_modifier(Modifier::ITALIC);
-    }
-    if cell.underline() {
-        style = style.add_modifier(Modifier::UNDERLINED);
-    }
-    if cell.inverse() {
-        style = style.add_modifier(Modifier::REVERSED);
-    }
-    if cell.dim() {
-        style = style.add_modifier(Modifier::DIM);
-    }
-    style
 }
 
 /// Opens a tee file for a service's raw PTY output inside `log_dir`, if set.
