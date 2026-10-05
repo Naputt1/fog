@@ -20,7 +20,7 @@ fog dev -d
 <img src="assets/tui.png" alt="fog TUI" width="800">
 
 <details>
-<summary>▶ Watch the demo</summary>
+<summary>Watch the demo</summary>
 
 <img src="assets/demo.gif" alt="fog demo" width="800">
 
@@ -62,7 +62,7 @@ This is the same `fog.json` your `fog dev` will run; see the [configuration refe
 
 ## Why fog
 
-AI agents changed how we develop, but dev tooling still assumes one human per environment. fog is worktree-aware and **concurrent by default**: run `main` and `feature-x` side-by-side, or the *same* branch twice — human in the TUI, agent headless — and fog shares healthy services (the DB) while isolating the rest with per-instance ports and `${branch}` templating.
+AI agents changed how we develop, but dev tooling still assumes one human per environment. fog is worktree-aware and **concurrent by default**: run `main` and `feature-x` side-by-side, or the _same_ branch twice — human in the TUI, agent headless — and fog shares healthy services (the DB) while isolating the rest with per-instance ports and `${branch}` templating.
 
 ## Features
 
@@ -145,7 +145,7 @@ a `terminal` config block:
 {
   "scripts": {
     "dev": {
-      "service": [ { "name": "web", "path": "/path", "cmd": "npm run dev" } ],
+      "service": [{ "name": "web", "path": "/path", "cmd": "npm run dev" }],
       "proxy": { "port": 8080, "routes": [] },
       "terminal": {
         "auth_token": "s3cret",
@@ -180,21 +180,21 @@ fog logs [pid] -s <name> --tail 50   # last 50 lines (--head 50, --head -50, --t
 fog index serve|kill|restart  # control the host-global web UI / API server
 ```
 
-| Option | Description |
-|--------|-------------|
-| `-c`, `--config <PATH>` | Path to config file or directory containing `fog.json` (default `fog.json`) |
-| `--branch <BRANCH>` | Run in the git worktree for this branch |
-| `--port <NAME=PORT>` | Override a top-level `ports` entry for this run (repeatable; `0` re-randomizes, e.g. `fog dev --port api=4000`) |
-| `-d`, `--detach` | Run in background without TUI, captures logs to `$TMPDIR/fog-<pid>.logs/` |
-| `--no-share` | Ignore `share:`/`reuse:` — start fresh even when a healthy sibling could be borrowed |
-| `--all` | With `fog kill`/`fog restart`: apply to every matching instance (conflicts with `PID`) |
-| `--force` | With `fog kill`/`fog restart`: escalate to SIGTERM then SIGKILL for a wedged instance |
-| `-s`, `--service <NAME>` | With `fog logs`: show one service instead of listing (`daemon` and `proxy` included) |
-| `--head <N\|-N>` | With `fog logs -s`: keep the first `N` lines, or all but the last `N` with `-N` |
-| `--tail <N\|-N\|+N>` | With `fog logs -s`: keep the last `N` lines, or from line `N` to the end with `+N` |
-| `--save-logs` | Save service output to `temp/<name>.txt` on exit |
-| `-v`, `--verbose` | Print informational setup output (DNS, router, index, ports, native routes); warnings always print |
-| `--completions <SHELL>` | Print bash/zsh/fish completions |
+| Option                   | Description                                                                                                     |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------- |
+| `-c`, `--config <PATH>`  | Path to config file or directory containing `fog.json` (default `fog.json`)                                     |
+| `--branch <BRANCH>`      | Run in the git worktree for this branch                                                                         |
+| `--port <NAME=PORT>`     | Override a top-level `ports` entry for this run (repeatable; `0` re-randomizes, e.g. `fog dev --port api=4000`) |
+| `-d`, `--detach`         | Run in background without TUI, captures logs to `$TMPDIR/fog-<pid>.logs/`                                       |
+| `--no-share`             | Ignore `share:`/`reuse:` — start fresh even when a healthy sibling could be borrowed                            |
+| `--all`                  | With `fog kill`/`fog restart`: apply to every matching instance (conflicts with `PID`)                          |
+| `--force`                | With `fog kill`/`fog restart`: escalate to SIGTERM then SIGKILL for a wedged instance                           |
+| `-s`, `--service <NAME>` | With `fog logs`: show one service instead of listing (`daemon` and `proxy` included)                            |
+| `--head <N\|-N>`         | With `fog logs -s`: keep the first `N` lines, or all but the last `N` with `-N`                                 |
+| `--tail <N\|-N\|+N>`     | With `fog logs -s`: keep the last `N` lines, or from line `N` to the end with `+N`                              |
+| `--save-logs`            | Save service output to `temp/<name>.txt` on exit                                                                |
+| `-v`, `--verbose`        | Print informational setup output (DNS, router, index, ports, native routes); warnings always print              |
+| `--completions <SHELL>`  | Print bash/zsh/fish completions                                                                                 |
 
 `fog ls` prints one row per instance — `pid script project branch proxy` — with a `service`/`status` sub-table beneath each (`healthy`, `starting`, `unhealthy`, `unknown`, or `stopped`).
 
@@ -212,19 +212,19 @@ Docs: [https://naputt1.github.io/fog/](https://naputt1.github.io/fog/) for confi
 
 ## Keybindings
 
-| Key | Action |
-|-----|--------|
-| `q` / `Ctrl+q` | Quit |
-| `j` / `→` / `Ctrl+n` | Next tab |
-| `k` / `←` / `Ctrl+p` | Previous tab |
-| `i` | Enter terminal input (`Esc` to exit) |
-| `R` | Restart current service or proxy |
-| `t` / `Ctrl+t` | Open a shell tab |
-| `d` | Close the current shell tab |
-| `s` | Worktree switch popup (`f` fuzzy search, `Enter` to switch, `d` to terminate that branch) |
-| `↑` / `↓` · `PageUp` / `PageDown` · `g` / `G` | Scroll |
-| `/` | Filter proxy logs |
-| `?` | Toggle help overlay |
+| Key                                           | Action                                                                                    |
+| --------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `q` / `Ctrl+q`                                | Quit                                                                                      |
+| `j` / `→` / `Ctrl+n`                          | Next tab                                                                                  |
+| `k` / `←` / `Ctrl+p`                          | Previous tab                                                                              |
+| `i`                                           | Enter terminal input (`Esc` to exit)                                                      |
+| `R`                                           | Restart current service or proxy                                                          |
+| `t` / `Ctrl+t`                                | Open a shell tab                                                                          |
+| `d`                                           | Close the current shell tab                                                               |
+| `s`                                           | Worktree switch popup (`f` fuzzy search, `Enter` to switch, `d` to terminate that branch) |
+| `↑` / `↓` · `PageUp` / `PageDown` · `g` / `G` | Scroll                                                                                    |
+| `/`                                           | Filter proxy logs                                                                         |
+| `?`                                           | Toggle help overlay                                                                       |
 
 Mouse: click a sidebar tab to switch, click a bottom-right alert to copy its message, click its ✕ to dismiss, drag-select to copy (OSC 52), scroll wheel to scroll.
 
