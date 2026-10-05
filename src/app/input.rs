@@ -1,14 +1,16 @@
 //! Keyboard, mouse, and resize event handling.
 
-use super::{App, Mode};
+use super::{ALERT_COPIED_TTL, App, Mode};
 use crate::keybinding;
 use crate::selection;
 use crate::worktree;
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
+use ratatui::layout::Position;
 use std::io;
 use std::path::Path;
+use std::time::Instant;
 
 impl App {
     pub(crate) fn handle_event(&mut self, ev: Event) -> io::Result<()> {
@@ -16,6 +18,11 @@ impl App {
             Event::Key(key) if key.kind == KeyEventKind::Press => self.handle_key(key),
             Event::Mouse(mouse) => match mouse.kind {
                 MouseEventKind::Down(MouseButton::Left) => {
+                    // An alert under the pointer consumes the click before any
+                    // tab/scrollbar/selection handling.
+                    if self.handle_alert_click(mouse.column, mouse.row) {
+                        return Ok(());
+                    }
                     let idx_before = self.tabs.index;
                     self.tabs.click(mouse.column, mouse.row);
                     if self.tabs.index != idx_before {
@@ -99,17 +106,45 @@ impl App {
         Ok(())
     }
 
-    pub(crate) fn handle_key(&mut self, key: KeyEvent) {
-        if self.show_startup_popup {
-            self.show_startup_popup = false;
-            // Any key dismisses the overlay; quit keys also take effect.
-            if key.code == KeyCode::Char('q')
-                || (key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('q'))
-            {
-                self.exit = true;
-            }
-            return;
+    /// Handles a click on the alert stack: the `✕` control dismisses the alert,
+    /// anywhere else on its body copies the message and flashes it as copied.
+    /// Returns `true` when the click hit an alert and was consumed.
+    pub(crate) fn handle_alert_click(&mut self, x: u16, y: u16) -> bool {
+        let point = Position { x, y };
+        // Close controls take precedence and dismiss without copying.
+        if let Some(index) = self
+            .alert_areas
+            .iter()
+            .rev()
+            .find(|hit| hit.close.contains(point))
+            .map(|hit| hit.index)
+            && index < self.alerts.len()
+        {
+            self.alerts.remove(index);
+            self.force_redraw = true;
+            return true;
         }
+        let Some(index) = self
+            .alert_areas
+            .iter()
+            .rev()
+            .find(|hit| hit.body.contains(point))
+            .map(|hit| hit.index)
+        else {
+            return false;
+        };
+        let Some(alert) = self.alerts.get_mut(index) else {
+            return false;
+        };
+        selection::copy_text(&alert.message);
+        alert.copied = true;
+        alert.created = Instant::now();
+        alert.ttl = ALERT_COPIED_TTL;
+        self.force_redraw = true;
+        true
+    }
+
+    pub(crate) fn handle_key(&mut self, key: KeyEvent) {
         if self.show_help {
             match key.code {
                 KeyCode::Char('?') => self.show_help = false,
@@ -317,7 +352,7 @@ impl App {
                         if let Some(p) = &mut self.switch_popup {
                             p.status = Some(e);
                         } else {
-                            self.errors.push(e);
+                            self.note_error(e);
                         }
                     } else {
                         self.switch_popup = None;

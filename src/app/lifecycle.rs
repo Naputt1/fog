@@ -68,7 +68,7 @@ impl App {
             self.handle_control_request();
             for i in 0..self.items.len() {
                 if let Err(e) = self.items[i].maybe_auto_start() {
-                    self.errors.push(format!("auto-start error: {}", e));
+                    self.note_error(format!("auto-start error: {}", e));
                 }
             }
             if refresh_now || last_refresh.elapsed() >= REFRESH_INTERVAL {
@@ -77,6 +77,9 @@ impl App {
                 }
                 last_refresh = Instant::now();
                 refresh_now = false;
+            }
+            if self.prune_alerts() {
+                self.force_redraw = true;
             }
             // Redraw only when something actually changed; idle ticks do no work.
             if self.needs_redraw() {
@@ -134,7 +137,7 @@ impl App {
             self.handle_control_request();
             for i in 0..self.items.len() {
                 if let Err(e) = self.items[i].maybe_auto_start() {
-                    self.errors.push(format!("auto-start error: {}", e));
+                    self.note_error(format!("auto-start error: {}", e));
                 }
             }
             // Wake immediately when a dependency becomes ready; the timeout
@@ -255,7 +258,7 @@ impl App {
                 *self.ipc_state.proxy_logs.lock().expect("mutex poisoned") =
                     self.proxy.as_ref().map(|p| p.logs_handle());
             }
-            Err(e) => self.errors.push(e),
+            Err(e) => self.note_error(e),
         }
     }
 
@@ -591,18 +594,23 @@ impl App {
                 .position(|p| p.tab_index == tab_index);
             let Some(idx) = ps_idx else { continue };
             let ps = self.pending_services.remove(idx);
+            let name = ps.name.clone();
+            let mut start_error: Option<String> = None;
 
             if let Some(item) = self.items.get_mut(tab_index) {
                 item.log_dir = ps.log_dir.clone();
                 item.injected_env = ps.injected_env.clone();
-                if item.start(&ps.path, &ps.cmd).is_ok() {
-                    item.health_checks = ps.health_checks;
-                    item.shutdown_cmd = ps.shutdown_cmd;
-                    item.dep_names = ps.dep_names.clone();
-                    item.save_logs = ps.save_logs;
-                    if !item.health_checks.is_empty() {
-                        item.start_health_checks();
+                match item.start(&ps.path, &ps.cmd) {
+                    Ok(()) => {
+                        item.health_checks = ps.health_checks;
+                        item.shutdown_cmd = ps.shutdown_cmd;
+                        item.dep_names = ps.dep_names.clone();
+                        item.save_logs = ps.save_logs;
+                        if !item.health_checks.is_empty() {
+                            item.start_health_checks();
+                        }
                     }
+                    Err(e) => start_error = Some(format!("failed to start '{name}': {e}")),
                 }
                 // Update tab entry (tabs include the proxy, items do not)
                 if let Some(entry) = self
@@ -612,6 +620,9 @@ impl App {
                 {
                     entry.pending = false;
                 }
+            }
+            if let Some(err) = start_error {
+                self.note_error(err);
             }
         }
     }

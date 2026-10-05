@@ -77,8 +77,7 @@ impl App {
                 });
             }
             _ => {
-                self.errors
-                    .push("no git worktrees found in this repository".to_string());
+                self.note_error("no git worktrees found in this repository".to_string());
             }
         }
     }
@@ -307,6 +306,12 @@ impl App {
             }
         };
 
+        // Surface any non-fatal config warnings (e.g. share without health
+        // check) raised while building the new runtime.
+        for warning in &built.warnings {
+            self.note_error(warning.clone());
+        }
+
         // The project identity is the repo's git-common-dir, shared by every
         // worktree, so `ipc_state.project` stays unchanged across switches.
         self.title_branch = title_branch;
@@ -357,7 +362,7 @@ impl App {
                 &config,
                 self.verbose,
             ) {
-                self.note_setup_message(msg);
+                self.note_error(msg);
             }
         }
         // Declared endpoint routes for the new branch.
@@ -368,7 +373,7 @@ impl App {
             &config,
             self.verbose,
         ) {
-            self.errors.push(msg);
+            self.note_error(msg);
         }
 
         let (tabs, proxy_tab_index) = Self::build_tabs(

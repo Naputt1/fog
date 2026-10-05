@@ -226,7 +226,7 @@ Docs: [https://naputt1.github.io/fog/](https://naputt1.github.io/fog/) for confi
 | `/` | Filter proxy logs |
 | `?` | Toggle help overlay |
 
-Mouse: click a sidebar tab to switch, drag-select to copy (OSC 52), scroll wheel to scroll.
+Mouse: click a sidebar tab to switch, click a bottom-right alert to copy its message, click its ✕ to dismiss, drag-select to copy (OSC 52), scroll wheel to scroll.
 
 Full reference in [keybindings](https://naputt1.github.io/fog/keybindings).
 

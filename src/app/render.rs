@@ -1,6 +1,6 @@
 //! Content-panel rendering: layout, scroll state, and the full `draw` pass.
 
-use super::{App, Mode};
+use super::{ALERT_REPAINT, ALERT_WIDTH, AlertHit, App, Mode};
 use crate::render;
 use crate::worktree;
 use ratatui::{
@@ -281,43 +281,7 @@ impl App {
             frame.render_widget(help, overlay_area);
         }
 
-        if self.show_startup_popup && !self.startup_messages.is_empty() {
-            let width = 78u16.min(area.width.saturating_sub(4)).max(8);
-            let inner = width.saturating_sub(2) as usize;
-            // Allow for wrapped lines so the box fits its text.
-            let body: u16 = self
-                .startup_messages
-                .iter()
-                .map(|m| (m.chars().count() / inner.max(1)) as u16 + 1)
-                .sum();
-            let height = (body + 3).min(area.height);
-            let overlay_area = Rect {
-                x: (area.width.saturating_sub(width)) / 2,
-                y: (area.height.saturating_sub(height)) / 2,
-                width,
-                height,
-            };
-            let mut lines: Vec<Line> = self
-                .startup_messages
-                .iter()
-                .map(|m| {
-                    Line::from(Span::styled(
-                        m.clone(),
-                        Style::default().fg(Color::Rgb(255, 176, 0)),
-                    ))
-                })
-                .collect();
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                " press any key to dismiss ",
-                Style::default().dim(),
-            )));
-            let popup = Paragraph::new(Text::from(lines))
-                .block(Block::bordered().title(" Startup "))
-                .wrap(Wrap { trim: false });
-            frame.render_widget(Clear, overlay_area);
-            frame.render_widget(popup, overlay_area);
-        }
+        self.draw_alerts(frame, area);
 
         if let Some(popup) = &self.switch_popup {
             let config_dir = self.config_path.parent().unwrap_or_else(|| Path::new("."));
@@ -453,6 +417,8 @@ impl App {
             // screen.
             || (self.switch_popup.is_some()
                 && self.last_draw.elapsed() >= Duration::from_millis(500))
+            // Alerts auto-dismiss, so keep repainting while any are visible.
+            || (!self.alerts.is_empty() && self.last_draw.elapsed() >= ALERT_REPAINT)
     }
 
     /// Records that a frame was drawn, clearing the dirty flag and capturing the
@@ -470,6 +436,74 @@ impl App {
             .as_ref()
             .map(|p| p.log_fingerprint())
             .unwrap_or((0, 0));
+    }
+
+    /// Renders the bottom-right alert stack and records each box's regions for
+    /// click hit-testing. Newer alerts sit nearest the corner.
+    fn draw_alerts(&mut self, frame: &mut Frame, area: Rect) {
+        self.alert_areas.clear();
+        if self.alerts.is_empty() || area.width < 12 || area.height < 4 {
+            return;
+        }
+        let width = ALERT_WIDTH.min(area.width.saturating_sub(2)).max(12);
+        let inner = width.saturating_sub(2) as usize;
+        let x = area.right().saturating_sub(width).saturating_sub(1);
+        let mut cursor = area.bottom().saturating_sub(1);
+        // Walk newest -> oldest, stacking upward from the corner.
+        for (i, alert) in self.alerts.iter().enumerate().rev() {
+            // The box title already carries the warning marker, so strip the
+            // message's own leading `⚠ ` from the display only (copy and the
+            // exit-time stderr reprint keep the full text).
+            let text = alert
+                .message
+                .strip_prefix("⚠ ")
+                .unwrap_or(alert.message.as_str());
+            let wrapped = (text.chars().count() / inner.max(1)) as u16 + 1;
+            let height = wrapped + 2;
+            if height > cursor.saturating_sub(area.y) {
+                break;
+            }
+            cursor = cursor.saturating_sub(height);
+            let rect = Rect {
+                x,
+                y: cursor,
+                width,
+                height,
+            };
+            let color = if alert.copied {
+                Color::Green
+            } else {
+                Color::Rgb(255, 176, 0)
+            };
+            let marker = if alert.copied { " ✓ " } else { " ⚠ " };
+            let block = Block::bordered()
+                .title(Span::styled(marker, Style::default().fg(color).bold()))
+                .border_style(Style::default().fg(color));
+            let para = Paragraph::new(Text::from(Span::styled(
+                text.to_string(),
+                Style::default().fg(color),
+            )))
+            .block(block)
+            .wrap(Wrap { trim: false });
+            frame.render_widget(Clear, rect);
+            frame.render_widget(para, rect);
+            // `✕` close control on the top border, right-aligned.
+            let close = Rect {
+                x: rect.right().saturating_sub(2),
+                y: rect.y,
+                width: 1,
+                height: 1,
+            };
+            frame.render_widget(
+                Paragraph::new(Span::styled("✕", Style::default().fg(color).bold())),
+                close,
+            );
+            self.alert_areas.push(AlertHit {
+                body: rect,
+                close,
+                index: i,
+            });
+        }
     }
 }
 

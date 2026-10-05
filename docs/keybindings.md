@@ -75,16 +75,27 @@ Switching reloads the script's config from the target worktree in place: non-reu
 | Action | Effect |
 |--------|--------|
 | Click on sidebar tab | Switch to that tab |
+| Click on an alert (bottom-right) | Copy that alert's message to the clipboard |
+| Click ✕ on an alert (bottom-right) | Dismiss that alert |
 | Drag-select in content area | Select text (copied to clipboard on release) |
 | Scroll wheel up | Scroll output up |
 | Scroll wheel down | Scroll output down |
 
-Text selection copies to the system clipboard via the [OSC 52](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html) escape sequence, supported by:
+Text selection and alert clicks copy to the system clipboard via the [OSC 52](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html) escape sequence, supported by:
 - iTerm2
 - kitty
 - tmux
 - Terminal.app (with restrictions)
 - Most xterm-compatible terminals
+
+## Alerts
+
+Runtime warnings and errors — startup setup warnings, service auto-start failures, restart failures, worktree-switch failures, config reload errors, and similar — appear as small boxes stacked in the bottom-right corner over the sidebar.
+
+- They dismiss themselves after a few seconds.
+- Click a box to copy its full message to the clipboard (the box flashes green to confirm).
+- Click the `✕` on a box to dismiss it immediately.
+- At most four are shown at once; older ones are dropped.
 
 ## Status bar indicators
 

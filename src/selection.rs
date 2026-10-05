@@ -183,10 +183,20 @@ pub(crate) fn copy_selection(
         }
     }
     if !selected.is_empty() {
-        let encoded = base64::engine::general_purpose::STANDARD.encode(&selected);
-        let _ = write!(std::io::stdout(), "\x1b]52;c;{}\x07", encoded);
-        let _ = std::io::stdout().flush();
+        copy_text(&selected);
     }
+}
+
+/// Copies `text` to the system clipboard via the OSC 52 escape sequence.
+///
+/// A no-op for empty input. Used by both drag-select and the TUI alert boxes.
+pub(crate) fn copy_text(text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    let encoded = base64::engine::general_purpose::STANDARD.encode(text);
+    let _ = write!(std::io::stdout(), "\x1b]52;c;{}\x07", encoded);
+    let _ = std::io::stdout().flush();
 }
 
 /// Applies visual selection highlighting (reversed style) to a slice of

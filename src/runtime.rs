@@ -11,6 +11,9 @@ pub struct Runtime {
     pub items: Vec<Terminal>,
     pub pending_services: Vec<PendingService>,
     pub proxy: Option<ProxyInstance>,
+    /// Non-fatal config warnings raised while building (e.g. a `share`/`reuse`
+    /// service without a health check); callers surface these to the user.
+    pub warnings: Vec<String>,
 }
 
 /// Options for building a runtime with explicit ports and branch.
@@ -701,6 +704,7 @@ pub fn build_with_opts(opts: BuildOpts) -> Result<Runtime, String> {
     let n = entries.len();
     let mut items: Vec<Option<Terminal>> = (0..n).map(|_| None).collect();
     let mut pending_services: Vec<PendingService> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
 
     for &idx in &dep_order {
         let entry = &entries[idx];
@@ -799,12 +803,15 @@ pub fn build_with_opts(opts: BuildOpts) -> Result<Runtime, String> {
                 let injected_env = entry.env.clone().unwrap_or_default();
                 let t = spawn_now(health_checks, injected_env);
                 // build() runs while the TUI is already in raw/alternate-screen
-                // mode, so a config warning must render in the tab instead of
-                // stderr (which would corrupt the layout).
-                t.notice(&format!(
+                // mode, so the config warning also renders in the tab instead of
+                // stderr (which would corrupt the layout). It is recorded in
+                // `warnings` for the caller to surface as an alert too.
+                let warning = format!(
                     "⚠ service '{name}' has {share_flag}: true but no health_check; \
-                     fog cannot verify it is already running, starting it\n"
-                ));
+                     fog cannot verify it is already running, starting it"
+                );
+                t.notice(&format!("{warning}\n"));
+                warnings.push(warning);
                 t
             } else if borrowable && health_checks_pass(&health_checks, branch.as_deref()) {
                 // Check if any existing instance on this branch has --no-share
@@ -951,6 +958,7 @@ pub fn build_with_opts(opts: BuildOpts) -> Result<Runtime, String> {
         items,
         pending_services,
         proxy,
+        warnings,
     })
 }
 
