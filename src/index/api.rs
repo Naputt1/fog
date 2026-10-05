@@ -172,15 +172,6 @@ fn api_endpoints_for(
     out
 }
 
-/// `GET /api/services`: every running compose service as JSON, so the SPA logs
-/// picker can stream logs from any container. Native (non-docker) services
-/// started via `ports` + `native_routes` are synthesized from fog instances so
-/// they appear alongside docker services in the Services UI.
-///
-/// Query `?withInternal=1` (or `?internal=1`) opts into non-Traefik compose
-/// services (e.g. `postgres`) so the logs picker can still see them. Default
-/// is Traefik-only (`fog.expose` or `traefik.http.routers.*`) to avoid
-/// unrelated `docker ps` entries like a stray `mongodb`.
 /// Derives the `(project, worktree)` display group for an instance.
 ///
 /// `project` keeps its original case; callers that compare against docker rows
@@ -406,6 +397,15 @@ fn attach_declared_endpoints(
     }
 }
 
+/// `GET /api/services`: every running compose service as JSON, so the SPA logs
+/// picker can stream logs from any container. Native (non-docker) services
+/// started via `ports` + `native_routes` are synthesized from fog instances so
+/// they appear alongside docker services in the Services UI.
+///
+/// Query `?withInternal=1` (or `?internal=1`) opts into non-Traefik compose
+/// services (e.g. `postgres`) so the logs picker can still see them. Default
+/// is Traefik-only (`fog.expose` or `traefik.http.routers.*`) to avoid
+/// unrelated `docker ps` entries like a stray `mongodb`.
 pub(super) fn api_services_with_query(_network: &str, query: Option<&str>) -> Response<RespBody> {
     let with_internal = query
         .map(parse_query)
