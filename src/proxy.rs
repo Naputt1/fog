@@ -196,7 +196,8 @@ impl ProxyInstance {
             || self.routes != target.routes
             || self.max_log_entries != target.max_log_entries
             || self.tls_cert != target.tls_cert
-            || self.tls_key != target.tls_key;
+            || self.tls_key != target.tls_key
+            || self.terminal.as_ref() != target.terminal.as_ref();
         if !changed {
             return false;
         }
@@ -206,6 +207,10 @@ impl ProxyInstance {
         self.max_log_entries = target.max_log_entries;
         self.tls_cert = target.tls_cert.take();
         self.tls_key = target.tls_key.take();
+        // The listener snapshots `terminal` at `start()`, so a change here
+        // requires the restart below to take effect. `terminal_sessions` is
+        // live per-IP accounting and must stay shared, not replaced.
+        self.terminal = std::mem::take(&mut target.terminal);
         self.restart();
         true
     }

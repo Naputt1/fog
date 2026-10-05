@@ -270,7 +270,7 @@ impl Default for IndexConfig {
 /// number of PTYs (each a live shell): cap concurrent sessions per client IP,
 /// cap the size of a single inbound frame, bound the idle timeout, and
 /// optionally require a shared `auth_token` passed as a query parameter.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, PartialEq)]
 #[serde(default)]
 pub struct TerminalConfig {
     /// Maximum number of concurrent terminal sessions per client IP (default
