@@ -1,10 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import {
-  isSafeImageUrl,
-  toDisplayEndpointUrl,
-  toDisplayUrl,
-} from "./utils";
+import { isSafeImageUrl, toDisplayEndpointUrl, toDisplayUrl } from "./utils";
 
 /** Stub the browser host the endpoint URL logic reads from. */
 function setHost(hostname: string): void {
