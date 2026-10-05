@@ -110,6 +110,29 @@ pub fn parse_port_overrides(raw: &[String]) -> Result<HashMap<String, u16>, Stri
     Ok(out)
 }
 
+/// Lowercases `input`, replaces every non-`[a-z0-9-]` character with `-`,
+/// collapses consecutive `-`, and trims leading/trailing `-`. The shared core
+/// of [`branch_slug`] (which then validates length/emptiness) and the lenient
+/// [`sanitize_hostname`] fallback (which truncates instead of erroring).
+fn slugify(input: &str) -> String {
+    let lower = input.to_ascii_lowercase();
+    let mut out = String::with_capacity(lower.len());
+    let mut prev_dash = false;
+    for c in lower.chars() {
+        let c = if c.is_ascii_alphanumeric() { c } else { '-' };
+        if c == '-' {
+            if prev_dash {
+                continue;
+            }
+            prev_dash = true;
+        } else {
+            prev_dash = false;
+        }
+        out.push(c);
+    }
+    out.trim_matches('-').to_string()
+}
+
 /// Sanitizes a branch name for DNS/hostname use.
 ///
 /// - lowercases
@@ -117,30 +140,7 @@ pub fn parse_port_overrides(raw: &[String]) -> Result<HashMap<String, u16>, Stri
 /// - collapses consecutive `-` and trims leading/trailing `-`
 /// - errors if empty or >63 chars (DNS label limit)
 pub fn branch_slug(branch: &str) -> Result<String, String> {
-    let lower = branch.to_ascii_lowercase();
-    let mut sanitized = String::with_capacity(lower.len());
-    for c in lower.chars() {
-        if c.is_ascii_alphanumeric() || c == '-' {
-            sanitized.push(c);
-        } else {
-            sanitized.push('-');
-        }
-    }
-    // collapse consecutive '-' and trim
-    let mut collapsed = String::with_capacity(sanitized.len());
-    let mut prev_dash = false;
-    for c in sanitized.chars() {
-        if c == '-' {
-            if !prev_dash {
-                collapsed.push(c);
-            }
-            prev_dash = true;
-        } else {
-            collapsed.push(c);
-            prev_dash = false;
-        }
-    }
-    let trimmed = collapsed.trim_matches('-').to_string();
+    let trimmed = slugify(branch);
     if trimmed.is_empty() {
         return Err(format!(
             "branch '{}' sanitizes to empty (no alphanumeric characters)",
@@ -192,29 +192,7 @@ pub fn sanitize_hostname(host: &str) -> String {
             Err(_) => {
                 // Lenient fallback: same transform but truncate to 63 instead
                 // of erroring, so the API stays usable for stale containers.
-                let lower = label.to_ascii_lowercase();
-                let mut sanitized = String::with_capacity(lower.len());
-                for c in lower.chars() {
-                    if c.is_ascii_alphanumeric() || c == '-' {
-                        sanitized.push(c);
-                    } else {
-                        sanitized.push('-');
-                    }
-                }
-                let mut collapsed = String::with_capacity(sanitized.len());
-                let mut prev_dash = false;
-                for c in sanitized.chars() {
-                    if c == '-' {
-                        if !prev_dash {
-                            collapsed.push(c);
-                        }
-                        prev_dash = true;
-                    } else {
-                        collapsed.push(c);
-                        prev_dash = false;
-                    }
-                }
-                let mut trimmed = collapsed.trim_matches('-').to_string();
+                let mut trimmed = slugify(label);
                 if trimmed.is_empty() {
                     trimmed = "branch".to_string();
                 }
