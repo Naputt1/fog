@@ -56,20 +56,22 @@ pub struct TerminalSpawnOpts {
 /// Returns indices into `entries` in dependency order, or an error if there
 /// is a cycle or a dependency references an unknown service name.
 pub fn resolve_dep_order(entries: &[ConfigEntry]) -> Result<Vec<usize>, String> {
-    let name_to_idx: HashMap<String, usize> = entries
-        .iter()
-        .enumerate()
-        .map(|(i, e)| {
-            let name = e.name.clone().unwrap_or_else(|| {
-                Path::new(&e.path)
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned()
-            });
-            (name, i)
-        })
-        .collect();
+    let mut name_to_idx: HashMap<String, usize> = HashMap::with_capacity(entries.len());
+    for (i, e) in entries.iter().enumerate() {
+        // The effective name is the explicit `name`, or the path basename.
+        let name = e.name.clone().unwrap_or_else(|| {
+            Path::new(&e.path)
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned()
+        });
+        if let Some(prev) = name_to_idx.insert(name.clone(), i) {
+            return Err(format!(
+                "duplicate service name '{name}' (entries {prev} and {i})"
+            ));
+        }
+    }
 
     for entry in entries {
         if let Some(deps) = &entry.depends_on {
@@ -681,6 +683,34 @@ pub fn build_with_ports_no_share(
     })
 }
 
+/// Applies port-definition validation and template resolution to the raw
+/// service entries, then computes their dependency order.
+///
+/// All fallible setup for [`build_with_opts`] lives here so the caller can
+/// close its owned handoff fds in one place when any step fails.
+fn resolve_entries(
+    raw_entries: Vec<ConfigEntry>,
+    script: &ScriptConfig,
+    ports: &crate::ports::PortMap,
+    branch: Option<&str>,
+) -> Result<(Vec<ConfigEntry>, Vec<usize>), String> {
+    // A `${ports.*}` template cannot resolve without a top-level `ports`,
+    // whether or not a branch is present.
+    if ports.is_empty() {
+        crate::ports::ensure_ports_defined(None, script, None)?;
+    }
+    let entries: Vec<ConfigEntry> = if ports.is_empty() && branch.is_none() {
+        raw_entries
+    } else {
+        raw_entries
+            .iter()
+            .map(|e| resolve_service_templates(e, ports, branch))
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let dep_order = resolve_dep_order(&entries)?;
+    Ok((entries, dep_order))
+}
+
 /// Preferred entry point using `BuildOpts` to avoid `clippy::too_many_arguments`.
 pub fn build_with_opts(opts: BuildOpts) -> Result<Runtime, String> {
     let BuildOpts {
@@ -727,18 +757,19 @@ pub fn build_with_opts(opts: BuildOpts) -> Result<Runtime, String> {
         .iter()
         .map(|e| !crate::ports::entry_referenced_ports(e).is_empty())
         .collect();
-    let entries: Vec<ConfigEntry> = if ports.is_empty() && branch.is_none() {
-        raw_entries
-    } else {
-        if ports.is_empty() {
-            crate::ports::ensure_ports_defined(None, script, None)?;
+    // Every fallible setup step runs before any terminal is built. Handed-off
+    // PTY fds live in `adopted` until a terminal takes them; a failure here
+    // must close them rather than leak them.
+    let (entries, dep_order) = match resolve_entries(raw_entries, script, ports, branch.as_deref())
+    {
+        Ok(v) => v,
+        Err(e) => {
+            for (_, handoff) in adopted.drain() {
+                crate::fds::close(handoff.fd);
+            }
+            return Err(e);
         }
-        raw_entries
-            .iter()
-            .map(|e| resolve_service_templates(e, ports, branch.as_deref()))
-            .collect::<Result<Vec<_>, _>>()?
     };
-    let dep_order = resolve_dep_order(&entries)?;
 
     let n = entries.len();
     let mut items: Vec<Option<Terminal>> = (0..n).map(|_| None).collect();
@@ -1064,6 +1095,50 @@ mod tests {
     fn test_resolve_dep_order_unknown_dep() {
         let entries = vec![entry("a", Some(vec!["nope"]))];
         assert!(resolve_dep_order(&entries).is_err());
+    }
+
+    #[test]
+    fn test_resolve_dep_order_duplicate_explicit_name() {
+        let entries = vec![entry("svc", None), entry("svc", None)];
+        let err = resolve_dep_order(&entries).unwrap_err();
+        assert!(err.contains("duplicate service name 'svc'"), "{err}");
+    }
+
+    #[test]
+    fn test_resolve_dep_order_duplicate_basename() {
+        // No explicit names: both entries resolve to the basename 'svc'.
+        let mut a = entry("ignored", None);
+        a.name = None;
+        a.path = "a/svc".to_string();
+        let mut b = entry("ignored", None);
+        b.name = None;
+        b.path = "b/svc".to_string();
+        let err = resolve_dep_order(&[a, b]).unwrap_err();
+        assert!(err.contains("duplicate service name 'svc'"), "{err}");
+    }
+
+    #[test]
+    fn test_build_unresolved_ports_without_branch_errors() {
+        // Not inside a git worktree and no allocated ports: a `${ports.*}`
+        // template must fail fast instead of being handed through unresolved.
+        let mut e = entry("api", None);
+        e.env = Some(
+            [(
+                "URL".to_string(),
+                "http://localhost:${ports.api}".to_string(),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let script = script_with(vec![e]);
+        let mut adopted = HashMap::new();
+        // A temp dir is not inside any git worktree, so branch resolves to None.
+        let dir = std::env::temp_dir();
+        let err = match build(&script, "dev", &dir, None, false, 100, None, &mut adopted) {
+            Ok(_) => panic!("a ${{ports.*}} template without 'ports' must fail"),
+            Err(e) => e,
+        };
+        assert!(err.contains("'ports' is not defined"), "{err}");
     }
 
     #[test]

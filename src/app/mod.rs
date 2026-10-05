@@ -154,6 +154,8 @@ pub struct AppCreateOpts {
     pub theme: Theme,
     pub config_path: std::path::PathBuf,
     pub config_rx: std::sync::mpsc::Receiver<()>,
+    /// Stop flag owned by the active config watcher, set when it is replaced.
+    pub config_watcher_stop: Arc<AtomicBool>,
     pub ipc_state: Arc<IpcState>,
     pub config_rel: PathBuf,
     pub save_logs: bool,
@@ -201,6 +203,7 @@ impl App {
             theme,
             config_path,
             config_rx,
+            config_watcher_stop: Arc::new(AtomicBool::new(false)),
             ipc_state,
             config_rel,
             save_logs,
@@ -223,6 +226,7 @@ impl App {
             theme,
             config_path,
             config_rx,
+            config_watcher_stop,
             ipc_state,
             config_rel,
             save_logs,
@@ -262,7 +266,7 @@ impl App {
             config_rel,
             save_logs,
             config_rx,
-            config_watcher_stop: Arc::new(AtomicBool::new(false)),
+            config_watcher_stop,
             ipc_state,
             title_branch,
             proxy_tab_index,
@@ -1247,11 +1251,13 @@ impl App {
         self.tabs = tabs;
         self.proxy_tab_index = proxy_tab_index;
         self.config_path = config_path;
+        // Stop the old watcher (it observes the flag within ~100ms) and replace
+        // it with one owning the new stop flag we store.
         self.config_watcher_stop.store(true, Ordering::SeqCst);
-        let config_watcher_stop = Arc::new(AtomicBool::new(false));
-        self.config_watcher_stop = config_watcher_stop.clone();
-        self.config_rx =
-            config_watcher::spawn_config_watcher(self.config_path.clone(), config_watcher_stop);
+        let (config_rx, config_watcher_stop) =
+            config_watcher::spawn_config_watcher(self.config_path.clone());
+        self.config_rx = config_rx;
+        self.config_watcher_stop = config_watcher_stop;
 
         self.tabs.index = 0;
         self.scroll_offset = 0;

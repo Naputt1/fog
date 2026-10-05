@@ -111,13 +111,17 @@ pub fn command_exists(name: &str) -> bool {
     #[cfg(unix)]
     let mut cmd = {
         let mut c = std::process::Command::new("sh");
-        c.args(["-c", &format!("command -v {name} >/dev/null 2>&1")]);
+        // `$1` is passed positionally and quoted, so shell metacharacters in
+        // `name` are treated as a literal program name rather than executed.
+        c.args(["-c", "command -v \"$1\" >/dev/null 2>&1", "sh", name]);
         c
     };
     #[cfg(windows)]
     let mut cmd = {
         let mut c = std::process::Command::new("cmd");
-        c.args(["/C", &format!("where {name} >NUL 2>NUL")]);
+        c.args(["/C", "where", name])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
         c
     };
     cmd.status().map(|s| s.success()).unwrap_or(false)
@@ -156,6 +160,12 @@ pub fn detach_command(cmd: &mut std::process::Command) {
 /// Returns an error if the underlying call fails.
 #[cfg(unix)]
 pub fn kill_process(pid: u32, signal: Signal) -> io::Result<()> {
+    if pid == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "kill_process: refusing to signal pid 0 (would target the caller's process group)",
+        ));
+    }
     debug_assert!(pid > 0, "kill_process: pid must be positive, got {}", pid);
     // SAFETY: pid is a valid process id.
     let ret = unsafe { libc::kill(pid as libc::pid_t, signal_number(signal)) };
@@ -175,6 +185,12 @@ pub fn kill_process(pid: u32, signal: Signal) -> io::Result<()> {
 /// Returns an error if the process could not be opened or terminated.
 #[cfg(windows)]
 pub fn kill_process(pid: u32, _signal: Signal) -> io::Result<()> {
+    if pid == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "kill_process: refusing to signal pid 0 (would target the caller's process group)",
+        ));
+    }
     debug_assert!(pid > 0, "kill_process: pid must be positive, got {}", pid);
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
@@ -217,6 +233,12 @@ fn signal_number(signal: Signal) -> i32 {
 /// Returns an error if the kill call fails.
 #[cfg(unix)]
 pub fn kill_process_group(pid: u32, signal: Signal) -> io::Result<()> {
+    if pid == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "kill_process_group: refusing to signal pid 0 (would target the caller's process group)",
+        ));
+    }
     debug_assert!(
         pid > 0,
         "kill_process_group: pid must be positive, got {}",
@@ -239,6 +261,12 @@ pub fn kill_process_group(pid: u32, signal: Signal) -> io::Result<()> {
 /// Returns an error if the root process could not be terminated.
 #[cfg(windows)]
 pub fn kill_process_group(pid: u32, signal: Signal) -> io::Result<()> {
+    if pid == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "kill_process_group: refusing to signal pid 0 (would target the caller's process group)",
+        ));
+    }
     debug_assert!(
         pid > 0,
         "kill_process_group: pid must be positive, got {}",
@@ -363,6 +391,9 @@ fn is_zombie(pid: u32) -> bool {
 /// * `pid` - The process ID (group leader).
 /// * `signal` - The termination strength to request.
 pub fn try_kill_process_group(pid: u32, signal: Signal) {
+    if pid == 0 {
+        return;
+    }
     debug_assert!(
         pid > 0,
         "try_kill_process_group: pid must be positive, got {}",
@@ -591,6 +622,9 @@ pub fn descendant_pids(_pid: u32) -> Vec<u32> {
 /// # Arguments
 /// * `pid` - The parent process ID whose descendants should be killed.
 pub fn kill_descendants(pid: u32) {
+    if pid == 0 {
+        return;
+    }
     debug_assert!(
         pid > 0,
         "kill_descendants: pid must be positive, got {}",
@@ -614,6 +648,9 @@ pub fn kill_descendants(pid: u32) {
 /// * `signal` - The termination strength to request.
 #[cfg(unix)]
 pub fn signal_tree(pid: u32, signal: Signal) {
+    if pid == 0 {
+        return;
+    }
     debug_assert!(pid > 0, "signal_tree: pid must be positive, got {}", pid);
     for child_pid in descendant_pids(pid) {
         let _ = kill_process(child_pid, signal);
@@ -631,6 +668,9 @@ pub fn signal_tree(pid: u32, signal: Signal) {
 /// * `signal` - The termination strength to request.
 #[cfg(windows)]
 pub fn signal_tree(pid: u32, signal: Signal) {
+    if pid == 0 {
+        return;
+    }
     debug_assert!(pid > 0, "signal_tree: pid must be positive, got {}", pid);
     let _ = kill_process_group(pid, signal);
 }
@@ -642,6 +682,35 @@ mod tests {
     #[test]
     fn test_try_kill_nonexistent_pid() {
         try_kill_process_group(999_999, Signal::Term);
+    }
+
+    #[test]
+    fn test_pid_zero_is_refused() {
+        // pid 0 would signal the caller's own process group, so every helper
+        // must treat it as invalid rather than pass it through.
+        assert!(kill_process(0, Signal::Term).is_err());
+        assert!(kill_process_group(0, Signal::Term).is_err());
+        kill_descendants(0);
+        signal_tree(0, Signal::Term);
+        try_kill_process_group(0, Signal::Term);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_command_exists_does_not_execute_injection() {
+        assert!(command_exists("sh"), "sh is on PATH");
+        let marker =
+            std::env::temp_dir().join(format!("fog-command-exists-pwned-{}", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+        let name = format!("foo; touch {}", marker.display());
+        assert!(
+            !command_exists(&name),
+            "a bogus name with shell metacharacters is not on PATH"
+        );
+        assert!(
+            !marker.exists(),
+            "the name must be one argument, not shell code to execute"
+        );
     }
 
     #[test]

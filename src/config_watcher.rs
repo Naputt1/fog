@@ -13,13 +13,16 @@ use crate::theme::Theme;
 /// without this every one would trigger a proxy restart (each blocking).
 const DEBOUNCE_WINDOW: Duration = Duration::from_millis(250);
 
-/// Spawns a background thread that watches a config file for changes and
-/// returns a receiver that signals when the file has changed.
+/// Spawns a background thread that watches a config file for changes.
 ///
-/// The thread exits when the returned receiver is dropped *or* when `stop` is
-/// set, so repeated switches (which re-spawn a watcher) do not leak threads.
-pub fn spawn_config_watcher(config_path: PathBuf, stop: Arc<AtomicBool>) -> mpsc::Receiver<()> {
+/// Returns the receiver that signals on each change, and the stop flag that
+/// owns the thread. The caller must keep the flag and set it when replacing or
+/// dropping the watcher; the thread observes it within ~100ms and exits. The
+/// receiver alone cannot stop it: `tx.send` only fails on the *next* change.
+pub fn spawn_config_watcher(config_path: PathBuf) -> (mpsc::Receiver<()>, Arc<AtomicBool>) {
     let (tx, rx) = mpsc::channel();
+    let stop = Arc::new(AtomicBool::new(false));
+    let thread_stop = stop.clone();
 
     std::thread::spawn(move || {
         use notify::{EventKind, RecursiveMode, Watcher};
@@ -64,9 +67,16 @@ pub fn spawn_config_watcher(config_path: PathBuf, stop: Arc<AtomicBool>) -> mpsc
                 }
             })
         {
-            let _ = watcher.watch(&watch_dir, RecursiveMode::NonRecursive);
+            if watcher
+                .watch(&watch_dir, RecursiveMode::NonRecursive)
+                .is_err()
+            {
+                // Nothing to watch (missing parent, permissions): exit rather
+                // than spin forever with a dead watcher.
+                return;
+            }
             loop {
-                if stop.load(Ordering::SeqCst) {
+                if thread_stop.load(Ordering::SeqCst) {
                     break;
                 }
                 match notify_rx.recv_timeout(Duration::from_millis(100)) {
@@ -89,7 +99,7 @@ pub fn spawn_config_watcher(config_path: PathBuf, stop: Arc<AtomicBool>) -> mpsc
         }
     });
 
-    rx
+    (rx, stop)
 }
 
 /// Reloads configuration from a file and applies changes to the running app state.
