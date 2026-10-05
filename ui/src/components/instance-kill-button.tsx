@@ -65,7 +65,7 @@ export function InstanceKillButton({
         Kill
       </Button>
       {error ? (
-        <span className="text-destructive mt-1 block font-mono text-2xs">
+        <span className="text-destructive text-2xs mt-1 block font-mono">
           {error.message}
         </span>
       ) : null}

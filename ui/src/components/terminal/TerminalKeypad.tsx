@@ -167,7 +167,7 @@ export function TerminalKeypad({
       )}
     >
       {anyLatched && (
-        <div className="text-primary flex w-full items-center gap-1.5 pb-0.5 font-mono text-2xs">
+        <div className="text-primary text-2xs flex w-full items-center gap-1.5 pb-0.5 font-mono">
           <SquareTerminal className="size-3" />
           {[mods.ctrl && "Ctrl", mods.alt && "Alt"]
             .filter(Boolean)

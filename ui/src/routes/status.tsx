@@ -166,7 +166,7 @@ function FieldLabel({
   return (
     <label
       htmlFor={htmlFor}
-      className="text-muted-foreground mb-1 block font-mono text-2xs tracking-wide uppercase"
+      className="text-muted-foreground text-2xs mb-1 block font-mono tracking-wide uppercase"
     >
       {children}
     </label>
@@ -270,7 +270,7 @@ function LaunchCard() {
                   ))}
                 </select>
                 {selectedProject && launchable.length === 0 ? (
-                  <p className="text-muted-foreground mt-1 font-mono text-2xs">
+                  <p className="text-muted-foreground text-2xs mt-1 font-mono">
                     No worktree with scripts on this project.
                   </p>
                 ) : null}
@@ -394,7 +394,7 @@ function LaunchCard() {
             Starting instance…
           </p>
         ) : result?.ok && result.pid != null ? (
-          <p className="font-mono text-xs text-success">
+          <p className="text-success font-mono text-xs">
             Started pid {result.pid}
           </p>
         ) : launchError ? (
@@ -484,7 +484,7 @@ function StatusPage() {
         title="Status"
         description="IPC status snapshot of the running fog instances and their services."
         actions={
-          <span className="border-border bg-card text-muted-foreground flex items-center gap-1.5 rounded-full border px-2.5 py-1 font-mono text-2xs">
+          <span className="border-border bg-card text-muted-foreground text-2xs flex items-center gap-1.5 rounded-full border px-2.5 py-1 font-mono">
             <span className="bg-primary size-1.5 animate-pulse rounded-full" />
             poll 5s
           </span>

@@ -39,7 +39,7 @@ function ServiceButton({
       className={cn(
         "focus-visible:ring-ring/60 flex min-h-9 w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left font-mono text-xs transition-colors outline-none focus-visible:ring-2",
         active
-          ? "bg-accent text-accent-foreground ring-1 ring-inset ring-primary/20"
+          ? "bg-accent text-accent-foreground ring-primary/20 ring-1 ring-inset"
           : "text-muted-foreground hover:bg-accent/60 hover:text-foreground"
       )}
     >
@@ -93,13 +93,13 @@ function SidebarContent({
     <div className="space-y-4 p-2">
       {groups.map((project) => (
         <div key={project.project}>
-          <div className="text-primary/80 px-2 py-1 font-mono text-2xs tracking-wider uppercase">
+          <div className="text-primary/80 text-2xs px-2 py-1 font-mono tracking-wider uppercase">
             {project.project}
           </div>
           <div className="space-y-2">
             {project.worktrees.map((wt) => (
               <Fragment key={`${project.project}:${wt.worktree}`}>
-                <div className="text-muted-foreground px-2 pt-1 font-mono text-3xs tracking-wider uppercase">
+                <div className="text-muted-foreground text-3xs px-2 pt-1 font-mono tracking-wider uppercase">
                   {wt.worktree || "default"} · {wt.services.length}
                 </div>
                 <div className="space-y-0.5">
@@ -161,7 +161,7 @@ export function ServiceSidebar(props: ServiceSidebarProps) {
           <span className="text-muted-foreground font-mono text-xs tracking-wider uppercase">
             Services
           </span>
-          <span className="bg-muted text-muted-foreground ml-auto rounded-full px-1.5 py-0.5 font-mono text-3xs">
+          <span className="bg-muted text-muted-foreground text-3xs ml-auto rounded-full px-1.5 py-0.5 font-mono">
             {isLoading ? "…" : count}
           </span>
         </div>
@@ -185,9 +185,7 @@ export function ServiceSidebar(props: ServiceSidebarProps) {
       <Sheet open={ctx?.open ?? false} onOpenChange={(o) => ctx?.setOpen(o)}>
         <SheetContent side="right" spacing="none" className="w-72">
           <SheetHeader variant="barSafe">
-            <SheetTitle variant="label">
-              Services
-            </SheetTitle>
+            <SheetTitle variant="label">Services</SheetTitle>
           </SheetHeader>
           <ProjectDropdown
             projectOptions={projectOptions}
@@ -224,7 +222,7 @@ function ProjectDropdown({
     <div className="border-b px-2 py-2">
       <label
         htmlFor={selectId}
-        className="text-muted-foreground mb-1 block font-mono text-3xs tracking-wider uppercase"
+        className="text-muted-foreground text-3xs mb-1 block font-mono tracking-wider uppercase"
       >
         Project
       </label>

@@ -382,7 +382,7 @@ export function LogView({
             aria-hidden="true"
             className={cn(
               "size-2 rounded-full",
-              connected ? "bg-success" : "animate-pulse bg-warning"
+              connected ? "bg-success" : "bg-warning animate-pulse"
             )}
           />
           <span className="text-muted-foreground" aria-live="polite">
@@ -438,11 +438,8 @@ export function LogView({
           </Button>
         </div>
       </div>
-      <div className="flex min-h-0 flex-1 bg-terminal p-2">
-        <div
-          ref={elRef}
-          className="h-full min-h-0 w-full"
-        />
+      <div className="bg-terminal flex min-h-0 flex-1 p-2">
+        <div ref={elRef} className="h-full min-h-0 w-full" />
       </div>
     </div>
   );

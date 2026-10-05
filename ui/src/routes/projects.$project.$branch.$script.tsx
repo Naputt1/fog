@@ -289,7 +289,7 @@ function ScriptServicesPage() {
       {instances.map((inst) => (
         <section key={inst.pid} className="space-y-2">
           {multi ? (
-            <div className="text-muted-foreground flex items-center gap-2 font-mono text-2xs">
+            <div className="text-muted-foreground text-2xs flex items-center gap-2 font-mono">
               <span className="text-foreground font-semibold">
                 pid {inst.pid}
               </span>
@@ -470,14 +470,12 @@ function ScriptServicesPage() {
               >
                 <div className="flex min-w-0 flex-col">
                   <div className="flex min-w-0 items-center gap-2">
-                    <SheetTitle variant="strip">
-                      {selected.svc.name}
-                    </SheetTitle>
+                    <SheetTitle variant="strip">{selected.svc.name}</SheetTitle>
                     <StatusBadge
                       status={selected.svc.running ? "running" : "stopped"}
                     />
                   </div>
-                  <span className="text-muted-foreground truncate font-mono text-2xs">
+                  <span className="text-muted-foreground text-2xs truncate font-mono">
                     {projectName} @ {label} · {script} pid {selected.inst.pid}
                   </span>
                 </div>

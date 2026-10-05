@@ -113,12 +113,12 @@ export function ServiceActions({
         </Button>
       </div>
       {killing ? (
-        <span className="text-warning mt-1 block font-mono text-2xs">
+        <span className="text-warning text-2xs mt-1 block font-mono">
           instance is shutting down…
         </span>
       ) : null}
       {error || refused ? (
-        <span className="text-destructive mt-1 block font-mono text-2xs">
+        <span className="text-destructive text-2xs mt-1 block font-mono">
           {error?.message ?? refused}
         </span>
       ) : null}

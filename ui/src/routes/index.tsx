@@ -60,7 +60,7 @@ function ProjectCard({ project }: { project: ProjectBucket }) {
               aria-hidden
             />
           </div>
-          <div className="text-muted-foreground flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-2xs">
+          <div className="text-muted-foreground text-2xs flex flex-wrap items-center gap-x-3 gap-y-1 font-mono">
             <span>
               {branches} {branches === 1 ? "branch" : "branches"}
             </span>
@@ -68,7 +68,7 @@ function ProjectCard({ project }: { project: ProjectBucket }) {
             <span className="text-primary">{stats.running} running</span>
           </div>
           {stats.ports.length > 0 ? (
-            <div className="text-muted-foreground/80 truncate font-mono text-2xs">
+            <div className="text-muted-foreground/80 text-2xs truncate font-mono">
               {stats.ports.join("  ")}
             </div>
           ) : null}

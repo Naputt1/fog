@@ -148,7 +148,11 @@ const cardContentVariants = cva("min-w-0", {
       loose: "space-y-6",
     },
   },
-  defaultVariants: { variant: "default", padding: "default", spacing: "default" },
+  defaultVariants: {
+    variant: "default",
+    padding: "default",
+    spacing: "default",
+  },
 });
 
 function CardDescription({ className, ...props }: React.ComponentProps<"div">) {
@@ -184,7 +188,10 @@ function CardContent({
   return (
     <div
       data-slot="card-content"
-      className={cn(cardContentVariants({ variant, padding, spacing }), className)}
+      className={cn(
+        cardContentVariants({ variant, padding, spacing }),
+        className
+      )}
       {...props}
     />
   );

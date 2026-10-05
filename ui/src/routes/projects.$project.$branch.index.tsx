@@ -58,7 +58,7 @@ function ScriptCard({
           />
         </Link>
 
-        <div className="text-muted-foreground flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-2xs">
+        <div className="text-muted-foreground text-2xs flex flex-wrap items-center gap-x-3 gap-y-1 font-mono">
           <span>{stats.total} services</span>
           <span className="text-primary">{stats.running} running</span>
           {instances.length > 1 ? (
@@ -110,10 +110,10 @@ function ScriptInstanceRow({
         search={{ pid: inst.pid }}
         className="focus-visible:ring-ring/60 flex min-w-0 flex-1 items-center gap-2 rounded outline-none focus-visible:ring-2"
       >
-        <span className="text-muted-foreground shrink-0 font-mono text-2xs">
+        <span className="text-muted-foreground text-2xs shrink-0 font-mono">
           pid {inst.pid}
         </span>
-        <span className="text-muted-foreground ml-auto shrink-0 font-mono text-2xs">
+        <span className="text-muted-foreground text-2xs ml-auto shrink-0 font-mono">
           {killing ? "killing…" : `${running}/${inst.services.length}`}
         </span>
       </Link>

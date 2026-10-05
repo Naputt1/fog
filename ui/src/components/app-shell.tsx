@@ -29,7 +29,7 @@ function Brand() {
         <div className="font-mono text-sm font-semibold tracking-tight">
           fog
         </div>
-        <div className="text-muted-foreground font-mono text-3xs tracking-wider uppercase">
+        <div className="text-muted-foreground text-3xs font-mono tracking-wider uppercase">
           dashboard
         </div>
       </div>
@@ -128,7 +128,7 @@ function SidebarNav() {
             className={cn(
               "text-muted-foreground hover:bg-accent hover:text-accent-foreground flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm font-medium transition-colors",
               active &&
-                "bg-accent text-accent-foreground ring-1 ring-inset ring-primary/25"
+                "bg-accent text-accent-foreground ring-primary/25 ring-1 ring-inset"
             )}
             activeOptions={{ exact: item.match === "" }}
           >

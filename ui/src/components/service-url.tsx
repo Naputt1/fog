@@ -113,7 +113,7 @@ export function ServiceUrl({
       {dnsOnly ? (
         <span
           title="Traefik-only, no host port published — reachable via DNS (*.gems/*.red-fox) or add ports: [8080] in compose"
-          className="border-warning/30 bg-warning/10 text-warning shrink-0 rounded-full border px-1.5 py-0.5 font-mono text-4xs tracking-wide uppercase"
+          className="border-warning/30 bg-warning/10 text-warning text-4xs shrink-0 rounded-full border px-1.5 py-0.5 font-mono tracking-wide uppercase"
         >
           DNS
         </span>

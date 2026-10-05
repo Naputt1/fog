@@ -45,7 +45,7 @@ function StatChip({
   tone?: "healthy" | "unhealthy";
 }) {
   return (
-    <span className="border-border bg-card flex items-center gap-1.5 rounded-full border px-2.5 py-1 font-mono text-2xs">
+    <span className="border-border bg-card text-2xs flex items-center gap-1.5 rounded-full border px-2.5 py-1 font-mono">
       <span
         className={cn(
           "size-1.5 rounded-full",
@@ -82,11 +82,11 @@ function HealthCardList({ results }: { results: HealthItem[] }) {
           </div>
           <div className="mt-2 flex flex-wrap items-center gap-1.5">
             <HealthBadge health={h.health} />
-            <span className="border-border text-muted-foreground rounded-full border px-2 py-0.5 font-mono text-2xs">
+            <span className="border-border text-muted-foreground text-2xs rounded-full border px-2 py-0.5 font-mono">
               pid {h.pid}
             </span>
           </div>
-          <div className="text-muted-foreground mt-2 flex min-w-0 flex-wrap gap-x-2 font-mono text-2xs">
+          <div className="text-muted-foreground text-2xs mt-2 flex min-w-0 flex-wrap gap-x-2 font-mono">
             <span className="truncate">{h.script}</span>
             {h.project ? <span>· {h.project}</span> : null}
             {h.branch ? <span>@{h.branch}</span> : null}
@@ -123,7 +123,7 @@ function HealthPage() {
         title="Health"
         description="Per-service health check results across all fog instances."
         actions={
-          <span className="border-border bg-card text-muted-foreground flex items-center gap-1.5 rounded-full border px-2.5 py-1 font-mono text-2xs">
+          <span className="border-border bg-card text-muted-foreground text-2xs flex items-center gap-1.5 rounded-full border px-2.5 py-1 font-mono">
             <span className="bg-primary size-1.5 animate-pulse rounded-full" />
             poll 5s
           </span>
@@ -173,9 +173,7 @@ function HealthPage() {
                     <TableBody>
                       {results.map((h) => (
                         <TableRow key={`${h.pid}/${h.script}/${h.service}`}>
-                          <TableCell variant="monoMuted">
-                            {h.script}
-                          </TableCell>
+                          <TableCell variant="monoMuted">{h.script}</TableCell>
                           <TableCell variant="monoMuted">
                             {h.project ?? ""}
                           </TableCell>
@@ -185,9 +183,7 @@ function HealthPage() {
                           <TableCell variant="monoStrong">
                             {h.service}
                           </TableCell>
-                          <TableCell variant="monoMuted">
-                            pid {h.pid}
-                          </TableCell>
+                          <TableCell variant="monoMuted">pid {h.pid}</TableCell>
                           <TableCell>
                             <StatusBadge
                               status={h.running ? "running" : "stopped"}

@@ -122,7 +122,7 @@ export function ServiceTerminal({
       ) : null}
       {isDocker && showModeToggle ? (
         <div className="text-muted-foreground flex shrink-0 items-center gap-2 font-mono text-xs">
-          <span className="rounded-full bg-warning/20 px-2 py-0.5 text-warning">
+          <span className="bg-warning/20 text-warning rounded-full px-2 py-0.5">
             docker logs — read-only
           </span>
           <span>PTY not available for container — streaming `docker logs`</span>
