@@ -646,49 +646,62 @@ fn serve_blocking(port: u16, network: String) -> io::Result<()> {
         .enable_all()
         .build()
         .map_err(|e| io::Error::other(e.to_string()))?;
-    let result =
-        rt.block_on(async move {
-            let addr = format!("127.0.0.1:{port}");
-            let listener = tokio::net::TcpListener::bind(&addr)
-                .await
-                .map_err(|e| io::Error::other(format!("bind {addr}: {e}")))?;
-            // The embedded index server is where the web UI (and, via the vite dev
-            // proxy, the dev UI) is actually reached, so it must serve the built-in
-            // terminal gateway too — otherwise `/ws/terminal` would fall through to
-            // the SPA fallback and the browser upgrade would fail. The standalone
-            // server uses the gateway's default hardening limits (it has no
-            // per-script `TerminalConfig`).
-            let terminal = std::sync::Arc::new(crate::config::TerminalConfig::default());
-            let terminal_sessions =
-                std::sync::Arc::new(crate::terminal_ws::SessionsRegistry::default());
-            loop {
-                let Ok((stream, peer)) = listener.accept().await else {
-                    continue;
-                };
-                let peer_ip = peer.ip().to_string();
-                let io = TokioIo::new(stream);
+    let result = rt.block_on(serve_listener(port, network));
+    let _ = std::fs::remove_file(index_pid_path(port));
+    result
+}
+
+/// Binds loopback `port` and serves the embedded index API until the listener
+/// fails. Shared by [`serve_blocking`] (production) and [`serve_for_test`].
+async fn serve_listener(port: u16, network: String) -> io::Result<()> {
+    let addr = format!("127.0.0.1:{port}");
+    let listener = tokio::net::TcpListener::bind(&addr)
+        .await
+        .map_err(|e| io::Error::other(format!("bind {addr}: {e}")))?;
+    // The embedded index server is where the web UI (and, via the vite dev
+    // proxy, the dev UI) is actually reached, so it must serve the built-in
+    // terminal gateway too — otherwise `/ws/terminal` would fall through to
+    // the SPA fallback and the browser upgrade would fail. The standalone
+    // server uses the gateway's default hardening limits (it has no
+    // per-script `TerminalConfig`).
+    let terminal = std::sync::Arc::new(crate::config::TerminalConfig::default());
+    let terminal_sessions = std::sync::Arc::new(crate::terminal_ws::SessionsRegistry::default());
+    loop {
+        let Ok((stream, peer)) = listener.accept().await else {
+            continue;
+        };
+        let peer_ip = peer.ip().to_string();
+        let io = TokioIo::new(stream);
+        let network = network.clone();
+        let terminal = terminal.clone();
+        let terminal_sessions = terminal_sessions.clone();
+        tokio::spawn(async move {
+            let svc = service_fn(move |req: Request<hyper::body::Incoming>| {
                 let network = network.clone();
                 let terminal = terminal.clone();
                 let terminal_sessions = terminal_sessions.clone();
-                tokio::spawn(async move {
-                    let svc = service_fn(move |req: Request<hyper::body::Incoming>| {
-                        let network = network.clone();
-                        let terminal = terminal.clone();
-                        let terminal_sessions = terminal_sessions.clone();
-                        let peer_ip = peer_ip.clone();
-                        async move {
-                            serve_index(&network, req, terminal, terminal_sessions, peer_ip).await
-                        }
-                    });
-                    let _ = http1::Builder::new()
-                        .serve_connection(io, svc)
-                        .with_upgrades()
-                        .await;
-                });
-            }
+                let peer_ip = peer_ip.clone();
+                async move { serve_index(&network, req, terminal, terminal_sessions, peer_ip).await }
+            });
+            let _ = http1::Builder::new()
+                .serve_connection(io, svc)
+                .with_upgrades()
+                .await;
         });
-    let _ = std::fs::remove_file(index_pid_path(port));
-    result
+    }
+}
+
+/// Test-only entry point: serves the embedded index API on loopback `port`
+/// without the idle self-terminate watchdog or the pidfile that
+/// [`serve_blocking`] installs, so an integration test can drive the HTTP
+/// surface on a thread. Blocks until the process exits.
+#[doc(hidden)]
+pub fn serve_for_test(port: u16) -> io::Result<()> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| io::Error::other(e.to_string()))?;
+    rt.block_on(serve_listener(port, "fog-test".to_string()))
 }
 
 /// Maps a file path to a media type for the `Content-Type` header.
