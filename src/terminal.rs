@@ -3326,3 +3326,13 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 }
+
+#[cfg(test)]
+mod _send_probe {
+    use super::Terminal;
+    fn _assert_send<T: Send>() {}
+    #[test]
+    fn terminal_is_send() {
+        _assert_send::<Terminal>();
+    }
+}

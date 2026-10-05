@@ -44,14 +44,113 @@ enum Mode {
     ProxyFilter,
 }
 
-/// Events delivered to the TUI loop by the input-reader and health-forwarder
-/// threads. Fusing them onto one channel lets the loop wake instantly on either
-/// input or a service health change.
+/// Events delivered to the TUI loop by the input-reader, health-forwarder, and
+/// task-worker threads. Fusing them onto one channel lets the loop wake
+/// instantly on input, a service health change, or a finished background task.
 enum AppEvent {
     /// A crossterm input event.
     Input(Event),
     /// A service health status changed; re-check pending dependents.
     Health,
+    /// A background task finished. `kind` identifies the task so its result is
+    /// routed correctly and a superseded task's result can be ignored; `result`
+    /// carries the outcome.
+    TaskDone {
+        kind: TaskKind,
+        result: Box<TaskResult>,
+    },
+}
+
+/// Identifies a blocking operation offloaded to a worker thread, so the UI loop
+/// can ignore duplicate dispatches while one is already in flight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TaskKind {
+    /// Wait for a quit/handoff to complete (or time out), then exit.
+    Quit,
+    /// List the repository's worktrees for the switch popup.
+    OpenSwitch,
+    /// Terminate the live instances serving the selected branch.
+    TerminateBranch,
+}
+
+/// Outcome of an offloaded [`TaskKind`], returned to the UI loop as a
+/// [`AppEvent::TaskDone`].
+enum TaskResult {
+    /// Quit handoff finished (completed or timed out): proceed to teardown.
+    Quit,
+    /// Worktrees plus the branches with a live instance, for the switch popup.
+    /// `Err` carries a user-facing message (e.g. no git repository).
+    Worktrees(Result<(Vec<Worktree>, Vec<String>), String>),
+    /// How many instances were terminated, plus the selected branch's shape so
+    /// the caller can render the same status message as before.
+    Terminated {
+        count: usize,
+        branch_none: bool,
+        is_current: bool,
+    },
+}
+
+/// Waits until the IPC thread has finished sending handoffs, up to the reclaim
+/// preparation window. Returns as soon as `handoff_done` is set; both the
+/// interactive worker and the synchronous headless path use it.
+fn wait_for_handoff_done(ipc_state: &crate::ipc::IpcState) {
+    let deadline =
+        std::time::Instant::now() + Duration::from_secs(crate::ipc::HANDOFF_PREPARE_TIMEOUT_SECS);
+    while std::time::Instant::now() < deadline && !ipc_state.handoff_done.load(Ordering::SeqCst) {
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Gathers everything the switch popup needs: the repository's worktrees and
+/// the branches with a live instance. Runs on a worker thread (git invocation
+/// plus an IPC socket scan), so it takes only owned inputs.
+fn collect_switch_data(
+    config_dir: PathBuf,
+    project: Option<String>,
+    script: String,
+) -> Result<(Vec<Worktree>, Vec<String>), String> {
+    let Some(worktrees) = worktree::list(&config_dir) else {
+        return Err("no git worktrees found in this repository".to_string());
+    };
+    if worktrees.is_empty() {
+        return Err("no git worktrees found in this repository".to_string());
+    }
+    let mut running = Vec::new();
+    if let Some(project) = project.as_deref() {
+        for (_, _, status) in ipc::find_instances_any_branch(project, &script) {
+            if let Some(branch) = status.branch
+                && !running.contains(&branch)
+            {
+                running.push(branch);
+            }
+        }
+    }
+    Ok((worktrees, running))
+}
+
+/// Terminates every live instance serving `branch` for this project's script,
+/// returning how many were signalled. The scan excludes the current process.
+fn terminate_branch_instances(project: Option<&str>, script: &str, branch: Option<&str>) -> usize {
+    let Some(project) = project else {
+        return 0;
+    };
+    let instances = ipc::find_instances_with_status(project, script, branch)
+        .into_iter()
+        .map(|(pid, path, _)| (pid, path))
+        .collect::<Vec<_>>();
+    ipc::terminate_instances(&instances)
+}
+
+/// Formats the switch popup's transient status after terminating instances,
+/// preserving the exact wording shown before the work was offloaded.
+fn terminated_status(count: usize, branch_none: bool, is_current: bool) -> String {
+    match count {
+        0 if branch_none => "no running instances on this branch (detached)".to_string(),
+        0 if is_current => "no other instances on this branch".to_string(),
+        0 => "no running instances on this branch".to_string(),
+        1 => "terminated 1 instance".to_string(),
+        n => format!("terminated {n} instances"),
+    }
 }
 
 /// A service waiting for its dependencies to become ready.
@@ -140,6 +239,13 @@ pub struct App {
     /// When a frame was last drawn, bounding how long a missed invalidation can
     /// leave the UI stale.
     last_draw: Instant,
+    /// Sender for worker-thread completions, set once at the start of `run`.
+    /// `None` in tests and headless runs, where blocking work stays synchronous
+    /// because no event loop consumes the completions.
+    task_tx: Option<std::sync::mpsc::Sender<AppEvent>>,
+    /// The offloaded task currently in flight, if any. Suppresses duplicate
+    /// dispatches of the same action until its `TaskDone` arrives.
+    busy: Option<TaskKind>,
 }
 
 /// Options for creating an `App` without `clippy::too_many_arguments`.
@@ -281,6 +387,8 @@ impl App {
             last_drawn_gen: 0,
             last_drawn_proxy_fp: (0, 0),
             last_draw: Instant::now(),
+            task_tx: None,
+            busy: None,
         }
     }
 
@@ -344,6 +452,9 @@ impl App {
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
         let health_rx = crate::terminal::health_signal().subscribe();
         let (event_tx, event_rx) = std::sync::mpsc::channel::<AppEvent>();
+        // Hand handlers a sender so blocking work can be offloaded to a worker
+        // that reports back through this channel. Kept `None` in tests/headless.
+        self.task_tx = Some(event_tx.clone());
 
         // crossterm's event reader is not thread-safe: exactly one thread may
         // read from it. This reader owns the terminal input for the whole run.
@@ -431,30 +542,24 @@ impl App {
                 self.record_drawn();
             }
             match event_rx.recv_timeout(TICK_INTERVAL) {
-                Ok(AppEvent::Input(ev)) => {
-                    self.handle_event(ev)?;
-                    self.force_redraw = true;
-                }
-                Ok(AppEvent::Health) => {
-                    refresh_now = true;
-                    self.force_redraw = true;
+                Ok(ev) => {
+                    if self.handle_app_event(ev)? {
+                        refresh_now = true;
+                    }
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             }
-            // Drain any queued input without blocking so bursts stay responsive.
+            // Drain any queued events without blocking so bursts stay responsive.
             // This drain must handle every `AppEvent` variant: stopping at the
-            // first one it does not recognise would drop it and skip its effect
-            // (e.g. a `Health` refresh_now).
+            // first one it does not recognise would drop that event and skip its
+            // effect (e.g. a `Health` refresh_now).
             loop {
                 match event_rx.try_recv() {
-                    Ok(AppEvent::Input(ev)) => {
-                        self.handle_event(ev)?;
-                        self.force_redraw = true;
-                    }
-                    Ok(AppEvent::Health) => {
-                        refresh_now = true;
-                        self.force_redraw = true;
+                    Ok(ev) => {
+                        if self.handle_app_event(ev)? {
+                            refresh_now = true;
+                        }
                     }
                     Err(std::sync::mpsc::TryRecvError::Empty) => break,
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
@@ -485,45 +590,67 @@ impl App {
     /// break out of its run loop.
     fn prepare_exit(&mut self) -> bool {
         self.perform_handoff();
-        // Give the IPC thread a moment to send any handoffs before we
-        // drop our terminals.
-        if self
+        // Give the IPC thread a moment to send any handoffs before we drop our
+        // terminals.
+        let pending = self
             .ipc_state
             .handoff_req
             .lock()
             .expect("mutex poisoned")
-            .is_some()
-        {
-            let deadline = std::time::Instant::now() + Duration::from_secs(30);
-            while std::time::Instant::now() < deadline
-                && !self.ipc_state.handoff_done.load(Ordering::SeqCst)
-            {
-                thread::sleep(Duration::from_millis(20));
-            }
-            // If the transfer never completed (e.g. the connection
-            // dropped), close any prepared-but-unsent fds so they are
-            // not leaked. Reuse services themselves survive: they were
-            // marked handed-off and are not killed on teardown.
-            if !self.ipc_state.handoff_done.load(Ordering::SeqCst) {
-                let fds: Vec<_> = std::mem::take(
-                    &mut *self
-                        .ipc_state
-                        .handoff_results
-                        .lock()
-                        .expect("mutex poisoned"),
-                )
-                .into_iter()
-                .map(|h| h.fd)
-                .collect();
-                for fd in fds {
-                    // These handles were dupped for transfer and are owned by
-                    // this instance until sent.
-                    crate::fds::close(fd);
+            .is_some();
+        if pending {
+            // The wait can take up to 30s, which would freeze the UI. In an
+            // interactive run, offload it to a worker that reports back with
+            // `TaskDone { Quit }`; the completion handler finishes teardown.
+            // Headless runs have no event loop to receive that completion, so
+            // they wait synchronously as before.
+            if let Some(tx) = self.task_tx.clone() {
+                if self.busy == Some(TaskKind::Quit) {
+                    // A quit is already in flight; ignore the duplicate.
+                    return false;
                 }
+                let ipc_state = self.ipc_state.clone();
+                self.busy = Some(TaskKind::Quit);
+                thread::spawn(move || {
+                    wait_for_handoff_done(&ipc_state);
+                    let _ = tx.send(AppEvent::TaskDone {
+                        kind: TaskKind::Quit,
+                        result: Box::new(TaskResult::Quit),
+                    });
+                });
+                return false;
+            }
+            wait_for_handoff_done(&self.ipc_state);
+        }
+        self.finish_exit();
+        true
+    }
+
+    /// Completes shutdown once any handoff has been sent (or timed out): closes
+    /// any prepared-but-unsent fds, then requests the event loop to stop.
+    fn finish_exit(&mut self) {
+        // If the transfer never completed (e.g. the connection dropped), close
+        // any prepared-but-unsent fds so they are not leaked. Reuse services
+        // themselves survive: they were marked handed-off and are not killed on
+        // teardown.
+        if !self.ipc_state.handoff_done.load(Ordering::SeqCst) {
+            let fds: Vec<_> = std::mem::take(
+                &mut *self
+                    .ipc_state
+                    .handoff_results
+                    .lock()
+                    .expect("mutex poisoned"),
+            )
+            .into_iter()
+            .map(|h| h.fd)
+            .collect();
+            for fd in fds {
+                // These handles were dupped for transfer and are owned by this
+                // instance until sent.
+                crate::fds::close(fd);
             }
         }
         self.exit = true;
-        true
     }
 
     /// Runs the script headlessly, without a TUI. Used by detached (`-d`)
@@ -581,6 +708,47 @@ impl App {
             if reuse_skip.contains(&item.name) {
                 item.shutdown_cmd = None;
             }
+        }
+    }
+
+    /// Routes one event from the shared channel. Returns `true` when the event
+    /// asks for an immediate runtime-state refresh (currently only `Health`).
+    /// Every [`AppEvent`] variant is handled here so the callers' drain loops
+    /// never have to know about them.
+    fn handle_app_event(&mut self, ev: AppEvent) -> io::Result<bool> {
+        match ev {
+            AppEvent::Input(_) if self.busy == Some(TaskKind::Quit) => {
+                // Shutdown (waiting on the up-to-30s handoff) is in flight:
+                // ignore further input so nothing mutates state or re-requests
+                // exit before teardown completes.
+            }
+            AppEvent::Input(ev) => {
+                self.handle_event(ev)?;
+                self.force_redraw = true;
+            }
+            AppEvent::Health => {
+                self.force_redraw = true;
+                return Ok(true);
+            }
+            AppEvent::TaskDone { kind, result } => self.handle_task_done(kind, *result),
+        }
+        Ok(false)
+    }
+
+    /// Applies the outcome of an offloaded task, clearing the in-flight marker.
+    fn handle_task_done(&mut self, kind: TaskKind, result: TaskResult) {
+        if self.busy == Some(kind) {
+            self.busy = None;
+        }
+        self.force_redraw = true;
+        match result {
+            TaskResult::Quit => self.finish_exit(),
+            TaskResult::Worktrees(r) => self.install_switch_popup(r),
+            TaskResult::Terminated {
+                count,
+                branch_none,
+                is_current,
+            } => self.apply_terminated(count, branch_none, is_current),
         }
     }
 
@@ -874,16 +1042,42 @@ impl App {
     }
 
     /// Opens the worktree-switch popup, listing the repository's worktrees.
+    /// The git invocation and IPC socket scan run on a worker when an event
+    /// loop is present; the result arrives as [`AppEvent::TaskDone`]. Without a
+    /// sender (tests/headless) it runs inline as before.
     fn open_switch_popup(&mut self) {
+        if self.busy == Some(TaskKind::OpenSwitch) {
+            return;
+        }
         let config_dir = self
             .config_path
             .parent()
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-        match worktree::list(&config_dir) {
-            Some(worktrees) if !worktrees.is_empty() => {
+        let project = self.ipc_state.project.clone();
+        let script = self.ipc_state.script.clone();
+        if let Some(tx) = self.task_tx.clone() {
+            self.busy = Some(TaskKind::OpenSwitch);
+            thread::spawn(move || {
+                let result = collect_switch_data(config_dir, project, script);
+                let _ = tx.send(AppEvent::TaskDone {
+                    kind: TaskKind::OpenSwitch,
+                    result: Box::new(TaskResult::Worktrees(result)),
+                });
+            });
+        } else {
+            let result = collect_switch_data(config_dir, project, script);
+            self.install_switch_popup(result);
+        }
+    }
+
+    /// Opens the switch popup from a gathered worktree list, or reports the
+    /// failure (e.g. no git repository) exactly as before.
+    fn install_switch_popup(&mut self, result: Result<(Vec<Worktree>, Vec<String>), String>) {
+        match result {
+            Ok((worktrees, running)) => {
                 self.switch_popup = Some(SwitchPopup {
-                    running: self.running_branches(),
+                    running,
                     worktrees,
                     filter: String::new(),
                     selected: 0,
@@ -891,30 +1085,10 @@ impl App {
                     status: None,
                 });
             }
-            _ => {
-                self.errors
-                    .push("no git worktrees found in this repository".to_string());
+            Err(e) => {
+                self.errors.push(e);
             }
         }
-    }
-
-    /// Branches with a live fog instance serving this project's script,
-    /// discovered by scanning the project's IPC sockets. The instance
-    /// scanning already excludes this process, so the current branch is only
-    /// listed when a second instance serves it.
-    fn running_branches(&self) -> Vec<String> {
-        let Some(project) = self.ipc_state.project.as_deref() else {
-            return Vec::new();
-        };
-        let mut running = Vec::new();
-        for (_, _, status) in ipc::find_instances_any_branch(project, &self.ipc_state.script) {
-            if let Some(branch) = status.branch
-                && !running.contains(&branch)
-            {
-                running.push(branch);
-            }
-        }
-        running
     }
 
     /// Handles keys while the worktree-switch popup is open. In search mode
@@ -1014,6 +1188,9 @@ impl App {
     /// a target: the instance scan excludes the current process, so `d` on
     /// the current branch only kills *other* instances sharing that branch.
     fn terminate_selected_branch(&mut self) {
+        if self.busy == Some(TaskKind::TerminateBranch) {
+            return;
+        }
         let (branch, is_current) = {
             let Some(popup) = &self.switch_popup else {
                 return;
@@ -1032,24 +1209,36 @@ impl App {
         // we don't early-return here — we let the `find_*` scan decide.
         let project = self.ipc_state.project.clone();
         let script = self.ipc_state.script.clone();
-        let instances = match project {
-            Some(project) => ipc::find_instances_with_status(&project, &script, branch.as_deref())
-                .into_iter()
-                .map(|(pid, path, _)| (pid, path))
-                .collect::<Vec<_>>(),
-            None => Vec::new(),
-        };
-        let terminated = ipc::terminate_instances(&instances);
-        if let Some(popup) = &mut self.switch_popup {
-            popup.status = Some(match terminated {
-                0 if branch.is_none() => {
-                    "no running instances on this branch (detached)".to_string()
-                }
-                0 if is_current => "no other instances on this branch".to_string(),
-                0 => "no running instances on this branch".to_string(),
-                1 => "terminated 1 instance".to_string(),
-                n => format!("terminated {n} instances"),
+        let branch_none = branch.is_none();
+        // The scan and kill can take ~2s per instance (plus a SIGTERM grace
+        // period); offload them so the popup stays responsive.
+        if let Some(tx) = self.task_tx.clone() {
+            self.busy = Some(TaskKind::TerminateBranch);
+            if let Some(popup) = &mut self.switch_popup {
+                popup.status = Some("terminating…".to_string());
+            }
+            thread::spawn(move || {
+                let count =
+                    terminate_branch_instances(project.as_deref(), &script, branch.as_deref());
+                let _ = tx.send(AppEvent::TaskDone {
+                    kind: TaskKind::TerminateBranch,
+                    result: Box::new(TaskResult::Terminated {
+                        count,
+                        branch_none,
+                        is_current,
+                    }),
+                });
             });
+        } else {
+            let count = terminate_branch_instances(project.as_deref(), &script, branch.as_deref());
+            self.apply_terminated(count, branch_none, is_current);
+        }
+    }
+
+    /// Applies a branch-termination result to the popup's transient status.
+    fn apply_terminated(&mut self, count: usize, branch_none: bool, is_current: bool) {
+        if let Some(popup) = &mut self.switch_popup {
+            popup.status = Some(terminated_status(count, branch_none, is_current));
         }
     }
 
@@ -2229,6 +2418,8 @@ mod tests {
             last_drawn_gen: 0,
             last_drawn_proxy_fp: (0, 0),
             last_draw: Instant::now(),
+            task_tx: None,
+            busy: None,
         }
     }
 
