@@ -506,6 +506,10 @@ const KILL_LOG_TAIL: usize = 4;
 const SHUTDOWN_DONE: &str = "✓";
 const SHUTDOWN_PENDING: &str = "⠙";
 
+/// Braille frames a still-draining service's marker cycles through on a
+/// terminal, one per redraw (~10 Hz), so the checklist visibly spins.
+const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
 /// A service's live state while an instance is shutting down.
 struct ShutdownService {
     name: String,
@@ -527,6 +531,8 @@ struct StopProgress {
     printed: bool,
     last: Vec<ShutdownService>,
     last_render: std::time::Instant,
+    /// Index into [`SPINNER_FRAMES`] for the next redraw.
+    frame: usize,
 }
 
 impl StopProgress {
@@ -539,6 +545,7 @@ impl StopProgress {
             printed: false,
             last: Vec::new(),
             last_render: std::time::Instant::now() - Duration::from_millis(200),
+            frame: 0,
         }
     }
 
@@ -583,8 +590,10 @@ impl StopProgress {
             self.drawn = true;
         }
         // Restore the cursor and clear everything the previous block drew.
+        let pending = SPINNER_FRAMES[self.frame % SPINNER_FRAMES.len()];
+        self.frame = self.frame.wrapping_add(1);
         print!("\x1b8\x1b[J");
-        for line in shutdown_lines(services, |s| self.detail(s)) {
+        for line in shutdown_lines(services, pending, |s| self.detail(s)) {
             println!("{line}");
         }
         let _ = stdout().flush();
@@ -597,7 +606,7 @@ impl StopProgress {
                 "Shutting down fog instance {} (script '{}')...",
                 self.pid, self.script
             );
-            for line in shutdown_lines(services, |s| self.detail(s)) {
+            for line in shutdown_lines(services, SHUTDOWN_PENDING, |s| self.detail(s)) {
                 println!("{line}");
             }
             return;
@@ -635,24 +644,26 @@ impl StopProgress {
         }
         self.drawn = false;
         print!("\x1b8\x1b[J");
-        for line in shutdown_lines(&self.last, |_| Vec::new()) {
+        for line in shutdown_lines(&self.last, SHUTDOWN_PENDING, |_| Vec::new()) {
             println!("{line}");
         }
         let _ = stdout().flush();
     }
 }
 
-/// Builds the checklist rows for the shutdown view. `detail` supplies the
-/// extra lines shown under a service that has not stopped yet.
+/// Builds the checklist rows for the shutdown view. `pending` is the marker
+/// shown for a service that has not stopped yet; `detail` supplies the extra
+/// lines shown under it.
 fn shutdown_lines(
     services: &[ShutdownService],
+    pending: &str,
     detail: impl Fn(&ShutdownService) -> Vec<String>,
 ) -> Vec<String> {
     let width = services.iter().map(|s| s.name.len()).max().unwrap_or(0);
     let mut lines = Vec::new();
     for svc in services {
         let (marker, state) = if svc.running {
-            (SHUTDOWN_PENDING, "shutting down")
+            (pending, "shutting down")
         } else {
             (SHUTDOWN_DONE, "stopped")
         };
@@ -2778,7 +2789,7 @@ mod tests {
                 shutdown_cmd: None,
             },
         ];
-        let lines = shutdown_lines(&services, |s| match s.name.as_str() {
+        let lines = shutdown_lines(&services, SHUTDOWN_PENDING, |s| match s.name.as_str() {
             "web" => vec!["$ docker compose down".to_string()],
             "db" => vec!["db ready".to_string(), "db serving".to_string()],
             _ => Vec::new(),
@@ -2793,6 +2804,20 @@ mod tests {
                 "      db ready",
                 "      db serving",
             ]
+        );
+    }
+
+    #[test]
+    fn test_shutdown_lines_uses_spinner_frame() {
+        let services = vec![ShutdownService {
+            name: "web".into(),
+            running: true,
+            shutdown_cmd: None,
+        }];
+        let lines = shutdown_lines(&services, SPINNER_FRAMES[3], |_| Vec::new());
+        assert_eq!(
+            lines,
+            vec![format!("  {} web  shutting down", SPINNER_FRAMES[3])]
         );
     }
 
