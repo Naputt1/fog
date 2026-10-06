@@ -7,8 +7,7 @@ use crate::config_watcher;
 use crate::ipc;
 use crate::runtime;
 use crate::terminal::{HealthStatus, Init};
-use crossterm::event::{self, DisableMouseCapture};
-use crossterm::execute;
+use crossterm::event;
 use ratatui::DefaultTerminal;
 use std::io::{self, Write};
 use std::path::Path;
@@ -105,14 +104,11 @@ impl App {
             }
             self.handle_auto_scroll();
         }
-        self.clear_reuse_skip_shutdown_cmds();
-        self.teardown_services();
-        let _ = execute!(std::io::stdout(), DisableMouseCapture);
-        if !self.errors.is_empty() {
-            for err in &self.errors {
-                let _ = writeln!(std::io::stderr(), "{}", err);
-            }
-        }
+        // Teardown is deliberately left to the caller: it runs after the
+        // terminal is restored, so the interactive exit can render the same
+        // docker-style per-service shutdown progress `fog kill` shows instead
+        // of freezing the last frame inside the alternate screen. See
+        // `run_script` in `cli`.
         Ok(())
     }
 
@@ -151,11 +147,7 @@ impl App {
         }
         self.clear_reuse_skip_shutdown_cmds();
         self.teardown_services();
-        if !self.errors.is_empty() {
-            for err in &self.errors {
-                let _ = writeln!(std::io::stderr(), "{}", err);
-            }
-        }
+        self.report_errors();
         Ok(())
     }
 
@@ -221,21 +213,47 @@ impl App {
         }
     }
 
+    /// Number of service terminals this instance owns. The interactive exit
+    /// path uses it to drive teardown one service at a time while rendering
+    /// shutdown progress.
+    pub(crate) fn service_count(&self) -> usize {
+        self.items.len()
+    }
+
+    /// Tears the service at `i` down, republishing the IPC status and pausing
+    /// briefly so a watcher polling at ~10 Hz observes the transition instead
+    /// of the whole teardown completing in one frame.
+    ///
+    /// `Terminal::teardown` is idempotent, so the later `Drop` of the terminal
+    /// is a no-op. Called from the headless run loop, and from `run_script`
+    /// after the terminal is restored for interactive runs, before the IPC
+    /// socket is removed.
+    pub(crate) fn teardown_service(&mut self, i: usize) {
+        self.items[i].teardown();
+        // Publish this service as stopped before moving on.
+        self.update_shared_state();
+        thread::sleep(Duration::from_millis(120));
+    }
+
     /// Tears every service down one at a time, republishing the IPC status
     /// after each so a `fog kill` watcher can render docker-style per-service
     /// shutdown progress (which services have stopped, and the `shutdown_cmd`
     /// or tail of the log of those still draining).
     ///
-    /// `Terminal::teardown` is idempotent, so the later `Drop` of each terminal
-    /// is a no-op. Called from the run loops before the IPC socket is removed.
+    /// The headless run loop uses this; interactive runs step through
+    /// [`teardown_service`](Self::teardown_service) so each transition can be
+    /// rendered to the restored terminal.
     pub(crate) fn teardown_services(&mut self) {
         for i in 0..self.items.len() {
-            self.items[i].teardown();
-            // Publish this service as stopped before moving on, and pause
-            // briefly so a watcher polling at ~10 Hz observes the transition
-            // instead of the whole teardown completing in one frame.
-            self.update_shared_state();
-            thread::sleep(Duration::from_millis(120));
+            self.teardown_service(i);
+        }
+    }
+
+    /// Writes accumulated non-fatal errors to stderr. Called after the terminal
+    /// is restored so the messages are visible.
+    pub(crate) fn report_errors(&self) {
+        for err in &self.errors {
+            let _ = writeln!(std::io::stderr(), "{}", err);
         }
     }
 

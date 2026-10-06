@@ -30,6 +30,8 @@ Default mode. Navigate tabs, scroll, and access commands.
 | `?` | Toggle help overlay |
 | `Ctrl+q` | Quit fog |
 
+Quitting restores the terminal, then shows docker-style per-service shutdown progress (the same checklist `fog kill` prints) while each service stops.
+
 ## Terminal Input mode
 
 Entered by pressing `i` on a service or shell tab. Keystrokes are sent directly to the running process.
