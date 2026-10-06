@@ -106,6 +106,7 @@ impl App {
             self.handle_auto_scroll();
         }
         self.clear_reuse_skip_shutdown_cmds();
+        self.teardown_services();
         let _ = execute!(std::io::stdout(), DisableMouseCapture);
         if !self.errors.is_empty() {
             for err in &self.errors {
@@ -149,6 +150,7 @@ impl App {
             }
         }
         self.clear_reuse_skip_shutdown_cmds();
+        self.teardown_services();
         if !self.errors.is_empty() {
             for err in &self.errors {
                 let _ = writeln!(std::io::stderr(), "{}", err);
@@ -216,6 +218,24 @@ impl App {
             if reuse_skip.contains(&item.name) {
                 item.shutdown_cmd = None;
             }
+        }
+    }
+
+    /// Tears every service down one at a time, republishing the IPC status
+    /// after each so a `fog kill` watcher can render docker-style per-service
+    /// shutdown progress (which services have stopped, and the `shutdown_cmd`
+    /// or tail of the log of those still draining).
+    ///
+    /// `Terminal::teardown` is idempotent, so the later `Drop` of each terminal
+    /// is a no-op. Called from the run loops before the IPC socket is removed.
+    pub(crate) fn teardown_services(&mut self) {
+        for i in 0..self.items.len() {
+            self.items[i].teardown();
+            // Publish this service as stopped before moving on, and pause
+            // briefly so a watcher polling at ~10 Hz observes the transition
+            // instead of the whole teardown completing in one frame.
+            self.update_shared_state();
+            thread::sleep(Duration::from_millis(120));
         }
     }
 
@@ -386,6 +406,7 @@ impl App {
                 running: !item.stopped && item.process_running,
                 health: format!("{:?}", item.get_health_status()).to_lowercase(),
                 endpoints: item.endpoint_statuses(),
+                shutdown_cmd: item.shutdown_cmd.clone(),
             });
         }
         let mut proxy = self.ipc_state.proxy.lock().expect("mutex poisoned");

@@ -28,6 +28,11 @@ pub struct ServiceStatus {
     /// the wire form when empty so older readers are unaffected.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub endpoints: Vec<EndpointStatus>,
+    /// The service's `shutdown_cmd`, when configured. Shown by `fog kill`
+    /// while the service is being torn down. Omitted from the wire form when
+    /// unset so older readers are unaffected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shutdown_cmd: Option<String>,
 }
 
 /// Allocated port map for an instance (symbolic name -> host port).

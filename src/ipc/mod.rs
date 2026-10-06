@@ -140,6 +140,7 @@ mod tests {
             running: true,
             health: "healthy".into(),
             endpoints: Vec::new(),
+            shutdown_cmd: None,
         });
         state.proxy.lock().unwrap().replace(ProxyStatus {
             running: true,
