@@ -189,7 +189,9 @@ function ServicePanel({
             type="button"
             onClick={onClose}
             aria-label="Close"
-            className={cn(buttonVariants({ variant: "ghost", size: "icon-sm" }))}
+            className={cn(
+              buttonVariants({ variant: "ghost", size: "icon-sm" })
+            )}
           >
             <X className="size-4" />
           </button>
