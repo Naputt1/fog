@@ -157,6 +157,10 @@ pub struct Terminal {
     /// Set once the child has been reaped (`waitpid`). A reaped PID must never
     /// be signaled again: the OS may have reused it for an unrelated process.
     child_reaped: bool,
+    /// Set once [`teardown`](Self::teardown) has run, so the later `Drop` does
+    /// not tear the service down a second time. The App tears services down
+    /// eagerly to publish shutdown progress over IPC while still owning them.
+    torn_down: bool,
     parser: Arc<Mutex<vt100::Parser>>,
     health_status: Arc<Mutex<HealthStatus>>,
     /// Set when this terminal is dropped, so its health-check thread exits.
@@ -307,6 +311,7 @@ impl Terminal {
             stop_w,
             handed_off: false,
             child_reaped: false,
+            torn_down: false,
             parser,
             health_status: Arc::new(Mutex::new(HealthStatus::Unknown)),
             health_stop: Arc::new(AtomicBool::new(false)),
@@ -371,6 +376,7 @@ impl Terminal {
             stop_w: None,
             handed_off: false,
             child_reaped: false,
+            torn_down: false,
             parser: Arc::new(Mutex::new(vt100::Parser::new(24, 80, scrollback))),
             health_status: Arc::new(Mutex::new(HealthStatus::Unknown)),
             health_stop: Arc::new(AtomicBool::new(false)),
@@ -427,6 +433,7 @@ impl Terminal {
             stop_w: None,
             handed_off: false,
             child_reaped: false,
+            torn_down: false,
             parser,
             endpoints: Vec::new(),
             health_status: Arc::new(Mutex::new(HealthStatus::Unhealthy)),
@@ -484,6 +491,7 @@ impl Terminal {
             stop_w: None,
             handed_off: false,
             child_reaped: false,
+            torn_down: false,
             parser,
             endpoints: Vec::new(),
             health_status: Arc::new(Mutex::new(HealthStatus::Pending)),
@@ -542,6 +550,7 @@ impl Terminal {
             stop_w: None,
             handed_off: false,
             child_reaped: false,
+            torn_down: false,
             parser,
             health_status: Arc::new(Mutex::new(HealthStatus::Unknown)),
             health_stop: Arc::new(AtomicBool::new(false)),
@@ -663,6 +672,7 @@ impl Terminal {
             stop_w: if stop_w >= 0 { Some(stop_w) } else { None },
             handed_off: false,
             child_reaped: false,
+            torn_down: false,
             parser,
             health_status: Arc::new(Mutex::new(HealthStatus::Unknown)),
             health_stop: Arc::new(AtomicBool::new(false)),
@@ -1571,8 +1581,18 @@ impl Terminal {
     }
 }
 
-impl Drop for Terminal {
-    fn drop(&mut self) {
+impl Terminal {
+    /// Tears this terminal down: stops its health checks, optionally saves its
+    /// logs, kills the process tree, and runs the `shutdown_cmd`.
+    ///
+    /// Idempotent, so the App can tear services down eagerly (publishing
+    /// shutdown progress over IPC while still owning them) and `Drop` can call
+    /// this again as a harmless fallback for terminals dropped elsewhere.
+    pub fn teardown(&mut self) {
+        if self.torn_down {
+            return;
+        }
+        self.torn_down = true;
         // Stop the health-check thread so it does not outlive this terminal
         // (relevant when services are replaced by an in-place worktree switch).
         self.health_stop.store(true, Ordering::SeqCst);
@@ -1614,6 +1634,12 @@ impl Drop for Terminal {
         if !self.handed_off && last_instance {
             self.run_shutdown_cmd();
         }
+    }
+}
+
+impl Drop for Terminal {
+    fn drop(&mut self) {
+        self.teardown();
     }
 }
 

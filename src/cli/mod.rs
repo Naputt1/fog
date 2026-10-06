@@ -10,7 +10,7 @@ use crossterm::terminal::{
 };
 use std::collections::HashMap;
 use std::ffi::OsString;
-use std::io::{BufRead, BufReader, stdout};
+use std::io::{BufRead, BufReader, IsTerminal, Write, stdout};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -32,6 +32,10 @@ const DEFAULT_SCROLLBACK: usize = 2000;
 const LOCK_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a replacer waits for the old instance to fully exit.
 const RECLAIM_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a graceful `fog kill` waits for the instance to drain its services
+/// (rendering per-service progress) before suggesting `--force`. Services tear
+/// down sequentially, so this must cover the whole teardown, not one service.
+const KILL_GRACE_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long the parent of a detached run waits for the daemon to start serving
 /// before reporting failure. Covers the owner-lock wait plus the reclaim.
 const DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(60);
@@ -494,6 +498,194 @@ fn cmd_ls() -> io::Result<()> {
     Ok(())
 }
 
+/// How many trailing log lines `fog kill` shows for a service that has not
+/// finished shutting down and has no `shutdown_cmd` to display instead.
+const KILL_LOG_TAIL: usize = 4;
+
+/// Checklist markers for a service that has vs. has not stopped.
+const SHUTDOWN_DONE: &str = "✓";
+const SHUTDOWN_PENDING: &str = "⠙";
+
+/// A service's live state while an instance is shutting down.
+struct ShutdownService {
+    name: String,
+    running: bool,
+    shutdown_cmd: Option<String>,
+}
+
+/// Renders per-service shutdown progress for `fog kill`, docker-style: a
+/// checklist of every service, with each not-yet-stopped service followed by
+/// its `shutdown_cmd` (or the tail of its log). On a terminal it redraws in
+/// place; when piped it appends a line per state change.
+struct StopProgress {
+    pid: u32,
+    tty: bool,
+    script: String,
+    /// Whether the live block has been drawn (TTY only).
+    drawn: bool,
+    /// Whether the initial checklist has been printed (piped only).
+    printed: bool,
+    last: Vec<ShutdownService>,
+    last_render: std::time::Instant,
+}
+
+impl StopProgress {
+    fn new(pid: u32) -> Self {
+        Self {
+            pid,
+            tty: stdout().is_terminal(),
+            script: String::new(),
+            drawn: false,
+            printed: false,
+            last: Vec::new(),
+            last_render: std::time::Instant::now() - Duration::from_millis(200),
+        }
+    }
+
+    /// Polls the instance status and redraws, throttled to ~10 Hz so a fast
+    /// query loop does not flicker.
+    fn tick(&mut self, path: &Path) {
+        if self.last_render.elapsed() < Duration::from_millis(100) {
+            return;
+        }
+        let Ok(status) = ipc::query_status(path) else {
+            return;
+        };
+        self.last_render = std::time::Instant::now();
+        if self.script.is_empty() {
+            self.script = status.script.clone();
+        }
+        let services: Vec<ShutdownService> = status
+            .services
+            .iter()
+            .map(|s| ShutdownService {
+                name: s.name.clone(),
+                running: s.running,
+                shutdown_cmd: s.shutdown_cmd.clone(),
+            })
+            .collect();
+        if self.tty {
+            self.render_live(&services);
+        } else {
+            self.render_appended(&services);
+        }
+        self.last = services;
+    }
+
+    fn render_live(&mut self, services: &[ShutdownService]) {
+        if !self.drawn {
+            println!(
+                "Shutting down fog instance {} (script '{}')...",
+                self.pid, self.script
+            );
+            // Save the cursor so each redraw returns to the block start.
+            print!("\x1b7");
+            self.drawn = true;
+        }
+        // Restore the cursor and clear everything the previous block drew.
+        print!("\x1b8\x1b[J");
+        for line in shutdown_lines(services, |s| self.detail(s)) {
+            println!("{line}");
+        }
+        let _ = stdout().flush();
+    }
+
+    fn render_appended(&mut self, services: &[ShutdownService]) {
+        if !self.printed {
+            self.printed = true;
+            println!(
+                "Shutting down fog instance {} (script '{}')...",
+                self.pid, self.script
+            );
+            for line in shutdown_lines(services, |s| self.detail(s)) {
+                println!("{line}");
+            }
+            return;
+        }
+        // Append a line as each service transitions to stopped.
+        for svc in services {
+            let was_running = self
+                .last
+                .iter()
+                .find(|p| p.name == svc.name)
+                .is_some_and(|p| p.running);
+            if was_running && !svc.running {
+                println!("  {} {}  stopped", SHUTDOWN_DONE, svc.name);
+            }
+        }
+    }
+
+    /// Detail lines for one still-shutting-down service: its `shutdown_cmd`
+    /// when configured, otherwise the last few captured log lines.
+    fn detail(&self, svc: &ShutdownService) -> Vec<String> {
+        if !svc.running {
+            return Vec::new();
+        }
+        if let Some(cmd) = &svc.shutdown_cmd {
+            return vec![format!("$ {cmd}")];
+        }
+        tail_log_lines(self.pid, &svc.name, KILL_LOG_TAIL)
+    }
+
+    /// Clears the live block and leaves a settled checklist on the terminal, so
+    /// the outcome stays visible instead of being erased.
+    fn finish(&mut self) {
+        if !self.drawn {
+            return;
+        }
+        self.drawn = false;
+        print!("\x1b8\x1b[J");
+        for line in shutdown_lines(&self.last, |_| Vec::new()) {
+            println!("{line}");
+        }
+        let _ = stdout().flush();
+    }
+}
+
+/// Builds the checklist rows for the shutdown view. `detail` supplies the
+/// extra lines shown under a service that has not stopped yet.
+fn shutdown_lines(
+    services: &[ShutdownService],
+    detail: impl Fn(&ShutdownService) -> Vec<String>,
+) -> Vec<String> {
+    let width = services.iter().map(|s| s.name.len()).max().unwrap_or(0);
+    let mut lines = Vec::new();
+    for svc in services {
+        let (marker, state) = if svc.running {
+            (SHUTDOWN_PENDING, "shutting down")
+        } else {
+            (SHUTDOWN_DONE, "stopped")
+        };
+        lines.push(format!("  {marker} {:<width$}  {state}", svc.name));
+        for d in detail(svc) {
+            lines.push(format!("      {d}"));
+        }
+    }
+    lines
+}
+
+/// The last `n` non-empty lines of a service's captured log, ANSI stripped.
+fn tail_log_lines(pid: u32, name: &str, n: usize) -> Vec<String> {
+    let file = ipc::instance_log_dir(pid).join(format!("{}.log", ipc::sanitize_service_name(name)));
+    let Ok(content) = fs::read_to_string(&file) else {
+        return Vec::new();
+    };
+    last_lines(&strip_ansi(&content), n)
+}
+
+/// The last `n` non-empty lines of `text`, right-trimmed.
+fn last_lines(text: &str, n: usize) -> Vec<String> {
+    let mut lines: Vec<String> = text
+        .lines()
+        .map(|l| l.trim_end().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+    if lines.len() > n {
+        lines.drain(0..lines.len() - n);
+    }
+    lines
+}
+
 /// Asks the instance at `path` to stop and waits for it to exit.
 ///
 /// The instance is first asked to shut down gracefully over IPC (so services
@@ -501,16 +693,35 @@ fn cmd_ls() -> io::Result<()> {
 /// kill flag will not exit on its own, so with `force` we escalate: SIGTERM to
 /// the process tree, then SIGKILL, which cannot be caught or blocked.
 ///
+/// With `progress`, the wait renders each service's shutdown state
+/// (docker-style) from the same IPC status the instance publishes as it tears
+/// down.
+///
 /// Returns `true` once the process is no longer alive.
-fn stop_instance(pid: u32, path: &Path, force: bool) -> bool {
+fn stop_instance(pid: u32, path: &Path, force: bool, progress: bool) -> bool {
     if let Err(e) = ipc::send_kill(path) {
         eprintln!("warning: could not reach instance {pid}: {e}");
     }
-    if wait_for_pid_exit(pid, Duration::from_millis(2500)) {
+
+    let mut view = progress.then(|| StopProgress::new(pid));
+    if let Some(v) = view.as_mut() {
+        v.tick(path);
+    }
+
+    // A graceful kill waits for the services to drain, rendering progress as
+    // they do. `--force` keeps the short grace so it can escalate quickly.
+    let grace = if force {
+        Duration::from_millis(2500)
+    } else {
+        KILL_GRACE_TIMEOUT
+    };
+    if wait_for_pid_exit(pid, grace, path, view.as_mut()) {
+        finish_view(view.as_mut());
         return true;
     }
 
     if !force {
+        finish_view(view.as_mut());
         eprintln!("warning: instance {pid} did not stop; retry with `fog kill --force {pid}`");
         return false;
     }
@@ -519,15 +730,24 @@ fn stop_instance(pid: u32, path: &Path, force: bool) -> bool {
     // fog instance registers a SIGTERM handler (the `ctrlc` termination
     // feature), so a wedged loop can ignore the former but never the latter.
     signal_instance(pid, crate::process::Signal::Term);
-    if wait_for_pid_exit(pid, Duration::from_millis(1000)) {
+    if wait_for_pid_exit(pid, Duration::from_millis(1000), path, view.as_mut()) {
+        finish_view(view.as_mut());
         return true;
     }
     signal_instance(pid, crate::process::Signal::Kill);
-    let exited = wait_for_pid_exit(pid, Duration::from_millis(2000));
+    let exited = wait_for_pid_exit(pid, Duration::from_millis(2000), path, view.as_mut());
+    finish_view(view.as_mut());
     if !exited {
         eprintln!("warning: instance {pid} survived SIGKILL");
     }
     exited
+}
+
+/// Finalizes a shutdown progress view, if one is active.
+fn finish_view(view: Option<&mut StopProgress>) {
+    if let Some(v) = view {
+        v.finish();
+    }
 }
 
 /// Signals the instance's whole process tree and the process itself.
@@ -542,10 +762,19 @@ fn signal_instance(pid: u32, signal: crate::process::Signal) {
     let _ = crate::process::kill_process(pid, signal);
 }
 
-/// Waits until `pid` is no longer alive, up to `timeout`.
-fn wait_for_pid_exit(pid: u32, timeout: Duration) -> bool {
+/// Waits until `pid` is no longer alive, up to `timeout`, polling the
+/// instance's shutdown progress while it drains.
+fn wait_for_pid_exit(
+    pid: u32,
+    timeout: Duration,
+    path: &Path,
+    mut progress: Option<&mut StopProgress>,
+) -> bool {
     let deadline = std::time::Instant::now() + timeout;
     loop {
+        if let Some(p) = progress.as_deref_mut() {
+            p.tick(path);
+        }
         if !crate::process::is_pid_alive(pid) {
             return true;
         }
@@ -567,7 +796,7 @@ fn cmd_kill(pid: Option<u32>, all: bool, cli: &Cli) -> io::Result<()> {
     let targets = resolve_targets(&instances, pid, all, cli, "kill");
     for (target_pid, path) in &targets {
         let target_pid = *target_pid;
-        if stop_instance(target_pid, path, cli.force) {
+        if stop_instance(target_pid, path, cli.force, true) {
             println!("stopped fog instance {target_pid}");
         } else {
             eprintln!("warning: fog instance {target_pid} is still running");
@@ -602,7 +831,7 @@ fn cmd_restart(pid: Option<u32>, all: bool, cli: &Cli) -> io::Result<()> {
         // Wait for the old instance to fully exit before relaunching to avoid
         // port conflicts and owner-lock races. `--force` escalates to SIGKILL
         // so a wedged instance does not block the restart.
-        if stop_instance(target_pid, path, cli.force) {
+        if stop_instance(target_pid, path, cli.force, false) {
             println!("stopped fog instance {target_pid} (script '{script}')");
         } else {
             eprintln!(
@@ -2176,6 +2405,7 @@ mod tests {
             running,
             health: health.to_string(),
             endpoints: Vec::new(),
+            shutdown_cmd: None,
         }
     }
 
@@ -2511,10 +2741,59 @@ mod tests {
         // No instance socket exists, so the graceful IPC attempt fails; force
         // must still terminate the process.
         let bogus = std::env::temp_dir().join(format!("fog-nonexistent-{pid}.sock"));
-        let stopped = stop_instance(pid, &bogus, true);
+        let stopped = stop_instance(pid, &bogus, true, false);
         assert!(stopped, "force stop must terminate the process");
         reaper.join().expect("reaper thread");
         assert!(!crate::process::is_pid_alive(pid));
+    }
+
+    #[test]
+    fn test_last_lines_keeps_nonempty_tail() {
+        let text = "one\ntwo\n\nthree\nfour\nfive\n";
+        assert_eq!(last_lines(text, 4), vec!["two", "three", "four", "five"]);
+        // Fewer lines than requested returns them all.
+        assert_eq!(
+            last_lines(text, 10),
+            vec!["one", "two", "three", "four", "five"]
+        );
+        assert!(last_lines("", 4).is_empty());
+    }
+
+    #[test]
+    fn test_shutdown_lines_checklist() {
+        let services = vec![
+            ShutdownService {
+                name: "api".into(),
+                running: false,
+                shutdown_cmd: None,
+            },
+            ShutdownService {
+                name: "web".into(),
+                running: true,
+                shutdown_cmd: Some("docker compose down".into()),
+            },
+            ShutdownService {
+                name: "db".into(),
+                running: true,
+                shutdown_cmd: None,
+            },
+        ];
+        let lines = shutdown_lines(&services, |s| match s.name.as_str() {
+            "web" => vec!["$ docker compose down".to_string()],
+            "db" => vec!["db ready".to_string(), "db serving".to_string()],
+            _ => Vec::new(),
+        });
+        assert_eq!(
+            lines,
+            vec![
+                "  ✓ api  stopped",
+                "  ⠙ web  shutting down",
+                "      $ docker compose down",
+                "  ⠙ db   shutting down",
+                "      db ready",
+                "      db serving",
+            ]
+        );
     }
 
     #[test]
