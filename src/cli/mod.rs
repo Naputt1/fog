@@ -510,6 +510,22 @@ const SHUTDOWN_PENDING: &str = "⠙";
 /// terminal, one per redraw (~10 Hz), so the checklist visibly spins.
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
+/// ANSI SGR codes for the checklist markers: a blue spinner for a service
+/// still draining, a green tick for one that has stopped.
+const MARKER_BLUE: &str = "\x1b[94m";
+const MARKER_GREEN: &str = "\x1b[92m";
+const ANSI_RESET: &str = "\x1b[0m";
+
+/// Wraps `text` in `ansi` when `enable`, else returns it unchanged so piped
+/// output (which is not a terminal) stays plain.
+fn colored(text: &str, ansi: &str, enable: bool) -> String {
+    if enable {
+        format!("{ansi}{text}{ANSI_RESET}")
+    } else {
+        text.to_string()
+    }
+}
+
 /// A service's live state while an instance is shutting down.
 struct ShutdownService {
     name: String,
@@ -555,6 +571,13 @@ impl StopProgress {
         if self.last_render.elapsed() < Duration::from_millis(100) {
             return;
         }
+        self.refresh(path);
+    }
+
+    /// Polls the instance status and redraws unconditionally. `tick` throttles
+    /// this; callers that need the latest state immediately (such as the
+    /// interactive exit before drawing the settled checklist) call it directly.
+    fn refresh(&mut self, path: &Path) {
         let Ok(status) = ipc::query_status(path) else {
             return;
         };
@@ -593,7 +616,7 @@ impl StopProgress {
         let pending = SPINNER_FRAMES[self.frame % SPINNER_FRAMES.len()];
         self.frame = self.frame.wrapping_add(1);
         print!("\x1b8\x1b[J");
-        for line in shutdown_lines(services, pending, |s| self.detail(s)) {
+        for line in shutdown_lines(services, pending, self.tty, |s| self.detail(s)) {
             println!("{line}");
         }
         let _ = stdout().flush();
@@ -606,7 +629,7 @@ impl StopProgress {
                 "Shutting down fog instance {} (script '{}')...",
                 self.pid, self.script
             );
-            for line in shutdown_lines(services, SHUTDOWN_PENDING, |s| self.detail(s)) {
+            for line in shutdown_lines(services, SHUTDOWN_PENDING, false, |s| self.detail(s)) {
                 println!("{line}");
             }
             return;
@@ -644,7 +667,7 @@ impl StopProgress {
         }
         self.drawn = false;
         print!("\x1b8\x1b[J");
-        for line in shutdown_lines(&self.last, SHUTDOWN_PENDING, |_| Vec::new()) {
+        for line in shutdown_lines(&self.last, SHUTDOWN_PENDING, self.tty, |_| Vec::new()) {
             println!("{line}");
         }
         let _ = stdout().flush();
@@ -657,15 +680,16 @@ impl StopProgress {
 fn shutdown_lines(
     services: &[ShutdownService],
     pending: &str,
+    color: bool,
     detail: impl Fn(&ShutdownService) -> Vec<String>,
 ) -> Vec<String> {
     let width = services.iter().map(|s| s.name.len()).max().unwrap_or(0);
     let mut lines = Vec::new();
     for svc in services {
         let (marker, state) = if svc.running {
-            (pending, "shutting down")
+            (colored(pending, MARKER_BLUE, color), "shutting down")
         } else {
-            (SHUTDOWN_DONE, "stopped")
+            (colored(SHUTDOWN_DONE, MARKER_GREEN, color), "stopped")
         };
         lines.push(format!("  {marker} {:<width$}  {state}", svc.name));
         for d in detail(svc) {
@@ -1985,7 +2009,48 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
     if detached {
         app.run_headless()?;
     } else {
-        ratatui::run(|terminal| app.run(terminal))?;
+        // `App::run` returns as soon as exit is requested without tearing
+        // services down. `ratatui::run` has restored the alternate screen by
+        // the time it returns, so teardown happens on the normal terminal and
+        // can render the same docker-style per-service shutdown progress
+        // `fog kill` shows (reusing the instance's own IPC status).
+        let run_result = ratatui::run(|terminal| app.run(terminal));
+        // `ratatui::run` leaves the alternate screen, but the `TerminalGuard`
+        // also entered it (and enabled mouse capture); restore it explicitly so
+        // progress is printed to the normal screen.
+        TerminalGuard::restore();
+        let path = ipc::current_socket_path();
+        // Each `teardown_service` blocks for the whole teardown (kill grace +
+        // reap), so a spinner advanced only at service boundaries would look
+        // frozen. Pump the view from a background thread at the same cadence
+        // `fog kill` uses while the main thread tears services down.
+        let mut view = StopProgress::new(std::process::id());
+        view.refresh(&path);
+        let stop = Arc::new(AtomicBool::new(false));
+        let render = {
+            let stop = Arc::clone(&stop);
+            let path = path.clone();
+            let mut view = view;
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    view.tick(&path);
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                view
+            })
+        };
+        app.clear_reuse_skip_shutdown_cmds();
+        for i in 0..app.service_count() {
+            app.teardown_service(i);
+        }
+        stop.store(true, Ordering::Relaxed);
+        if let Ok(mut view) = render.join() {
+            // Pick up the final state before the settled checklist is drawn.
+            view.refresh(&path);
+            view.finish();
+        }
+        app.report_errors();
+        run_result?;
     }
 
     if config.effective_should_serve_index() {
@@ -2789,10 +2854,12 @@ mod tests {
                 shutdown_cmd: None,
             },
         ];
-        let lines = shutdown_lines(&services, SHUTDOWN_PENDING, |s| match s.name.as_str() {
-            "web" => vec!["$ docker compose down".to_string()],
-            "db" => vec!["db ready".to_string(), "db serving".to_string()],
-            _ => Vec::new(),
+        let lines = shutdown_lines(&services, SHUTDOWN_PENDING, false, |s| {
+            match s.name.as_str() {
+                "web" => vec!["$ docker compose down".to_string()],
+                "db" => vec!["db ready".to_string(), "db serving".to_string()],
+                _ => Vec::new(),
+            }
         });
         assert_eq!(
             lines,
@@ -2814,10 +2881,34 @@ mod tests {
             running: true,
             shutdown_cmd: None,
         }];
-        let lines = shutdown_lines(&services, SPINNER_FRAMES[3], |_| Vec::new());
+        let lines = shutdown_lines(&services, SPINNER_FRAMES[3], false, |_| Vec::new());
         assert_eq!(
             lines,
             vec![format!("  {} web  shutting down", SPINNER_FRAMES[3])]
+        );
+    }
+
+    #[test]
+    fn test_shutdown_lines_colors_markers() {
+        let services = vec![
+            ShutdownService {
+                name: "api".into(),
+                running: false,
+                shutdown_cmd: None,
+            },
+            ShutdownService {
+                name: "web".into(),
+                running: true,
+                shutdown_cmd: None,
+            },
+        ];
+        let lines = shutdown_lines(&services, SHUTDOWN_PENDING, true, |_| Vec::new());
+        assert_eq!(
+            lines,
+            vec![
+                format!("  {}✓{} api  stopped", MARKER_GREEN, ANSI_RESET),
+                format!("  {}⠙{} web  shutting down", MARKER_BLUE, ANSI_RESET),
+            ]
         );
     }
 
