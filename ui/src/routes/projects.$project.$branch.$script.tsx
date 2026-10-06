@@ -28,11 +28,12 @@ import {
 import { buttonVariants } from "@/components/ui/button-variants";
 import { Card, CardContent } from "@/components/ui/card";
 import {
-  Sheet,
-  SheetContent,
-  SheetHeader,
-  SheetTitle,
-} from "@/components/ui/sheet";
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Sheet, SheetContent } from "@/components/ui/sheet";
 import {
   Table,
   TableBody,
@@ -42,6 +43,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { cn, toDisplayEndpointUrl } from "@/lib/utils";
+import { useMediaQuery } from "@/lib/use-media-query";
 
 export const Route = createFileRoute("/projects/$project/$branch/$script")({
   validateSearch: (
@@ -124,6 +126,94 @@ function EndpointList({ svc }: { svc: InstanceServiceView }) {
   );
 }
 
+/** Resolve the container fog addresses for logs/PTY, matching fog's naming. */
+const containerOf = (svc: InstanceServiceView, pid: number) =>
+  svc.service?.container ?? `fog-${pid}-${svc.name}`;
+
+/**
+ * Header + terminal body for the selected service. Shared by the mobile bottom
+ * `Sheet` and the desktop centered `Dialog`, which differ only in their outer
+ * surface.
+ */
+function ServicePanel({
+  selected,
+  projectName,
+  label,
+  script,
+  view,
+  mode,
+  onModeChange,
+  onClose,
+}: {
+  selected: { inst: InstanceView; svc: InstanceServiceView };
+  projectName: string;
+  label: string;
+  script: string;
+  view?: TerminalMode;
+  mode: TerminalMode;
+  onModeChange: (mode: TerminalMode) => void;
+  onClose: () => void;
+}) {
+  const { inst, svc } = selected;
+  return (
+    <>
+      <DialogHeader>
+        <div className="flex min-w-0 flex-col">
+          <div className="flex min-w-0 items-center gap-2">
+            <DialogTitle>{svc.name}</DialogTitle>
+            <StatusBadge status={svc.running ? "running" : "stopped"} />
+          </div>
+          <span className="text-muted-foreground text-2xs truncate font-mono">
+            {projectName} @ {label} · {script} pid {inst.pid}
+          </span>
+        </div>
+        <div className="ml-auto flex shrink-0 flex-wrap items-center justify-end gap-1">
+          <RowActions inst={inst} svc={svc} />
+          <Link
+            to="/logs"
+            search={{
+              project: projectName,
+              service: svc.service?.container ?? svc.name,
+              view,
+            }}
+            title="Open full-page terminal"
+            className={cn(
+              buttonVariants({ variant: "ghost", size: "sm" }),
+              "font-mono"
+            )}
+          >
+            <ExternalLink className="size-4" />
+            <span className="hidden sm:inline">Full page</span>
+          </Link>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close"
+            className={cn(
+              buttonVariants({ variant: "ghost", size: "icon-sm" })
+            )}
+          >
+            <X className="size-4" />
+          </button>
+        </div>
+      </DialogHeader>
+      <div className="flex min-h-0 flex-1 flex-col p-3">
+        <ServiceTerminal
+          key={`${inst.pid}:${svc.name}`}
+          active={{
+            container: containerOf(svc, inst.pid),
+            service: svc.name,
+            pid: svc.service?.pid ?? null,
+          }}
+          mode={mode}
+          onModeChange={onModeChange}
+          showModeToggle={svc.service?.pid != null}
+        />
+      </div>
+    </>
+  );
+}
+
 function ScriptServicesPage() {
   const { project, branch, script } = Route.useParams();
   const search = Route.useSearch();
@@ -171,6 +261,10 @@ function ScriptServicesPage() {
     : null;
 
   const mode: TerminalMode = search.view ?? "logs";
+  // Matches the table/card breakpoint below: `lg` renders the desktop table,
+  // so the desktop surface should open a centered popup rather than a bottom
+  // sheet.
+  const isDesktop = useMediaQuery("(min-width: 1024px)");
 
   const openService = (pid: number, name: string) => {
     void navigate({
@@ -226,9 +320,6 @@ function ScriptServicesPage() {
       </Card>
     );
   }
-
-  const containerOf = (svc: InstanceServiceView, pid: number) =>
-    svc.service?.container ?? `fog-${pid}-${svc.name}`;
 
   return (
     <div className="min-w-0 space-y-4">
@@ -443,90 +534,71 @@ function ScriptServicesPage() {
         </section>
       ))}
 
-      {/* Bottom drawer: logs (SSE) with a PTY toggle */}
-      <Sheet
-        open={!!selected}
-        onOpenChange={(open) => {
-          if (!open) closeDrawer();
-        }}
-      >
-        <SheetContent
-          side="bottom"
-          showCloseButton={false}
-          spacing="none"
-          shape="roundedTop"
-          className="h-[85dvh] max-h-[85dvh]"
+      {/*
+        Logs (SSE) / terminal (PTY) for the selected service. Desktop opens a
+        centered popup; mobile keeps the swipe-down bottom sheet.
+      */}
+      {isDesktop ? (
+        <Dialog
+          open={!!selected}
+          onOpenChange={(open) => {
+            if (!open) closeDrawer();
+          }}
         >
-          {selected ? (
-            <>
-              <div
-                aria-hidden
-                className="bg-muted-foreground/30 mx-auto mt-2 h-1 w-10 shrink-0 rounded-full"
+          <DialogContent
+            showCloseButton={false}
+            spacing="none"
+            className="h-[85vh] max-w-4xl"
+          >
+            {selected ? (
+              <ServicePanel
+                selected={selected}
+                projectName={projectName}
+                label={label}
+                script={script}
+                view={search.view}
+                mode={mode}
+                onModeChange={setMode}
+                onClose={closeDrawer}
               />
-              <SheetHeader
-                variant="bar"
-                spacing="roomy"
-                className="flex-row items-center"
-              >
-                <div className="flex min-w-0 flex-col">
-                  <div className="flex min-w-0 items-center gap-2">
-                    <SheetTitle variant="strip">{selected.svc.name}</SheetTitle>
-                    <StatusBadge
-                      status={selected.svc.running ? "running" : "stopped"}
-                    />
-                  </div>
-                  <span className="text-muted-foreground text-2xs truncate font-mono">
-                    {projectName} @ {label} · {script} pid {selected.inst.pid}
-                  </span>
-                </div>
-                <div className="ml-auto flex shrink-0 flex-wrap items-center justify-end gap-1">
-                  <RowActions inst={selected.inst} svc={selected.svc} />
-                  <Link
-                    to="/logs"
-                    search={{
-                      project: projectName,
-                      service:
-                        selected.svc.service?.container ?? selected.svc.name,
-                      view: search.view,
-                    }}
-                    title="Open full-page terminal"
-                    className={cn(
-                      buttonVariants({ variant: "ghost", size: "sm" }),
-                      "font-mono"
-                    )}
-                  >
-                    <ExternalLink className="size-4" />
-                    <span className="hidden sm:inline">Full page</span>
-                  </Link>
-                  <button
-                    type="button"
-                    onClick={closeDrawer}
-                    aria-label="Close"
-                    className={cn(
-                      buttonVariants({ variant: "ghost", size: "icon-sm" })
-                    )}
-                  >
-                    <X className="size-4" />
-                  </button>
-                </div>
-              </SheetHeader>
-              <div className="flex min-h-0 flex-1 flex-col p-3">
-                <ServiceTerminal
-                  key={`${selected.inst.pid}:${selected.svc.name}`}
-                  active={{
-                    container: containerOf(selected.svc, selected.inst.pid),
-                    service: selected.svc.name,
-                    pid: selected.svc.service?.pid ?? null,
-                  }}
+            ) : null}
+          </DialogContent>
+        </Dialog>
+      ) : (
+        <Sheet
+          open={!!selected}
+          onOpenChange={(open) => {
+            if (!open) closeDrawer();
+          }}
+        >
+          <SheetContent
+            side="bottom"
+            showCloseButton={false}
+            spacing="none"
+            shape="roundedTop"
+            className="h-[85dvh] max-h-[85dvh]"
+          >
+            {selected ? (
+              <>
+                <div
+                  aria-hidden
+                  className="bg-muted-foreground/30 mx-auto mt-2 h-1 w-10 shrink-0 rounded-full"
+                />
+                <ServicePanel
+                  selected={selected}
+                  projectName={projectName}
+                  label={label}
+                  script={script}
+                  view={search.view}
                   mode={mode}
                   onModeChange={setMode}
-                  showModeToggle={selected.svc.service?.pid != null}
+                  onClose={closeDrawer}
                 />
-              </div>
-            </>
-          ) : null}
-        </SheetContent>
-      </Sheet>
+              </>
+            ) : null}
+          </SheetContent>
+        </Sheet>
+      )}
     </div>
   );
 }
