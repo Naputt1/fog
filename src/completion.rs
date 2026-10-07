@@ -51,7 +51,7 @@ _fog() {{
     if [[ "$cur" == -* ]]; then
         COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
     else
-        COMPREPLY=( $(compgen -W "ls kill restart logs index" -- "$cur") )
+        COMPREPLY=( $(compgen -W "ls kill restart logs attach index" -- "$cur") )
     fi
     return 0
 }}
@@ -82,7 +82,7 @@ _fog() {{
         '--completions=[Generate a completion script]:shell:(bash zsh fish)' \
         '(-h --help)'{{-h,--help}}'[Print help]' \
         '(-V --version)'{{-V,--version}}'[Print version]' \
-        '1:command:(ls kill restart logs index)' \
+        '1:command:(ls kill restart logs attach index)' \
         '*:pid:'
     case $state in
         branches)
@@ -114,7 +114,7 @@ complete -c fog -l port -d 'Override a top-level ports entry for this run (NAME=
 complete -c fog -l completions -d 'Generate a completion script' -a 'bash zsh fish'
 complete -c fog -s h -l help -d 'Print help'
 complete -c fog -s V -l version -d 'Print version'
-complete -c fog -f -a 'ls kill restart logs index'
+complete -c fog -f -a 'ls kill restart logs attach index'
 "##,
     )
 }

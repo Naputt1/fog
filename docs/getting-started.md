@@ -86,6 +86,7 @@ fog kill [pid]            # Gracefully shut down a running instance
 fog logs [pid]                  # List services and their status
 fog logs [pid] --service <name> # Print captured output of one service
 fog logs [pid] -s <name> --tail 50  # Last 50 lines (`--head`, `--head -N`, `--tail +N`)
+fog attach [pid]          # Reattach the TUI to a running instance (replays screen history)
 ```
 
 | Option | Description |

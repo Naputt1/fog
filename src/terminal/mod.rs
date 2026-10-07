@@ -594,6 +594,7 @@ impl Terminal {
     /// * `log_dir` - If set, raw PTY output is teed into
     ///   `<log_dir>/<name>.log` while the service runs.
     #[cfg(unix)]
+    #[allow(clippy::too_many_arguments)]
     pub fn adopt(
         path: String,
         cmd: String,
@@ -602,13 +603,30 @@ impl Terminal {
         fd: Fd,
         pid: u32,
         log_dir: Option<std::path::PathBuf>,
+        history: Vec<u8>,
+        rows: u16,
+        cols: u16,
     ) -> Self {
         let tee = log_dir
             .as_deref()
             .and_then(|dir| open_log_file(dir, &name).ok());
-        let parser = Arc::new(Mutex::new(vt100::Parser::new(24, INITIAL_COLS, scrollback)));
+        // Replay the source terminal's history at its own size so the screen
+        // matches what the user saw before detaching/reattaching.
+        let (screen_rows, screen_cols) = if rows > 0 && cols > 0 {
+            (rows, cols)
+        } else {
+            (24, INITIAL_COLS)
+        };
+        let parser = Arc::new(Mutex::new(vt100::Parser::new(
+            screen_rows,
+            screen_cols,
+            scrollback,
+        )));
         {
             let mut p = parser.lock().expect("mutex poisoned");
+            if !history.is_empty() {
+                p.process(&history);
+            }
             p.process(
                 format!("\x1b[36m♻ adopted from instance {pid} — streaming live output\x1b[0m\r\n")
                     .as_bytes(),
@@ -616,6 +634,15 @@ impl Terminal {
         }
         let screen_generation = Arc::new(AtomicUsize::new(0));
         let raw_output = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+        // Seed the raw-output queue with the replayed history so this instance
+        // republishes it to the web UI and to any later handoff, keeping the
+        // session's history across repeated detach/reattach hops.
+        if !history.is_empty() {
+            raw_output
+                .lock()
+                .expect("mutex poisoned")
+                .push_back(history);
+        }
         let (stop_r, stop_w) = make_stop_pipe().unwrap_or((-1, -1));
         // SAFETY: dup creates an independent descriptor for the reader thread.
         let reader_fd = unsafe { libc::dup(fd) };
@@ -693,6 +720,7 @@ impl Terminal {
     /// reached. It falls back to a borrowed-reuse placeholder for
     /// completeness.
     #[cfg(windows)]
+    #[allow(clippy::too_many_arguments)]
     pub fn adopt(
         path: String,
         cmd: String,
@@ -701,6 +729,9 @@ impl Terminal {
         _fd: Fd,
         _pid: u32,
         log_dir: Option<std::path::PathBuf>,
+        _history: Vec<u8>,
+        _rows: u16,
+        _cols: u16,
     ) -> Self {
         let mut t = Self::spawn_reused(name, path, cmd, scrollback);
         t.log_dir = log_dir;
@@ -761,6 +792,11 @@ impl Terminal {
             name: self.name.clone(),
             pid,
             fd: dup_fd,
+            // Filled in by the App's handoff step from its accumulated screen
+            // history; the raw extract itself has no history to hand over.
+            history: Vec::new(),
+            rows: 0,
+            cols: 0,
         })
     }
 
@@ -925,6 +961,13 @@ impl Terminal {
     /// draw to detect new terminal output without polling the parser.
     pub fn screen_generation(&self) -> usize {
         self.screen_generation.load(Ordering::Relaxed)
+    }
+
+    /// Returns the terminal's `(rows, cols)` as last rendered, for handing its
+    /// history to another instance at a matching size.
+    pub fn screen_size(&self) -> (u16, u16) {
+        let parser = self.parser.lock().expect("mutex poisoned");
+        parser.screen().size()
     }
 
     /// Returns the total number of lines in both scrollback and visible area.
@@ -2078,6 +2121,47 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn test_adopt_replays_history_at_source_size() {
+        let pty = portable_pty::native_pty_system()
+            .openpty(portable_pty::PtySize {
+                rows: 40,
+                cols: 100,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let master_fd = pty.master.as_raw_fd().expect("pty master fd");
+        let dup_fd = unsafe { libc::dup(master_fd) };
+        assert!(dup_fd >= 0);
+
+        let history = b"\x1b[31mhello\x1b[0m\r\n".to_vec();
+        let t = Terminal::adopt(
+            ".".into(),
+            "true".into(),
+            "db".into(),
+            100,
+            dup_fd,
+            99_999,
+            None,
+            history.clone(),
+            40,
+            100,
+        );
+
+        // The parser adopts the source size and replays the history.
+        assert_eq!(t.screen_size(), (40, 100));
+        let lines = t.get_all_lines();
+        assert!(
+            lines.iter().any(|l| l.contains("hello")),
+            "history should be replayed: {lines:?}"
+        );
+        // History is also seeded into the raw-output queue for republishing.
+        assert_eq!(t.drain_raw_output(), vec![history]);
+        drop(t);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn test_adopted_probe_health_runs_immediately() {
         let pty = portable_pty::native_pty_system()
             .openpty(portable_pty::PtySize {
@@ -2098,6 +2182,9 @@ mod tests {
             dup_fd,
             99_999,
             None,
+            Vec::new(),
+            0,
+            0,
         );
 
         // A live listener flips an adopted terminal to Healthy immediately.
@@ -2252,6 +2339,9 @@ mod tests {
             dup_fd,
             99_999,
             None,
+            Vec::new(),
+            0,
+            0,
         );
         assert!(t.reused);
         t.shutdown_cmd = Some(format!("touch {}", marker.display()));
@@ -2458,6 +2548,9 @@ mod tests {
             fd,
             99_999,
             None,
+            Vec::new(),
+            0,
+            0,
         );
         let lines: Vec<String> = t
             .get_all_lines()
@@ -2815,6 +2908,9 @@ mod tests {
             fd,
             99_999,
             Some(dir.clone()),
+            Vec::new(),
+            0,
+            0,
         );
         assert!(dir.join("a_b.log").exists());
         assert!(!dir.join("a/b.log").exists());

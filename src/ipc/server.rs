@@ -102,6 +102,7 @@ pub(crate) fn handle_connection(mut stream: Stream, state: Arc<IpcState>) {
                 project: state.project.clone(),
                 branch: state.branch.clone(),
                 config_dir: state.config_dir.clone(),
+                config_path: state.config_path.clone(),
                 started_at: state.started_at,
                 ports,
                 native_routes,
@@ -111,7 +112,10 @@ pub(crate) fn handle_connection(mut stream: Stream, state: Arc<IpcState>) {
             let mut writer = stream;
             let _ = writeln!(writer, "{resp}");
         }
-        Request::Kill { reuse } => {
+        Request::Kill { reuse, force } => {
+            // A full-session takeover (TUI detach/reattach) lifts the
+            // `reuse`/`share` gate in the App's handoff step.
+            state.handoff_all.store(force, Ordering::SeqCst);
             if reuse.is_empty() {
                 // Plain kill: acknowledge immediately and never touch handoff
                 // state, so it cannot steal a handoff in flight.

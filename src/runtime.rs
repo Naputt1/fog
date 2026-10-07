@@ -802,6 +802,9 @@ pub fn build_with_opts(opts: BuildOpts) -> Result<Runtime, String> {
                 handoff.fd,
                 handoff.pid,
                 log_dir.clone(),
+                handoff.history,
+                handoff.rows,
+                handoff.cols,
             );
             t.save_logs = save_logs;
             t.health_checks = health_checks;
@@ -824,6 +827,9 @@ pub fn build_with_opts(opts: BuildOpts) -> Result<Runtime, String> {
                     handoff.fd,
                     handoff.pid,
                     log_dir.clone(),
+                    handoff.history,
+                    handoff.rows,
+                    handoff.cols,
                 );
                 t.save_logs = save_logs;
                 t.health_checks = health_checks;

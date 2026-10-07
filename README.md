@@ -177,6 +177,7 @@ fog kill [pid] --force        # escalate SIGTERM → SIGKILL for a wedged instan
 fog logs [pid]                # list services and their status
 fog logs [pid] -s <name>      # print captured output of one service
 fog logs [pid] -s <name> --tail 50   # last 50 lines (--head 50, --head -50, --tail +51)
+fog attach [pid]              # reattach the TUI to a running instance (replays screen history)
 fog index serve|kill|restart  # control the host-global web UI / API server
 ```
 

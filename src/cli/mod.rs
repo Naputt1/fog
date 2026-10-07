@@ -46,11 +46,11 @@ const DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(60);
     name = "fog",
     version = env!("CARGO_PKG_VERSION"),
     about = "Terminal-based service orchestrator & reverse-proxy dashboard",
-    after_help = "Built-in commands:\n  fog ls [PID]                    list running instances and service status\n  fog kill [PID|--all]            gracefully shut down a running instance\n  fog kill --force [PID|--all]    forcibly shut down a wedged instance\n  fog restart [PID|--all]         restart a running instance\n  fog logs [PID]                  list services and their status\n  fog logs [PID] --service NAME   print captured output of one service\n  fog logs [PID] -s NAME --tail   limit lines: --head N|-N, --tail N|-N|+N\n  fog index serve [--foreground] [--port N]  run the index server (detached by default)\n  fog index kill                  stop the index server\n  fog index restart               restart the index server\n\nWith no PID, kill/restart/logs target the instance started from the local\nfog.json (same config directory, so the branch is implicit). When several\nlocal instances match, the command lists them: pass an explicit PID, or\n--all (kill/restart) to apply to every local match. Outside a directory\nwith fog.json, --all applies to every running instance.\n\nWhen a kill/restart grace period is not enough (a wedged instance that never\nconsumes its kill flag), --force escalates to SIGTERM then SIGKILL.\n\nRun a script from fog.json:\n  fog <script> [OPTIONS]  (e.g. fog dev)\n\nOverride an allocated port for one run:\n  fog dev --port api=4000       (repeatable; --port web=0 re-randomizes)"
+    after_help = "Built-in commands:\n  fog ls [PID]                    list running instances and service status\n  fog kill [PID|--all]            gracefully shut down a running instance\n  fog kill --force [PID|--all]    forcibly shut down a wedged instance\n  fog restart [PID|--all]         restart a running instance\n  fog logs [PID]                  list services and their status\n  fog logs [PID] --service NAME   print captured output of one service\n  fog logs [PID] -s NAME --tail   limit lines: --head N|-N, --tail N|-N|+N\n  fog attach [PID]                reattach the TUI to a running instance (replays screen history)\n  fog index serve [--foreground] [--port N]  run the index server (detached by default)\n  fog index kill                  stop the index server\n  fog index restart               restart the index server\n\nWith no PID, kill/restart/logs target the instance started from the local\nfog.json (same config directory, so the branch is implicit). When several\nlocal instances match, the command lists them: pass an explicit PID, or\n--all (kill/restart) to apply to every local match. Outside a directory\nwith fog.json, --all applies to every running instance.\n\nWhen a kill/restart grace period is not enough (a wedged instance that never\nconsumes its kill flag), --force escalates to SIGTERM then SIGKILL.\n\nRun a script from fog.json:\n  fog <script> [OPTIONS]  (e.g. fog dev)\n\nOverride an allocated port for one run:\n  fog dev --port api=4000       (repeatable; --port web=0 re-randomizes)"
 )]
 struct Cli {
     /// Script to run (e.g. `fog dev`), or a built-in command
-    /// (`ls`, `kill`, `restart`, `logs`, `index`).
+    /// (`ls`, `kill`, `restart`, `logs`, `attach`, `index`).
     script: Option<String>,
 
     /// PID of a running fog instance (used with `fog kill <pid>`, `fog restart <pid>`, `fog logs <pid>`).
@@ -271,7 +271,7 @@ fn reclaim_existing(
         eprintln!(
             "replacing existing fog instance (pid {pid}, script {script}, project {project})"
         );
-        let outcome = ipc::reclaim(path, reuse);
+        let outcome = ipc::reclaim(path, reuse, false);
         if let Some(err) = &outcome.error {
             eprintln!("  warning: could not reclaim instance {pid}: {err}, continuing");
         } else if outcome.incomplete {
@@ -316,15 +316,18 @@ fn wait_for_socket_gone(path: &std::path::Path) {
     }
 }
 
-/// Reclaims one specific instance for a detach takeover, adopting every live
-/// service it hands over, then waits for it to exit.
-fn reclaim_takeover(from_pid: u32, names: &[String]) -> HashMap<String, ipc::HandoffItem> {
+/// Reclaims one specific instance for a full-session takeover (TUI detach or
+/// `fog attach`), adopting every live service it hands over, then waits for it
+/// to exit. Returns `None` if the instance could not be taken over.
+fn reclaim_takeover(from_pid: u32, names: &[String]) -> Option<HashMap<String, ipc::HandoffItem>> {
     let path = ipc::socket_path(from_pid);
-    let outcome = ipc::reclaim(&path, names);
+    let outcome = ipc::reclaim(&path, names, true);
     if let Some(err) = &outcome.error {
-        eprintln!("warning: could not reclaim instance {from_pid} for detach: {err}");
-    } else if outcome.incomplete {
-        eprintln!("warning: detach handoff from instance {from_pid} was incomplete");
+        eprintln!("error: could not take over instance {from_pid}: {err}");
+        return None;
+    }
+    if outcome.incomplete {
+        eprintln!("warning: takeover handoff from instance {from_pid} was incomplete");
     }
     let mut adopted: HashMap<String, ipc::HandoffItem> = HashMap::new();
     for handoff in outcome.handoffs {
@@ -341,7 +344,7 @@ fn reclaim_takeover(from_pid: u32, names: &[String]) -> HashMap<String, ipc::Han
         eprintln!("warning: instance {from_pid} did not exit within the timeout");
     }
     wait_for_socket_gone(&path);
-    adopted
+    Some(adopted)
 }
 
 /// Coordinates with any other fog instance running `script` in `project`, then
@@ -1620,17 +1623,27 @@ impl Drop for TerminalGuard {
 }
 
 fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
+    run_script_inner(name, cli, None)
+}
+
+/// Shared body of `fog <script>` and `fog attach <pid>`. When `takeover_pid` is
+/// set, the run adopts that instance's live services (a detach successor or a
+/// reattach) instead of reconciling with a peer instance.
+fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>) -> io::Result<()> {
     // A `-d` run executes as a background daemon (re-executed by `main` with
     // `FOG_DAEMON_CHILD` set); the daemon child skips the TUI and runs a
     // headless service loop instead.
     // A `d` detach re-executes this process with `FOG_DETACH_FROM=<pid>` set:
     // the child is a headless takeover that adopts the named instance's live
     // services via handoff.
-    let takeover_from = std::env::var("FOG_DETACH_FROM")
-        .ok()
-        .and_then(|s| s.parse::<u32>().ok());
-    let detached =
-        cli.detach || takeover_from.is_some() || std::env::var_os("FOG_DAEMON_CHILD").is_some();
+    let takeover_from = takeover_pid.or_else(|| {
+        std::env::var("FOG_DETACH_FROM")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+    });
+    // A takeover requested via `fog attach` is interactive (it runs the TUI);
+    // only `-d` and the detach daemon child skip the UI.
+    let detached = cli.detach || std::env::var_os("FOG_DAEMON_CHILD").is_some();
 
     // Drop the daemon/takeover markers so they do not leak into spawned
     // services. No threads have been spawned yet, so mutating the environment
@@ -1721,9 +1734,13 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
     let mut adopted: HashMap<String, ipc::HandoffItem> = HashMap::new();
     let mut owner_lock: Option<crate::lock::OwnerLock> = None;
     if let Some(from_pid) = takeover_from {
-        // Detach takeover: reclaim exactly this instance, adopting every live
-        // service (not just `reuse` ones) so the session keeps running.
-        adopted = reclaim_takeover(from_pid, &all_service_names(script));
+        // Detach/reattach takeover: reclaim exactly this instance, adopting
+        // every live service (not just `reuse` ones) so the session keeps
+        // running.
+        match reclaim_takeover(from_pid, &all_service_names(script)) {
+            Some(handoffs) => adopted = handoffs,
+            None => std::process::exit(1),
+        }
     } else if let Some(ref project) = project {
         // Concurrent scripts (default) start alongside existing instances of the
         // same project+script instead of replacing them, so no coordination or
@@ -1759,6 +1776,7 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
         cli.no_share,
     );
     ipc_state.config_dir = Some(config_dir.to_string_lossy().into_owned());
+    ipc_state.config_path = Some(config_path.to_string_lossy().into_owned());
     let ipc_state = Arc::new(ipc_state);
 
     // Restore the terminal on panic (interactive runs only). Installed before
@@ -2075,13 +2093,24 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
         None
     } else {
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("fog"));
-        let args: Vec<OsString> = std::env::args_os()
-            .skip(1)
-            .filter(|a| {
-                let s = a.to_string_lossy();
-                s != "-d" && s != "--detach" && !s.starts_with("--detach=")
-            })
-            .collect();
+        // Rebuild the invocation from the resolved script + config rather than
+        // copying argv: an attach session's argv is `fog attach <pid>`, which
+        // must not be re-executed by its detach successor.
+        let mut args: Vec<OsString> = vec![
+            OsString::from(name),
+            OsString::from("--config"),
+            OsString::from(config_path.as_os_str()),
+        ];
+        if let Some(branch) = cli.branch.as_ref() {
+            args.push(OsString::from("--branch"));
+            args.push(OsString::from(branch));
+        }
+        if cli.save_logs {
+            args.push(OsString::from("--save-logs"));
+        }
+        if cli.verbose {
+            args.push(OsString::from("--verbose"));
+        }
         Some(crate::app::DetachSpawn::new(exe, args, std::process::id()))
     };
 
@@ -2367,6 +2396,79 @@ fn cmd_index_serve(args: &[String]) -> io::Result<()> {
     }
 }
 
+/// `fog attach [PID]` reattaches an interactive TUI to a running instance,
+/// adopting its live services and replaying their screen history. With no PID
+/// it targets the only running instance.
+fn cmd_attach(cli: &Cli) -> io::Result<()> {
+    let (pid, status) = match cli.pid {
+        Some(pid) => {
+            let path = ipc::socket_path(pid);
+            match ipc::query_status(&path) {
+                Ok(status) => (pid, status),
+                Err(e) => {
+                    eprintln!("error: no running fog instance with pid {pid}: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        None => {
+            let mut live: Vec<(u32, ipc::StatusResponse)> = Vec::new();
+            for (pid, path) in ipc::find_instances().unwrap_or_default() {
+                if let Ok(status) = ipc::query_status(&path) {
+                    live.push((pid, status));
+                }
+            }
+            match live.len() {
+                0 => {
+                    eprintln!("error: no running fog instances to attach to");
+                    std::process::exit(1);
+                }
+                1 => live.pop().expect("checked len"),
+                _ => {
+                    eprintln!("error: multiple fog instances are running; pass a pid:");
+                    for (pid, status) in &live {
+                        eprintln!(
+                            "  fog attach {pid}    {} ({})",
+                            status.script,
+                            status.branch.as_deref().unwrap_or("-")
+                        );
+                    }
+                    std::process::exit(1);
+                }
+            }
+        }
+    };
+
+    if status.no_share {
+        eprintln!("error: instance {pid} runs with --no-share; its services cannot be handed over");
+        std::process::exit(1);
+    }
+
+    // Reconstruct the target's invocation: its script plus its exact config
+    // file, so the reattached TUI loads the same config.
+    let config_path = status.config_path.clone().or_else(|| {
+        status
+            .config_dir
+            .as_ref()
+            .map(|d| Path::new(d).join("fog.json").to_string_lossy().into_owned())
+    });
+    let Some(config_path) = config_path else {
+        eprintln!("error: instance {pid} did not report a config path");
+        std::process::exit(1);
+    };
+
+    let mut attach_cli = Cli::parse_from([
+        OsString::from("fog"),
+        OsString::from(&status.script),
+        OsString::from("--config"),
+        OsString::from(&config_path),
+    ]);
+    attach_cli.verbose = cli.verbose;
+    attach_cli.save_logs = cli.save_logs;
+
+    run_script_inner(&status.script, &attach_cli, Some(pid))
+}
+
 pub fn run() -> io::Result<()> {
     // `fog index serve/kill/restart` are dispatched before clap so they are not
     // misparsed as the `[PID]` positional (which expects a number).
@@ -2476,7 +2578,11 @@ pub fn run() -> io::Result<()> {
     // `--port` only applies when running a script.
     if !cli.port.is_empty() {
         match cli.script.as_deref() {
-            Some(name) if !matches!(name, "ls" | "kill" | "restart" | "logs" | "index") => {}
+            Some(name)
+                if !matches!(
+                    name,
+                    "ls" | "kill" | "restart" | "logs" | "index" | "attach"
+                ) => {}
             _ => {
                 eprintln!(
                     "error: --port only applies when running a script (e.g. `fog dev --port api=4000`)"
@@ -2491,7 +2597,12 @@ pub fn run() -> io::Result<()> {
     // headless path in run_script and must not re-daemonize.
     if cli.detach && std::env::var_os("FOG_DAEMON_CHILD").is_none() {
         match cli.script.as_deref() {
-            Some(name) if !matches!(name, "ls" | "kill" | "restart" | "logs" | "index") => {
+            Some(name)
+                if !matches!(
+                    name,
+                    "ls" | "kill" | "restart" | "logs" | "index" | "attach"
+                ) =>
+            {
                 return daemonize(name);
             }
             Some(_) => {
@@ -2510,6 +2621,7 @@ pub fn run() -> io::Result<()> {
         Some("kill") => cmd_kill(cli.pid, cli.all, &cli),
         Some("restart") => cmd_restart(cli.pid, cli.all, &cli),
         Some("logs") => cmd_logs(cli.pid, cli.service.clone(), &cli),
+        Some("attach") => cmd_attach(&cli),
         Some(name) => run_script(name, &cli),
         None => {
             let config_path = resolve_config_path(&resolve_run_config(&cli));
@@ -2586,6 +2698,7 @@ mod tests {
             project: None,
             branch: None,
             config_dir: None,
+            config_path: None,
             started_at: 0,
             ports: Default::default(),
             native_routes: Vec::new(),

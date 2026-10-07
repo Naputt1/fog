@@ -35,6 +35,8 @@ Quitting restores the terminal, then shows docker-style per-service shutdown pro
 
 Pressing `d` **detaches** instead: the TUI closes and returns you to your shell, but the session keeps running in the background with every service left untouched (their processes are handed over live, not restarted). fog prints the detached instance's pid, and you manage it with `fog ls`, `fog logs <pid>`, and `fog kill <pid>`. Detaching is unavailable with `--no-share`, which disables live handoff.
 
+Reattach later with `fog attach <pid>` (or `fog attach` when a single instance is running). It opens the TUI again, adopts the running services, and replays each service's scrollback at its recorded size, so you pick up where you left off. Repeated detach/attach keeps the history.
+
 ## Terminal Input mode
 
 Entered by pressing `i` on a service or shell tab. Keystrokes are sent directly to the running process.

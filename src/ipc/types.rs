@@ -73,6 +73,14 @@ pub struct HandoffItem {
     /// A dup of the PTY master fd (now owned by the receiver). Unused on
     /// Windows, where live handoff is unsupported.
     pub fd: Fd,
+    /// Raw ANSI bytes of the terminal's accumulated history, replayed by the
+    /// receiver so a reattached TUI keeps prior output. Empty when unknown.
+    pub history: Vec<u8>,
+    /// Source terminal rows/cols the history was rendered at (`0` = unknown,
+    /// replay at the default size).
+    pub rows: u16,
+    /// Source terminal columns (paired with `rows`).
+    pub cols: u16,
 }
 
 /// A cloneable handle to a proxy's live request-log queue.
@@ -98,6 +106,9 @@ pub struct IpcState {
     /// (its config dir). Set once before the IPC server spawns; stable for
     /// the lifetime of the process.
     pub config_dir: Option<String>,
+    /// Absolute path to this instance's config file. Set alongside
+    /// `config_dir`; used by `fog attach` to reload the exact config.
+    pub config_path: Option<String>,
     /// Allocated ports for this instance (symbolic -> host port).
     pub ports: Arc<Mutex<PortMap>>,
     /// Native routes (templates) for this instance.
@@ -120,6 +131,10 @@ pub struct IpcState {
     pub handoff_prepared: Arc<AtomicBool>,
     /// Set by the IPC thread once handoffs have been sent to the requester.
     pub handoff_done: Arc<AtomicBool>,
+    /// Set when a reclaim requests a full-session takeover (TUI detach or
+    /// reattach): every live service is handed over, not just `reuse`/`share`
+    /// ones.
+    pub handoff_all: Arc<AtomicBool>,
     /// Whether this instance was started with `--no-share`.
     pub no_share: bool,
     /// Per-service control request published by the IPC thread for the App to
@@ -150,6 +165,7 @@ impl IpcState {
             project,
             branch,
             config_dir: None,
+            config_path: None,
             ports: Arc::new(Mutex::new(PortMap::new())),
             native_routes: Arc::new(Mutex::new(Vec::new())),
             started_at: crate::lock::now_ms(),
@@ -160,6 +176,7 @@ impl IpcState {
             handoff_claimed: Arc::new(AtomicBool::new(false)),
             handoff_prepared: Arc::new(AtomicBool::new(false)),
             handoff_done: Arc::new(AtomicBool::new(false)),
+            handoff_all: Arc::new(AtomicBool::new(false)),
             no_share,
             control_req: Arc::new(Mutex::new(None)),
             control_result: Arc::new(Mutex::new(None)),
@@ -170,7 +187,7 @@ impl IpcState {
 }
 
 /// The status response sent back to a `status` request.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusResponse {
     /// PID of the fog process.
     pub pid: u32,
@@ -190,6 +207,9 @@ pub struct StatusResponse {
     /// (its config dir), if known.
     #[serde(default)]
     pub config_dir: Option<String>,
+    /// Absolute path to this instance's config file, if known.
+    #[serde(default)]
+    pub config_path: Option<String>,
     /// Epoch milliseconds when the instance started (0 for older versions).
     #[serde(default)]
     pub started_at: u64,
@@ -222,6 +242,10 @@ pub(crate) enum Request {
         /// replacing instance can reuse them.
         #[serde(default)]
         reuse: Vec<String>,
+        /// When true, hand over every live service (TUI detach/reattach), not
+        /// just services named in `reuse`.
+        #[serde(default)]
+        force: bool,
     },
     Logs {
         /// Service whose captured log to stream; the special name `proxy`

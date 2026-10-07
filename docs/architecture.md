@@ -113,6 +113,8 @@ flowchart TB
 
 Pressing `d` detaches the TUI without stopping the session. The App relaunches `fog <script>` as a detached successor (re-exec with `FOG_DAEMON_CHILD=1` and `FOG_DETACH_FROM=<pid>`), then marks itself detaching so the normal reclaim path hands over **every** live service — not just `reuse`/`share` ones — to the successor's targeted `kill` request. The successor adopts those PTYs, inherits the old instance's published port assignments, and serves headlessly; the old process restores the terminal, prints the new pid, releases its socket, and exits without tearing services down. Because the handoff is live, no service is restarted. `--no-share` disables detach (handoff is off), and live handoff is unavailable on Windows.
 
+`fog attach [pid]` runs the same takeover in reverse: it reclaims the running instance (with the `force` flag, so the whole session is handed over), replays each service's screen history at its recorded size, and opens a fresh interactive TUI. The reattached instance keeps the target's port assignments and identity (project, branch, script), and the target exits without stopping its services. History survives repeated detach/attach hops because an adopted terminal republishes the replayed bytes. The request log (`/` filter) is per-instance and starts fresh; shell tabs (`t`) are not part of the handoff.
+
 ## Cross-instance coordination
 
 Worktree-aware runs are made deterministic by a per-(project, script) **owner lock** (`src/lock.rs`) using `flock(2)` on a temp file (`fog-owner-<hash>.lock`). `flock` is released automatically when the holding process dies, so stale locks are impossible.
