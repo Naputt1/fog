@@ -220,7 +220,8 @@ Docs: [https://naputt1.github.io/fog/](https://naputt1.github.io/fog/) for confi
 | `i`                                           | Enter terminal input (`Esc` to exit)                                                      |
 | `R`                                           | Restart current service or proxy                                                          |
 | `t` / `Ctrl+t`                                | Open a shell tab                                                                          |
-| `d`                                           | Close the current shell tab                                                               |
+| `x`                                           | Close the current shell tab                                                               |
+| `d`                                           | Detach: close the TUI but keep the session running                                        |
 | `s`                                           | Worktree switch popup (`f` fuzzy search, `Enter` to switch, `d` to terminate that branch) |
 | `↑` / `↓` · `PageUp` / `PageDown` · `g` / `G` | Scroll                                                                                    |
 | `/`                                           | Filter proxy logs                                                                         |

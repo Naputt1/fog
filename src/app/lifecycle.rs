@@ -320,8 +320,11 @@ impl App {
         };
         let mut results = Vec::new();
         for item in &mut self.items {
+            // A detach hands over the whole session, so its request names every
+            // service and the reuse/share gate is lifted; an ordinary reclaim
+            // only takes services configured to hand over.
             if names.contains(&item.name)
-                && (item.reused || item.shared)
+                && (item.reused || item.shared || self.detaching)
                 && let Some(handoff) = item.extract_handoff()
             {
                 results.push(handoff);

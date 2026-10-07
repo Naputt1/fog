@@ -276,13 +276,19 @@ pub(crate) fn draw_instructions(
     let items: &[(&str, &str)] = if in_terminal_input {
         &[("Ctrl+Q", "quit"), ("Esc", "scroll")]
     } else if is_proxy {
-        &[("q", "quit"), ("R", "restart"), ("/", "filter")]
+        &[
+            ("q", "quit"),
+            ("R", "restart"),
+            ("/", "filter"),
+            ("d", "detach"),
+        ]
     } else if is_shell {
         &[
             ("q", "quit"),
             ("t", "new-term"),
             ("i", "input"),
-            ("d", "close"),
+            ("x", "close"),
+            ("d", "detach"),
         ]
     } else {
         &[
@@ -291,6 +297,7 @@ pub(crate) fn draw_instructions(
             ("i", "input"),
             ("t", "new-term"),
             ("s", "switch-wt"),
+            ("d", "detach"),
         ]
     };
 

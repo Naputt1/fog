@@ -31,6 +31,10 @@ pub struct BuildOpts<'a> {
     pub ports: &'a crate::ports::PortMap,
     pub branch_override: Option<String>,
     pub no_share: bool,
+    /// When true (a TUI detach), a live handoff is adopted for every service,
+    /// not just `reuse`/`share` ones, so a detached successor keeps the whole
+    /// running session instead of restarting non-shared services.
+    pub takeover: bool,
     /// Names of shared services a same-branch sibling already owns (their live
     /// ports were adopted by [`adopt_shared_ports`]). A templated shared service
     /// is only borrowed when it is listed here, so a borrower never hands its
@@ -592,11 +596,15 @@ pub fn build_with_ports(
         ports,
         branch_override,
         no_share: false,
+        takeover: false,
         owned_shared,
     })
 }
 
 /// Same as `build_with_ports` but with `no_share` flag to ignore shared services.
+///
+/// `takeover` adopts live handoffs for every service (a TUI detach); otherwise
+/// only `reuse`/`share` services consume handoffs.
 #[allow(clippy::too_many_arguments)]
 pub fn build_with_ports_no_share(
     script: &ScriptConfig,
@@ -610,6 +618,7 @@ pub fn build_with_ports_no_share(
     ports: &crate::ports::PortMap,
     branch_override: Option<String>,
     no_share: bool,
+    takeover: bool,
     owned_shared: &std::collections::HashSet<String>,
 ) -> Result<Runtime, String> {
     build_with_opts(BuildOpts {
@@ -624,6 +633,7 @@ pub fn build_with_ports_no_share(
         ports,
         branch_override,
         no_share,
+        takeover,
         owned_shared,
     })
 }
@@ -670,6 +680,7 @@ pub fn build_with_opts(opts: BuildOpts) -> Result<Runtime, String> {
         ports,
         branch_override,
         no_share,
+        takeover,
         owned_shared,
     } = opts;
     // Resolve branch: override from caller (allocated ports context) wins,
@@ -775,7 +786,35 @@ pub fn build_with_opts(opts: BuildOpts) -> Result<Runtime, String> {
             )
         };
 
-        let mut terminal = if shared {
+        let mut terminal = if takeover
+            && !shared
+            && let Some(handoff) = adopted.remove(&name)
+        {
+            // Detach takeover: adopt this service's live PTY even though it is
+            // not configured for reuse. `reused = false` keeps normal owned
+            // semantics (liveness from the process, not health-derived), so a
+            // dead service is still detected and torn down on exit.
+            let mut t = Terminal::adopt(
+                service_path_str.clone(),
+                entry.cmd.clone(),
+                name.clone(),
+                scrollback,
+                handoff.fd,
+                handoff.pid,
+                log_dir.clone(),
+            );
+            t.save_logs = save_logs;
+            t.health_checks = health_checks;
+            t.shutdown_cmd = entry.shutdown_cmd.clone();
+            t.injected_env = entry.env.clone().unwrap_or_default();
+            t.branch = branch.clone();
+            t.project = project;
+            t.script = script_name;
+            t.reused = false;
+            t.probe_health();
+            t.start_health_checks();
+            t
+        } else if shared {
             if let Some(handoff) = adopted.remove(&name) {
                 let mut t = Terminal::adopt(
                     service_path_str.clone(),
@@ -1471,6 +1510,7 @@ mod tests {
             &ports,
             None,
             false,
+            false,
             &std::collections::HashSet::new(),
         )
         .unwrap();
@@ -1510,6 +1550,7 @@ mod tests {
             &mut adopted,
             &ports,
             None,
+            false,
             false,
             &owned,
         )
@@ -1621,6 +1662,7 @@ mod tests {
             &HashMap::new(),
             None,
             true,
+            false,
             &std::collections::HashSet::new(),
         )
         .unwrap();
@@ -1655,6 +1697,7 @@ mod tests {
             &HashMap::new(),
             None,
             true,
+            false,
             &std::collections::HashSet::new(),
         )
         .unwrap();

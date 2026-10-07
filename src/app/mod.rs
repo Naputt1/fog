@@ -92,6 +92,42 @@ const ALERT_WIDTH: u16 = 60;
 /// Repaint cadence while alerts are visible, so they expire on time.
 const ALERT_REPAINT: Duration = Duration::from_millis(250);
 
+/// How to relaunch this fog process as a detached takeover daemon when the user
+/// presses `d` to detach the TUI.
+///
+/// The successor re-executes the same binary and arguments (minus `-d`) with
+/// [`crate::process::detach_command`], so it survives this process exiting. It
+/// discovers the instance to reclaim from `FOG_DETACH_FROM`.
+pub struct DetachSpawn {
+    exe: PathBuf,
+    args: Vec<std::ffi::OsString>,
+    from_pid: u32,
+}
+
+impl DetachSpawn {
+    /// Builds the spawn recipe for the current process (`argv[0]` + args).
+    pub fn new(exe: PathBuf, args: Vec<std::ffi::OsString>, from_pid: u32) -> Self {
+        Self {
+            exe,
+            args,
+            from_pid,
+        }
+    }
+
+    /// Launches the detached successor and returns its pid.
+    fn spawn(&self) -> std::io::Result<u32> {
+        let mut cmd = std::process::Command::new(&self.exe);
+        cmd.args(&self.args)
+            .env("FOG_DAEMON_CHILD", "1")
+            .env("FOG_DETACH_FROM", self.from_pid.to_string())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        crate::process::detach_command(&mut cmd);
+        cmd.spawn().map(|child| child.id())
+    }
+}
+
 /// Main application state managing terminals, the proxy, tabs, and input handling.
 pub struct App {
     items: Vec<Terminal>,
@@ -137,6 +173,15 @@ pub struct App {
     no_share: bool,
     /// Whether `--verbose` was passed: gates informational setup output.
     verbose: bool,
+    /// Set once a `d` detach has launched a detached successor; the run loop
+    /// then hands the whole session over when the successor reclaims it.
+    detaching: bool,
+    /// Pid of the detached successor launched by `d`, for the post-detach
+    /// status message.
+    detach_pid: Option<u32>,
+    /// How to relaunch fog as a detached takeover daemon. `None` outside an
+    /// interactive run (headless, or tests), where `d` is unavailable.
+    detach: Option<DetachSpawn>,
     /// Non-fatal runtime warnings and errors, shown as bottom-right alerts.
     alerts: Vec<Alert>,
     /// Screen regions of each visible alert at the last draw, so a mouse click
@@ -173,6 +218,8 @@ pub struct AppCreateOpts {
     pub save_logs: bool,
     pub no_share: bool,
     pub verbose: bool,
+    /// Detach spawn recipe; `None` outside an interactive run.
+    pub detach: Option<DetachSpawn>,
     /// Non-fatal startup warnings, surfaced as bottom-right alerts and
     /// reprinted to stderr on exit.
     pub startup_messages: Vec<String>,
@@ -198,6 +245,7 @@ impl App {
             save_logs,
             no_share,
             verbose,
+            detach,
             startup_messages,
         } = opts;
         let alerts: Vec<Alert> = startup_messages
@@ -253,6 +301,9 @@ impl App {
             switch_popup: None,
             no_share,
             verbose,
+            detaching: false,
+            detach_pid: None,
+            detach,
             alerts,
             alert_areas: Vec::new(),
             force_redraw: true,
@@ -264,6 +315,49 @@ impl App {
 }
 
 impl App {
+    /// Requests a detach: launches a detached successor that will adopt this
+    /// session's live services, then lets the run loop hand them over.
+    ///
+    /// Returns silently when a detach is already in flight. Reports an alert
+    /// when detaching is unavailable (no spawn recipe, `--no-share`, or a
+    /// platform without live handoff).
+    pub(crate) fn request_detach(&mut self) {
+        if self.detaching {
+            return;
+        }
+        // Live handoff (SCM_RIGHTS fd passing) is unix-only.
+        if !cfg!(unix) {
+            self.note_error("detach is not supported on this platform".to_string());
+            return;
+        }
+        if self.no_share {
+            self.note_error("cannot detach with --no-share: live handoff is disabled".to_string());
+            return;
+        }
+        let Some(spawn) = &self.detach else {
+            self.note_error("detach is unavailable in this run".to_string());
+            return;
+        };
+        match spawn.spawn() {
+            Ok(pid) => {
+                self.detach_pid = Some(pid);
+                self.detaching = true;
+                self.force_redraw = true;
+            }
+            Err(e) => self.note_error(format!("could not detach: {e}")),
+        }
+    }
+
+    /// Whether a detach has been requested (and the successor launched).
+    pub(crate) fn detach_spawned(&self) -> bool {
+        self.detaching
+    }
+
+    /// The detached successor's pid, once launched.
+    pub(crate) fn detach_pid(&self) -> Option<u32> {
+        self.detach_pid
+    }
+
     /// Records a runtime warning or error: raised as a bottom-right alert and
     /// reprinted to stderr once the TUI exits.
     pub(crate) fn note_error(&mut self, msg: String) {
@@ -356,6 +450,9 @@ mod tests {
             switch_popup: None,
             no_share: false,
             verbose: false,
+            detaching: false,
+            detach_pid: None,
+            detach: None,
             alerts: vec![],
             alert_areas: Vec::new(),
             force_redraw: true,
@@ -921,5 +1018,32 @@ mod tests {
             app.switch_popup.as_ref().unwrap().status.as_deref(),
             Some("no other instances on this branch")
         );
+    }
+
+    #[test]
+    fn d_detaches_and_x_closes_shell_tab() {
+        let items = vec![
+            Terminal::spawn_shell("bash".to_string(), 100).unwrap(),
+            Terminal::spawn_shell("bash".to_string(), 100).unwrap(),
+        ];
+        let mut tabs = ClickTab::new(vec!["bash".to_string(), "bash".to_string()], 10, 30);
+        for entry in &mut tabs.entries {
+            entry.kind = TabKind::Terminal;
+        }
+        tabs.index = 0;
+        let mut app = make_app(items, None, tabs, Mode::Normal, Rect::default());
+
+        // `d` requests a detach. With no spawn recipe (as in tests) it reports
+        // that detaching is unavailable and must not close the shell tab.
+        app.handle_normal_key(KeyEvent::from(KeyCode::Char('d')));
+        assert_eq!(app.items.len(), 2, "d must not close a shell tab");
+        assert!(
+            app.errors.iter().any(|e| e.contains("detach")),
+            "d should report why it cannot detach"
+        );
+
+        // `x` still closes the current shell tab.
+        app.handle_normal_key(KeyEvent::from(KeyCode::Char('x')));
+        assert_eq!(app.items.len(), 1);
     }
 }

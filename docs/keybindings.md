@@ -18,7 +18,8 @@ Default mode. Navigate tabs, scroll, and access commands.
 | `i` | Enter terminal input mode (not on proxy tab) |
 | `R` | Restart current service or proxy |
 | `t` / `Ctrl+t` | Open a new shell tab |
-| `d` | Close current shell tab (shells only) |
+| `x` | Close current shell tab (shells only) |
+| `d` | Detach: close the TUI, keep the session running |
 | `s` | Open worktree switch popup (`f` fuzzy search, `Enter` to switch) |
 | `↑` | Scroll output up |
 | `↓` | Scroll output down |
@@ -31,6 +32,8 @@ Default mode. Navigate tabs, scroll, and access commands.
 | `Ctrl+q` | Quit fog |
 
 Quitting restores the terminal, then shows docker-style per-service shutdown progress (the same checklist `fog kill` prints) while each service stops.
+
+Pressing `d` **detaches** instead: the TUI closes and returns you to your shell, but the session keeps running in the background with every service left untouched (their processes are handed over live, not restarted). fog prints the detached instance's pid, and you manage it with `fog ls`, `fog logs <pid>`, and `fog kill <pid>`. Detaching is unavailable with `--no-share`, which disables live handoff.
 
 ## Terminal Input mode
 
@@ -103,9 +106,9 @@ Runtime warnings and errors — startup setup warnings, service auto-start failu
 
 The bottom border shows relevant commands for the current context:
 
-- **Service tab**: `Q quit | R restart | I input | T new-term`
-- **Shell tab**: `Q quit | T new-term | I input | D close`
-- **Proxy tab**: `Q quit | R restart | / filter`
+- **Service tab**: `Q quit | R restart | I input | T new-term | S switch-wt | D detach`
+- **Shell tab**: `Q quit | T new-term | I input | X close | D detach`
+- **Proxy tab**: `Q quit | R restart | / filter | D detach`
 - **Input mode**: `Ctrl+Q quit | Esc scroll`
 
 ## Help overlay
