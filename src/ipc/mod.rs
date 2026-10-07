@@ -241,6 +241,9 @@ mod tests {
             name: "db".into(),
             pid: 99_999,
             fd: dup_fd,
+            history: Vec::new(),
+            rows: 0,
+            cols: 0,
         });
         state.handoff_prepared.store(true, Ordering::SeqCst);
 
@@ -253,7 +256,7 @@ mod tests {
             handle_connection(stream, server_state);
         });
 
-        let outcome = reclaim(&path, &["db".to_string()]);
+        let outcome = reclaim(&path, &["db".to_string()], false);
         server.join().unwrap();
         assert!(
             outcome.error.is_none(),
@@ -273,6 +276,64 @@ mod tests {
 
         // SAFETY: the returned fd is owned by the test.
         unsafe { libc::close(outcome.handoffs[0].fd) };
+        let _ = fs::remove_file(&path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_reclaim_transfers_history_and_force() {
+        // A full-session takeover (force=true) carries screen history and its
+        // source size across the socket.
+        let pty = portable_pty::native_pty_system()
+            .openpty(portable_pty::PtySize {
+                rows: 40,
+                cols: 100,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let master_fd = pty.master.as_raw_fd().expect("pty master fd");
+        let dup_fd = unsafe { libc::dup(master_fd) };
+        assert!(dup_fd >= 0);
+
+        let history = b"hello \x1b[31mworld\x1b[0m\r\n".to_vec();
+        let state = Arc::new(IpcState::new("dev".to_string(), None, None, false));
+        state.handoff_results.lock().unwrap().push(HandoffItem {
+            name: "web".into(),
+            pid: 99_999,
+            fd: dup_fd,
+            history: history.clone(),
+            rows: 40,
+            cols: 100,
+        });
+        state.handoff_prepared.store(true, Ordering::SeqCst);
+
+        let path = instance_dir().join("fog-test-history.sock");
+        let _ = fs::remove_file(&path);
+        let listener = super::transport::Listener::bind(&path).unwrap();
+        let server_state = state.clone();
+        let server = thread::spawn(move || {
+            let stream = listener.accept().unwrap();
+            handle_connection(stream, server_state);
+        });
+
+        let outcome = reclaim(&path, &["web".to_string()], true);
+        server.join().unwrap();
+        assert!(
+            outcome.error.is_none(),
+            "reclaim error: {:?}",
+            outcome.error
+        );
+        assert_eq!(outcome.handoffs.len(), 1);
+        let got = &outcome.handoffs[0];
+        assert_eq!(got.name, "web");
+        assert_eq!(got.history, history);
+        assert_eq!(got.rows, 40);
+        assert_eq!(got.cols, 100);
+        assert!(state.handoff_all.load(Ordering::SeqCst));
+
+        // SAFETY: the returned fd is owned by the test.
+        unsafe { libc::close(got.fd) };
         let _ = fs::remove_file(&path);
     }
 
@@ -299,6 +360,9 @@ mod tests {
             name: "db".into(),
             pid: 99_999,
             fd: dup_fd,
+            history: Vec::new(),
+            rows: 0,
+            cols: 0,
         });
         state.handoff_prepared.store(true, Ordering::SeqCst);
 
@@ -317,8 +381,8 @@ mod tests {
             }
         });
 
-        let outcome_a = reclaim(&path, &["db".to_string()]);
-        let outcome_b = reclaim(&path, &["db".to_string()]);
+        let outcome_a = reclaim(&path, &["db".to_string()], false);
+        let outcome_b = reclaim(&path, &["db".to_string()], false);
 
         drop(server);
         let _ = fs::remove_file(&path);
@@ -367,6 +431,9 @@ mod tests {
             name: "db".into(),
             pid: 99_998,
             fd: dup_fd,
+            history: Vec::new(),
+            rows: 0,
+            cols: 0,
         });
         state.handoff_prepared.store(true, Ordering::SeqCst);
 
@@ -384,7 +451,7 @@ mod tests {
         // Plain kill first, then the reclaiming client.
         let kill_res = send_kill(&path);
         assert!(kill_res.is_ok());
-        let outcome = reclaim(&path, &["db".to_string()]);
+        let outcome = reclaim(&path, &["db".to_string()], false);
 
         drop(server);
         let _ = fs::remove_file(&path);

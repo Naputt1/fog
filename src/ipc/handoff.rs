@@ -18,6 +18,11 @@ struct HandoffMsg {
     r#type: String,
     name: String,
     pid: u32,
+    /// Source terminal size the history was rendered at (0 = unknown).
+    rows: u16,
+    cols: u16,
+    /// Base64 raw ANSI history to replay in the receiver (empty = none).
+    history: String,
 }
 
 /// The handoff message as received by the reclaiming client.
@@ -25,6 +30,12 @@ struct HandoffMsg {
 struct HandoffMsgReply {
     name: String,
     pid: u32,
+    #[serde(default)]
+    rows: u16,
+    #[serde(default)]
+    cols: u16,
+    #[serde(default)]
+    history: String,
 }
 
 /// The final response to a kill/reclaim request.
@@ -103,6 +114,12 @@ pub(crate) fn send_handoffs(mut stream: Stream, state: Arc<super::types::IpcStat
             r#type: "handoff".to_string(),
             name: item.name,
             pid: item.pid,
+            rows: item.rows,
+            cols: item.cols,
+            history: base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                &item.history,
+            ),
         };
         let line = match serde_json::to_string(&msg) {
             Ok(l) => l,
@@ -154,7 +171,7 @@ pub(crate) fn send_handoffs(mut stream: Stream, state: Arc<super::types::IpcStat
 /// If the transfer is cut short, any already-received handoffs are still
 /// returned (alongside `incomplete`), and a process whose fd could not be
 /// transferred is killed to avoid leaving an orphan behind.
-pub fn reclaim(path: &Path, reuse: &[String]) -> ReclaimOutcome {
+pub fn reclaim(path: &Path, reuse: &[String], force: bool) -> ReclaimOutcome {
     let mut stream = match super::transport::connect(path) {
         Ok(s) => s,
         Err(e) => return ReclaimOutcome::failed(format!("connection failed: {e}")),
@@ -173,6 +190,9 @@ pub fn reclaim(path: &Path, reuse: &[String]) -> ReclaimOutcome {
     if !reuse.is_empty() {
         let names = serde_json::to_string(reuse).unwrap_or_else(|_| "[]".to_string());
         payload.push_str(&format!(r#","reuse":{names}"#));
+    }
+    if force {
+        payload.push_str(r#","force":true"#);
     }
     payload.push_str("}\n");
     if stream.write_all(payload.as_bytes()).is_err() || stream.flush().is_err() {
@@ -199,10 +219,18 @@ pub fn reclaim(path: &Path, reuse: &[String]) -> ReclaimOutcome {
         if let Ok(reply) = serde_json::from_str::<HandoffMsgReply>(line.trim()) {
             match crate::fds::recv_fd(&stream) {
                 Ok(fd) => {
+                    let history = base64::Engine::decode(
+                        &base64::engine::general_purpose::STANDARD,
+                        &reply.history,
+                    )
+                    .unwrap_or_default();
                     handoffs.push(HandoffItem {
                         name: reply.name,
                         pid: reply.pid,
                         fd,
+                        history,
+                        rows: reply.rows,
+                        cols: reply.cols,
                     });
                 }
                 Err(e) => {

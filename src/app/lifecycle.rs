@@ -15,6 +15,30 @@ use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::{Duration, Instant};
 
+/// Collects a service's published screen history (base64 raw-ANSI chunks) as
+/// raw bytes, capped at ~4 MiB on a line boundary, for a handoff to replay.
+fn collect_history(ipc_state: &ipc::IpcState, name: &str, cols: u16) -> Vec<u8> {
+    const MAX_HISTORY: usize = 4 * 1024 * 1024;
+    let mut out: Vec<u8> = Vec::new();
+    if let Ok(map) = ipc_state.terminal_snapshots.lock()
+        && let Some(chunks) = map.get(name)
+    {
+        for encoded in chunks {
+            if let Ok(bytes) =
+                base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded)
+            {
+                out.extend_from_slice(&bytes);
+            }
+        }
+    }
+    let width = usize::from(cols.max(1));
+    let cap = MAX_HISTORY - (MAX_HISTORY % width);
+    if out.len() > cap {
+        out.drain(0..out.len() - cap);
+    }
+    out
+}
+
 impl App {
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
         let health_rx = crate::terminal::health_signal().subscribe();
@@ -318,15 +342,29 @@ impl App {
         let Some(names) = req else {
             return;
         };
+        // A detach/reattach hands over the whole session, carrying each
+        // service's scrollback so the successor's screen matches. Refresh the
+        // published snapshots first so the history is current.
+        let all = self.ipc_state.handoff_all.load(Ordering::SeqCst);
+        let ipc = self.ipc_state.clone();
+        if all {
+            self.update_shared_state();
+        }
         let mut results = Vec::new();
         for item in &mut self.items {
-            // A detach hands over the whole session, so its request names every
-            // service and the reuse/share gate is lifted; an ordinary reclaim
-            // only takes services configured to hand over.
+            // The request names the services to hand over: a detach/reattach
+            // names every service and lifts the reuse/share gate; an ordinary
+            // reclaim only names services configured to hand over.
             if names.contains(&item.name)
-                && (item.reused || item.shared || self.detaching)
-                && let Some(handoff) = item.extract_handoff()
+                && (item.reused || item.shared || all)
+                && let Some(mut handoff) = item.extract_handoff()
             {
+                if all {
+                    let (rows, cols) = item.screen_size();
+                    handoff.history = collect_history(&ipc, &item.name, rows);
+                    handoff.rows = rows;
+                    handoff.cols = cols;
+                }
                 results.push(handoff);
             }
         }
