@@ -235,6 +235,29 @@ fn reuse_names(script: &crate::config::ScriptConfig) -> Vec<String> {
 /// different branch (concurrent multi-branch runs) are left untouched.
 ///
 /// The caller is expected to hold the per-(project, script, branch) owner lock.
+/// Names of every service in a script: the set a detach takeover hands over,
+/// regardless of `reuse`/`share` configuration.
+fn all_service_names(script: &crate::config::ScriptConfig) -> Vec<String> {
+    script
+        .service
+        .as_ref()
+        .map(|entries| {
+            entries
+                .iter()
+                .map(|e| {
+                    e.name.clone().unwrap_or_else(|| {
+                        Path::new(&e.path)
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into_owned()
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn reclaim_existing(
     project: &str,
     script: &str,
@@ -291,6 +314,34 @@ fn wait_for_socket_gone(path: &std::path::Path) {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+/// Reclaims one specific instance for a detach takeover, adopting every live
+/// service it hands over, then waits for it to exit.
+fn reclaim_takeover(from_pid: u32, names: &[String]) -> HashMap<String, ipc::HandoffItem> {
+    let path = ipc::socket_path(from_pid);
+    let outcome = ipc::reclaim(&path, names);
+    if let Some(err) = &outcome.error {
+        eprintln!("warning: could not reclaim instance {from_pid} for detach: {err}");
+    } else if outcome.incomplete {
+        eprintln!("warning: detach handoff from instance {from_pid} was incomplete");
+    }
+    let mut adopted: HashMap<String, ipc::HandoffItem> = HashMap::new();
+    for handoff in outcome.handoffs {
+        // A duplicate name would only come from a misbehaving peer; keep the
+        // newest and close the losing fd so it is not leaked.
+        if let Some(existing) = adopted.get_mut(&handoff.name) {
+            crate::fds::close(existing.fd);
+            *existing = handoff;
+        } else {
+            adopted.insert(handoff.name.clone(), handoff);
+        }
+    }
+    if !ipc::wait_for_exit(from_pid, RECLAIM_WAIT_TIMEOUT) {
+        eprintln!("warning: instance {from_pid} did not exit within the timeout");
+    }
+    wait_for_socket_gone(&path);
+    adopted
 }
 
 /// Coordinates with any other fog instance running `script` in `project`, then
@@ -1572,13 +1623,24 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
     // A `-d` run executes as a background daemon (re-executed by `main` with
     // `FOG_DAEMON_CHILD` set); the daemon child skips the TUI and runs a
     // headless service loop instead.
-    let detached = cli.detach || std::env::var_os("FOG_DAEMON_CHILD").is_some();
+    // A `d` detach re-executes this process with `FOG_DETACH_FROM=<pid>` set:
+    // the child is a headless takeover that adopts the named instance's live
+    // services via handoff.
+    let takeover_from = std::env::var("FOG_DETACH_FROM")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok());
+    let detached =
+        cli.detach || takeover_from.is_some() || std::env::var_os("FOG_DAEMON_CHILD").is_some();
 
-    // Drop the daemon marker so it does not leak into spawned services. No
-    // threads have been spawned yet, so mutating the environment is race-free.
+    // Drop the daemon/takeover markers so they do not leak into spawned
+    // services. No threads have been spawned yet, so mutating the environment
+    // is race-free.
     if detached {
         // SAFETY: the process is still single-threaded at this point.
-        unsafe { std::env::remove_var("FOG_DAEMON_CHILD") };
+        unsafe {
+            std::env::remove_var("FOG_DAEMON_CHILD");
+            std::env::remove_var("FOG_DETACH_FROM");
+        }
     }
 
     // Detached daemons redirect their own diagnostics into a per-instance log
@@ -1649,9 +1711,20 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
         .branch
         .clone()
         .or_else(|| crate::runtime::resolve_branch(&config_dir));
+    let takeover = takeover_from.is_some();
+    // Capture the target's live ports before reclaiming it (and waiting for it
+    // to exit), so adopted services keep their real assignments; auto ports
+    // would otherwise be re-randomized.
+    let takeover_ports = takeover_from
+        .and_then(|pid| ipc::query_status(&ipc::socket_path(pid)).ok())
+        .map(|s| s.ports);
     let mut adopted: HashMap<String, ipc::HandoffItem> = HashMap::new();
     let mut owner_lock: Option<crate::lock::OwnerLock> = None;
-    if let Some(ref project) = project {
+    if let Some(from_pid) = takeover_from {
+        // Detach takeover: reclaim exactly this instance, adopting every live
+        // service (not just `reuse` ones) so the session keeps running.
+        adopted = reclaim_takeover(from_pid, &all_service_names(script));
+    } else if let Some(ref project) = project {
         // Concurrent scripts (default) start alongside existing instances of the
         // same project+script instead of replacing them, so no coordination or
         // reclaim happens. Only single-instance scripts take over from a previous
@@ -1793,6 +1866,14 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
     } else {
         std::collections::HashMap::new()
     };
+    // A detach takeover inherits the target's real port assignments (including
+    // auto-allocated ones) so adopted services and the proxy/router keep
+    // pointing at the ports the live processes actually listen on.
+    if let Some(target_ports) = takeover_ports {
+        for (name, port) in target_ports {
+            port_map.insert(name, port);
+        }
+    }
     // Validate native_routes and ensure ${ports.*} has a top-level `ports` map
     if let Some(routes) = &config.native_routes
         && let Err(e) =
@@ -1898,6 +1979,7 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
         &port_map,
         branch_for_ports.clone(),
         cli.no_share,
+        takeover,
         &owned_shared,
     )
     .map_err(|e| {
@@ -1987,6 +2069,22 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
             .collect()
     };
 
+    // Interactive runs can detach: build the recipe to relaunch this exact
+    // invocation as a headless takeover daemon when `d` is pressed.
+    let detach = if detached {
+        None
+    } else {
+        let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("fog"));
+        let args: Vec<OsString> = std::env::args_os()
+            .skip(1)
+            .filter(|a| {
+                let s = a.to_string_lossy();
+                s != "-d" && s != "--detach" && !s.starts_with("--detach=")
+            })
+            .collect();
+        Some(crate::app::DetachSpawn::new(exe, args, std::process::id()))
+    };
+
     let mut app = App::new_with_opts(crate::app::AppCreateOpts {
         items: runtime.items,
         pending_services: runtime.pending_services,
@@ -2004,6 +2102,7 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
         save_logs: cli.save_logs,
         no_share: cli.no_share,
         verbose: cli.verbose,
+        detach,
         startup_messages: startup_warnings,
     });
     if detached {
@@ -2019,6 +2118,20 @@ fn run_script(name: &str, cli: &Cli) -> io::Result<()> {
         // also entered it (and enabled mouse capture); restore it explicitly so
         // progress is printed to the normal screen.
         TerminalGuard::restore();
+        if app.detach_spawned() {
+            // `d` handed the whole session to a detached successor. Services
+            // keep running; dropping the handed-off terminals at process exit
+            // is a no-op for their processes, and their `shutdown_cmd` is
+            // skipped. Report where the detached instance lives and release our
+            // socket so the successor can publish its own.
+            if let Some(pid) = app.detach_pid() {
+                print_daemon_started(name, pid);
+            }
+            app.report_errors();
+            run_result?;
+            ipc::cleanup_socket();
+            return Ok(());
+        }
         let path = ipc::current_socket_path();
         // Each `teardown_service` blocks for the whole teardown (kill grace +
         // reap), so a spinner advanced only at service boundaries would look
@@ -2127,6 +2240,15 @@ fn redirect_daemon_output(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Prints the standard "started in background" block used by `-d` and detach.
+fn print_daemon_started(script: &str, pid: u32) {
+    println!("fog '{script}' started in background (pid {pid})");
+    println!("  status: fog ls {pid}");
+    println!("  stop:   fog kill {pid}");
+    println!("  logs:   fog logs {pid}");
+    println!("  log dir: {}", ipc::instance_log_dir(pid).display());
+}
+
 /// Detach mode entry point: re-executes `fog <script>` as a background daemon
 /// and waits until it is serving, printing the PID once `fog ls` can see it.
 fn daemonize(script: &str) -> io::Result<()> {
@@ -2176,11 +2298,7 @@ fn daemonize(script: &str) -> io::Result<()> {
         std::thread::sleep(Duration::from_millis(100));
     }
 
-    println!("fog '{script}' started in background (pid {pid})");
-    println!("  status: fog ls {pid}");
-    println!("  stop:   fog kill {pid}");
-    println!("  logs:   fog logs {pid}");
-    println!("  log dir: {}", ipc::instance_log_dir(pid).display());
+    print_daemon_started(script, pid);
     Ok(())
 }
 

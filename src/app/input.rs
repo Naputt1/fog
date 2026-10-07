@@ -284,7 +284,8 @@ impl App {
             }
             KeyCode::Char('R') => self.restart_current(),
             KeyCode::Char('t') => self.new_terminal(),
-            KeyCode::Char('d') => self.close_tab(),
+            KeyCode::Char('x') => self.close_tab(),
+            KeyCode::Char('d') => self.request_detach(),
             KeyCode::Char('/') => {
                 if self.is_proxy_tab() {
                     self.mode = Mode::ProxyFilter;
