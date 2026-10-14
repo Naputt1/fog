@@ -115,9 +115,6 @@ pub fn ensure_for_config(cfg: &crate::config::Config) -> Vec<String> {
 
 fn ensure_with_router(cfg: &RouterConfig) -> Vec<String> {
     let mut messages = Vec::new();
-    if !command_exists("docker") {
-        return messages;
-    }
     let port = cfg.index_port.unwrap_or(DEFAULT_INDEX_PORT);
     if server_started(port) {
         return messages;
@@ -133,9 +130,6 @@ fn ensure_with_router(cfg: &RouterConfig) -> Vec<String> {
 
 pub fn ensure_with_port(port: u16, network: &str) -> Vec<String> {
     let mut messages = Vec::new();
-    if !command_exists("docker") {
-        return messages;
-    }
     if server_started(port) {
         return messages;
     }
@@ -859,10 +853,6 @@ fn parse_query(query: &str) -> std::collections::HashMap<String, String> {
         out.insert(k.to_string(), v.to_string());
     }
     out
-}
-
-fn command_exists(name: &str) -> bool {
-    crate::process::command_exists(name)
 }
 
 #[cfg(test)]

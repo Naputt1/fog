@@ -6,6 +6,15 @@ title: Index Server
 
 Standalone service-directory **index server** (web UI + JSON API). By default every `fog <script>` serves the index unless opted out. This lives in the **fog config** (top-level `fog.json` alongside `theme`/`sidebar`, default `enabled:true`) — not per-script. It can be set **per-project** (`./fog.json`) or **globally** (`~/.config/fog/fog.json`, same schema); either can opt-out (both must be `true` to serve). The server is host-global (like `router`/`dnsmasq`) and is torn down automatically when the last fog instance exits — see `fog index kill/restart`.
 
+> **No Docker required.** The index server runs without Docker: it binds
+> `127.0.0.1:<port>` and serves the web UI plus every IPC-backed endpoint
+> (`/api/status`, `/api/health`, `/api/config`, `/api/scripts`, native services
+> in `/api/services`, fog-instance logs over SSE, and the launch/service
+> actions). Docker-backed content is simply absent when Docker is unavailable:
+> compose service discovery in `/api/services`, container log streaming,
+> compose-derived launch targets, and the Traefik catch-all route to the raw
+> index port. Docker is still required for the Traefik router itself.
+
 ## Top-level `index` field
 
 ```json
