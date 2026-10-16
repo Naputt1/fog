@@ -147,6 +147,9 @@ pub struct IpcState {
     pub control_done: Arc<AtomicBool>,
     /// Latest snapshot of each service's terminal lines (for live web emulation).
     pub terminal_snapshots: Arc<Mutex<std::collections::HashMap<String, Vec<String>>>>,
+    /// Latched to `true` the first time every service has started, so a
+    /// detached starter (`fog <script> -d`) knows when the environment is up.
+    pub startup_complete: Arc<AtomicBool>,
 }
 
 impl IpcState {
@@ -182,6 +185,7 @@ impl IpcState {
             control_result: Arc::new(Mutex::new(None)),
             control_done: Arc::new(AtomicBool::new(false)),
             terminal_snapshots: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            startup_complete: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -222,6 +226,10 @@ pub struct StatusResponse {
     /// Whether this instance was started with `--no-share`.
     #[serde(default)]
     pub no_share: bool,
+    /// Whether every service has started (no service still waiting on
+    /// dependencies or in its startup grace). `false` for older instances.
+    #[serde(default)]
+    pub started: bool,
 }
 
 fn default_log_tail() -> usize {

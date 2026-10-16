@@ -494,6 +494,21 @@ impl App {
                 }
             }
         }
+        // Latch startup completion once every service has started: nothing left
+        // waiting on dependencies, and no service still in its startup grace.
+        if !self.ipc_state.startup_complete.load(Ordering::SeqCst)
+            && self.pending_services.is_empty()
+            && self.items.iter().all(|item| {
+                !matches!(
+                    item.get_health_status(),
+                    HealthStatus::Pending | HealthStatus::Starting
+                )
+            })
+        {
+            self.ipc_state
+                .startup_complete
+                .store(true, Ordering::SeqCst);
+        }
     }
 
     /// Executes one per-service control request published by the IPC thread

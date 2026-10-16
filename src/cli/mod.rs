@@ -39,6 +39,14 @@ const KILL_GRACE_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long the parent of a detached run waits for the daemon to start serving
 /// before reporting failure. Covers the owner-lock wait plus the reclaim.
 const DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long a detached starter (`fog <script> -d`) waits for every service to
+/// start once the daemon's socket is up. On timeout it warns rather than
+/// failing: the daemon is already serving.
+const DAEMON_START_TIMEOUT: Duration = Duration::from_secs(120);
+/// Append-only setup-phase file a detached daemon writes into its log dir for
+/// the parent to narrate startup (the IPC socket, the other progress channel,
+/// only exists once the ports are settled).
+const STARTUP_PROGRESS_FILE: &str = "startup.progress";
 
 /// Command-line interface arguments parsed via clap.
 #[derive(Parser)]
@@ -559,6 +567,8 @@ const KILL_LOG_TAIL: usize = 4;
 /// Checklist markers for a service that has vs. has not stopped.
 const SHUTDOWN_DONE: &str = "✓";
 const SHUTDOWN_PENDING: &str = "⠙";
+/// Checklist marker for a service that came up unhealthy.
+const START_FAILED: &str = "✗";
 
 /// Braille frames a still-draining service's marker cycles through on a
 /// terminal, one per redraw (~10 Hz), so the checklist visibly spins.
@@ -568,6 +578,7 @@ const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "�
 /// still draining, a green tick for one that has stopped.
 const MARKER_BLUE: &str = "\x1b[94m";
 const MARKER_GREEN: &str = "\x1b[92m";
+const MARKER_RED: &str = "\x1b[91m";
 const ANSI_RESET: &str = "\x1b[0m";
 
 /// Wraps `text` in `ansi` when `enable`, else returns it unchanged so piped
@@ -751,6 +762,186 @@ fn shutdown_lines(
         }
     }
     lines
+}
+
+/// A service's live state while an instance is starting up.
+struct StartService {
+    name: String,
+    running: bool,
+    health: String,
+}
+
+/// Maps a service's running flag and health string to its rendered start
+/// state: the text to show, whether it is up, and whether it came up unhealthy.
+fn start_service_state(running: bool, health: &str) -> (&'static str, bool, bool) {
+    match health {
+        "healthy" => ("started", true, false),
+        "unhealthy" => ("unhealthy", false, true),
+        "starting" => ("starting", false, false),
+        // `pending` without a live process is a service still waiting on a
+        // dependency's health check.
+        "pending" if !running => ("waiting", false, false),
+        _ if running => ("started", true, false),
+        _ => ("waiting", false, false),
+    }
+}
+
+/// Applies the settled state: once the daemon has latched startup completion, a
+/// service its snapshot still shows as waiting reads as started rather than
+/// spinning — the daemon is the authority on when startup finished.
+fn settled_state(
+    label: &'static str,
+    ready: bool,
+    failed: bool,
+    settled: bool,
+) -> (&'static str, bool) {
+    if settled && !failed && !ready {
+        ("started", true)
+    } else {
+        (label, ready)
+    }
+}
+
+/// Builds the startup checklist: setup phases first, then each service's start
+/// state. While `all_done` is false the last phase (or unfinished service) spins.
+fn start_lines(
+    phases: &[String],
+    services: &[StartService],
+    pending: &str,
+    all_done: bool,
+    color: bool,
+) -> Vec<String> {
+    let width = services.iter().map(|s| s.name.len()).max().unwrap_or(0);
+    let mut lines = Vec::new();
+    for (i, phase) in phases.iter().enumerate() {
+        let running = !all_done && i + 1 == phases.len();
+        let marker = if running {
+            colored(pending, MARKER_BLUE, color)
+        } else {
+            colored(SHUTDOWN_DONE, MARKER_GREEN, color)
+        };
+        lines.push(format!("  {marker} {phase}"));
+    }
+    for svc in services {
+        let (state, ready, failed) = start_service_state(svc.running, &svc.health);
+        let (state, ready) = settled_state(state, ready, failed, all_done);
+        let marker = if failed {
+            colored(START_FAILED, MARKER_RED, color)
+        } else if ready {
+            colored(SHUTDOWN_DONE, MARKER_GREEN, color)
+        } else {
+            colored(pending, MARKER_BLUE, color)
+        };
+        lines.push(format!("  {marker} {:<width$}  {state}", svc.name));
+    }
+    lines
+}
+
+/// Renders docker-style startup progress for `fog <script> -d`: the daemon's
+/// setup phases, then each service as it comes up. On a terminal it redraws in
+/// place; when piped it appends a line as each phase appears and each service
+/// changes state, mirroring how `fog kill` behaves without a TTY.
+struct StartProgress {
+    pid: u32,
+    script: String,
+    tty: bool,
+    drawn: bool,
+    printed: bool,
+    phases_printed: usize,
+    last: Vec<(String, String)>,
+    frame: usize,
+}
+
+impl StartProgress {
+    fn new(pid: u32, script: &str) -> Self {
+        Self {
+            pid,
+            script: script.to_string(),
+            tty: stdout().is_terminal(),
+            drawn: false,
+            printed: false,
+            phases_printed: 0,
+            last: Vec::new(),
+            frame: 0,
+        }
+    }
+
+    /// Redraws from the daemon's reported phases and (once serving) status.
+    /// `all_done` settles the checklist for the final render.
+    fn render(&mut self, phases: &[String], status: Option<&ipc::StatusResponse>, all_done: bool) {
+        let services: Vec<StartService> = status
+            .map(|s| {
+                s.services
+                    .iter()
+                    .map(|svc| StartService {
+                        name: svc.name.clone(),
+                        running: svc.running,
+                        health: svc.health.clone(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if self.tty {
+            let pending = SPINNER_FRAMES[self.frame % SPINNER_FRAMES.len()];
+            self.frame = self.frame.wrapping_add(1);
+            if !self.drawn {
+                println!("Starting fog '{}' (pid {})...", self.script, self.pid);
+                print!("\x1b7");
+                self.drawn = true;
+            }
+            print!("\x1b8\x1b[J");
+            for line in start_lines(phases, &services, pending, all_done, self.tty) {
+                println!("{line}");
+            }
+            let _ = stdout().flush();
+        } else {
+            self.render_appended(phases, &services, all_done);
+        }
+    }
+
+    /// Piped output: appends the header once, then a line per new phase and per
+    /// service whose rendered label changed (mirroring `fog kill` without a TTY).
+    fn render_appended(&mut self, phases: &[String], services: &[StartService], all_done: bool) {
+        if !self.printed {
+            self.printed = true;
+            println!("Starting fog '{}' (pid {})...", self.script, self.pid);
+        }
+        for phase in phases.iter().skip(self.phases_printed) {
+            println!("  {SHUTDOWN_DONE} {phase}");
+        }
+        self.phases_printed = phases.len();
+        let mut labels = Vec::with_capacity(services.len());
+        for svc in services {
+            let (label, ready, failed) = start_service_state(svc.running, &svc.health);
+            let (label, ready) = settled_state(label, ready, failed, all_done);
+            let marker = if failed {
+                START_FAILED
+            } else if ready {
+                SHUTDOWN_DONE
+            } else {
+                "·"
+            };
+            let prev = self
+                .last
+                .iter()
+                .find(|(name, _)| name == &svc.name)
+                .map(|(_, label)| label.as_str());
+            if prev != Some(label) {
+                println!("  {marker} {}  {label}", svc.name);
+            }
+            labels.push((svc.name.clone(), label.to_string()));
+        }
+        self.last = labels;
+    }
+
+    /// Leaves the settled checklist on screen: the final render already drew
+    /// every row complete.
+    fn finish(&mut self) {
+        if self.drawn {
+            self.drawn = false;
+            let _ = stdout().flush();
+        }
+    }
 }
 
 /// The last `n` non-empty lines of a service's captured log, ANSI stripped.
@@ -1667,6 +1858,12 @@ fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>) -> io::Res
     } else {
         Some(create_log_dir()?)
     };
+    // A detached daemon narrates setup to its parent through an append-only
+    // phase file, since the IPC socket (the other progress channel) does not
+    // exist until the ports are settled.
+    let mut progress = detached
+        .then(|| ProgressLog::create(log_dir.as_deref().expect("log dir is always created")));
+    note_phase(&mut progress, "resolving config");
 
     let config_path = resolve_config_path(&resolve_run_config(cli));
     let config = load_config(&config_path);
@@ -1684,6 +1881,7 @@ fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>) -> io::Res
     // raw mode, so sudo can prompt on a normal terminal. Best-effort: failures
     // only warn and never block the run.
     if let Some(dnsmasq) = config.dnsmasq.as_ref() {
+        note_phase(&mut progress, "dnsmasq");
         startup_messages.extend(crate::dnsmasq::ensure(dnsmasq, detached));
     }
 
@@ -1698,12 +1896,14 @@ fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>) -> io::Res
             .as_ref()
             .map(|d| d.domains.clone())
             .unwrap_or_default();
+        note_phase(&mut progress, "router");
         startup_messages.extend(crate::router::ensure(router, &domains));
     }
     // Standalone index server (service directory + web UI). Controlled by
     // fog config (`~/.config/fog/fog.json` alongside `theme`, plus per-project
     // `fog.json` top-level `index`). Both default true; either can opt-out.
     if config.effective_should_serve_index() {
+        note_phase(&mut progress, "index server");
         startup_messages.extend(crate::index::ensure_for_config(&config));
     }
 
@@ -1737,6 +1937,7 @@ fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>) -> io::Res
         // Detach/reattach takeover: reclaim exactly this instance, adopting
         // every live service (not just `reuse` ones) so the session keeps
         // running.
+        note_phase(&mut progress, "adopting services");
         match reclaim_takeover(from_pid, &all_service_names(script)) {
             Some(handoffs) => adopted = handoffs,
             None => std::process::exit(1),
@@ -1748,10 +1949,12 @@ fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>) -> io::Res
         // run (handing over `reuse` services). `--no-share` disables reuse handoff.
         if !script.concurrent && !cli.no_share {
             let reuse = reuse_names(script);
+            note_phase(&mut progress, "reclaiming previous instance");
             (adopted, owner_lock) = reconcile_instance(project, name, branch.as_deref(), &reuse);
         } else if !script.concurrent && cli.no_share {
             // Still reclaim the old instance (single-instance semantics) but
             // without adopting any services.
+            note_phase(&mut progress, "reclaiming previous instance");
             (adopted, owner_lock) = reconcile_instance(project, name, branch.as_deref(), &[]);
         }
     }
@@ -1863,6 +2066,7 @@ fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>) -> io::Res
             ));
         }
     };
+    note_phase(&mut progress, "allocating ports");
     let mut port_specs = config.ports.clone().unwrap_or_default();
     let ports_defined = config.ports.is_some() || !overrides.is_empty();
     port_specs.extend(overrides);
@@ -1985,6 +2189,7 @@ fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>) -> io::Res
         startup_messages.extend(messages);
     }
 
+    note_phase(&mut progress, "starting services");
     let runtime = crate::runtime::build_with_ports_no_share(
         script,
         name,
@@ -2269,6 +2474,51 @@ fn redirect_daemon_output(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Append-only setup-phase log a detached daemon writes for its parent to tail.
+/// Best-effort: failing to open or write it only costs live progress, never the
+/// run.
+struct ProgressLog {
+    file: Option<fs::File>,
+}
+
+impl ProgressLog {
+    /// Opens `<log_dir>/startup.progress`, replacing any stale file.
+    fn create(log_dir: &Path) -> Self {
+        Self {
+            file: fs::File::create(log_dir.join(STARTUP_PROGRESS_FILE)).ok(),
+        }
+    }
+
+    /// Records that `phase` has started. The parent treats every line but the
+    /// last as complete.
+    fn phase(&mut self, phase: &str) {
+        if let Some(file) = self.file.as_mut() {
+            let _ = writeln!(file, "{phase}");
+            let _ = file.flush();
+        }
+    }
+}
+
+/// Records a setup phase when the caller runs detached.
+fn note_phase(progress: &mut Option<ProgressLog>, phase: &str) {
+    if let Some(p) = progress.as_mut() {
+        p.phase(phase);
+    }
+}
+
+/// Reads the setup phases a detached daemon has reported so far, oldest first.
+fn read_startup_phases(pid: u32) -> Vec<String> {
+    let path = ipc::instance_log_dir(pid).join(STARTUP_PROGRESS_FILE);
+    match fs::read_to_string(&path) {
+        Ok(content) => content
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
 /// Prints the standard "started in background" block used by `-d` and detach.
 fn print_daemon_started(script: &str, pid: u32) {
     println!("fog '{script}' started in background (pid {pid})");
@@ -2278,8 +2528,9 @@ fn print_daemon_started(script: &str, pid: u32) {
     println!("  log dir: {}", ipc::instance_log_dir(pid).display());
 }
 
-/// Detach mode entry point: re-executes `fog <script>` as a background daemon
-/// and waits until it is serving, printing the PID once `fog ls` can see it.
+/// Detach mode entry point: re-executes `fog <script>` as a background daemon,
+/// narrating setup with a docker-style checklist until every service has
+/// started, then prints the PID.
 fn daemonize(script: &str) -> io::Result<()> {
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("fog"));
     let args: Vec<OsString> = std::env::args_os()
@@ -2302,21 +2553,38 @@ fn daemonize(script: &str) -> io::Result<()> {
         .map_err(|e| io::Error::other(format!("could not start detached fog: {e}")))?;
     let pid = child.id();
 
-    // Wait until the daemon's socket serves a status reply (created only after
-    // the reconcile/reclaim window), so we report success exactly when
-    // `fog ls` / `fog kill` / `fog logs` will work.
+    // The daemon reports setup phases through an append-only file (the socket
+    // does not exist until the ports are settled) and its per-service state
+    // over IPC once it serves. Poll the socket first — a status reply means
+    // `fog ls` / `fog kill` / `fog logs` already work — then keep going until
+    // every service has started, so we report success when the environment is
+    // actually up, not merely discoverable.
     let socket = ipc::socket_path(pid);
-    let deadline = std::time::Instant::now() + DAEMON_READY_TIMEOUT;
+    let socket_deadline = std::time::Instant::now() + DAEMON_READY_TIMEOUT;
+    let mut services_deadline: Option<std::time::Instant> = None;
+    let mut socket_ready = false;
+    let mut view = StartProgress::new(pid, script);
+
     loop {
-        if ipc::query_status(&socket).is_ok() {
+        let phases = read_startup_phases(pid);
+        let status = ipc::query_status(&socket).ok();
+        if status.is_some() && !socket_ready {
+            socket_ready = true;
+            services_deadline = Some(std::time::Instant::now() + DAEMON_START_TIMEOUT);
+        }
+        let all_started = status.as_ref().is_some_and(|s| s.started);
+        view.render(&phases, status.as_ref(), all_started);
+        if all_started {
             break;
         }
         if child.try_wait().ok().flatten().is_some() {
+            view.finish();
             eprintln!("error: detached fog '{script}' (pid {pid}) exited during startup");
             eprintln!("  logs: {}", ipc::instance_log_dir(pid).display());
             std::process::exit(1);
         }
-        if std::time::Instant::now() >= deadline {
+        if !socket_ready && std::time::Instant::now() >= socket_deadline {
+            view.finish();
             eprintln!(
                 "error: detached fog '{script}' (pid {pid}) did not become ready within {}s",
                 DAEMON_READY_TIMEOUT.as_secs()
@@ -2324,8 +2592,17 @@ fn daemonize(script: &str) -> io::Result<()> {
             eprintln!("  logs: {}", ipc::instance_log_dir(pid).display());
             std::process::exit(1);
         }
+        if services_deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            view.finish();
+            eprintln!(
+                "warning: fog '{script}' (pid {pid}) is serving, but not every service started within {}s",
+                DAEMON_START_TIMEOUT.as_secs()
+            );
+            break;
+        }
         std::thread::sleep(Duration::from_millis(100));
     }
+    view.finish();
 
     print_daemon_started(script, pid);
     Ok(())
@@ -2703,6 +2980,7 @@ mod tests {
             ports: Default::default(),
             native_routes: Vec::new(),
             no_share: false,
+            started: true,
         }
     }
 
@@ -3140,6 +3418,107 @@ mod tests {
                 format!("  {}✓{} api  stopped", MARKER_GREEN, ANSI_RESET),
                 format!("  {}⠙{} web  shutting down", MARKER_BLUE, ANSI_RESET),
             ]
+        );
+    }
+
+    #[test]
+    fn test_start_service_state_maps_health() {
+        assert_eq!(
+            start_service_state(true, "healthy"),
+            ("started", true, false)
+        );
+        assert_eq!(
+            start_service_state(true, "unhealthy"),
+            ("unhealthy", false, true)
+        );
+        assert_eq!(
+            start_service_state(true, "starting"),
+            ("starting", false, false)
+        );
+        // `pending` without a live process is still waiting on a dependency.
+        assert_eq!(
+            start_service_state(false, "pending"),
+            ("waiting", false, false)
+        );
+        // A service with no health checks is up as soon as it runs.
+        assert_eq!(
+            start_service_state(true, "unknown"),
+            ("started", true, false)
+        );
+        assert_eq!(
+            start_service_state(false, "unknown"),
+            ("waiting", false, false)
+        );
+    }
+
+    #[test]
+    fn test_start_lines_spins_last_phase_then_settles() {
+        let phases = vec!["dnsmasq".to_string(), "allocating ports".to_string()];
+        assert_eq!(
+            start_lines(&phases, &[], SPINNER_FRAMES[3], false, false),
+            vec![
+                "  ✓ dnsmasq".to_string(),
+                format!("  {} allocating ports", SPINNER_FRAMES[3]),
+            ]
+        );
+        assert_eq!(
+            start_lines(&phases, &[], SPINNER_FRAMES[3], true, false),
+            vec![
+                "  ✓ dnsmasq".to_string(),
+                "  ✓ allocating ports".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_start_lines_marks_service_states() {
+        let services = vec![
+            StartService {
+                name: "db".into(),
+                running: true,
+                health: "healthy".into(),
+            },
+            StartService {
+                name: "api".into(),
+                running: false,
+                health: "pending".into(),
+            },
+            StartService {
+                name: "web".into(),
+                running: true,
+                health: "unhealthy".into(),
+            },
+        ];
+        assert_eq!(
+            start_lines(&[], &services, SPINNER_FRAMES[0], false, true),
+            vec![
+                format!("  {MARKER_GREEN}✓{ANSI_RESET} db   started"),
+                format!("  {MARKER_BLUE}⠋{ANSI_RESET} api  waiting"),
+                format!("  {MARKER_RED}✗{ANSI_RESET} web  unhealthy"),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_settled_state_forces_started_when_settled() {
+        assert_eq!(
+            settled_state("waiting", false, false, false),
+            ("waiting", false)
+        );
+        // Once the daemon has latched startup completion, a still-waiting row
+        // reads as started rather than spinning.
+        assert_eq!(
+            settled_state("waiting", false, false, true),
+            ("started", true)
+        );
+        // Already-ready and failed rows are unchanged.
+        assert_eq!(
+            settled_state("started", true, false, true),
+            ("started", true)
+        );
+        assert_eq!(
+            settled_state("unhealthy", false, true, true),
+            ("unhealthy", false)
         );
     }
 

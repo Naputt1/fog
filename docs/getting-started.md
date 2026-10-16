@@ -93,7 +93,7 @@ fog attach [pid]          # Reattach the TUI to a running instance (replays scre
 |--------|-------------|
 | `-c`, `--config <PATH>` | Path to config file, or a directory containing `fog.json` (default: `fog.json`) |
 | `--branch <BRANCH>` | Run in the git worktree for this branch (see [Agentic guide](/agentic)) |
-| `-d`, `--detach` | Run the script in the background without the TUI; returns once the instance is serving |
+| `-d`, `--detach` | Run the script in the background without the TUI; shows setup and per-service progress until every service has started, then returns |
 | `--save-logs` | Save service output to `temp/<name>.txt` on exit |
 | `-v`, `--verbose` | Print informational setup output (DNS, router, index, ports, native routes); warnings always print |
 | `--completions <SHELL>` | Print bash/zsh/fish completions |
@@ -124,7 +124,7 @@ The `branch` column shows the git branch (or `.` when not in a worktree).
 `fog <script> -d` runs a script in the background without the TUI — useful for CI pipelines and AI agents that cannot drive an interactive terminal. Services keep their PTYs, health checks, dependency ordering, and reverse proxy, so management works exactly as with the TUI:
 
 ```bash
-fog dev -d                  # start in the background; prints the PID and returns
+fog dev -d                  # start in the background; shows startup progress, then prints the PID
 fog ls 1234                 # check the instance's service status
 fog logs 1234               # list services and their status
 fog logs 1234 -s api        # print the captured output of one service
@@ -134,6 +134,8 @@ fog kill 1234               # gracefully shut it down
 Each detached instance tees every service's raw PTY output into `$TMPDIR/fog-<pid>.logs/<name>.log` (the daemon's own diagnostics go to `daemon.log`). `fog logs <pid>` lists the available services (`daemon` and `proxy` included) with their status; `fog logs <pid> --service <name>` (short `-s`) prints one service's output with ANSI escape sequences stripped. Add `--head N`, `--tail N`, or their signed forms (`--head -N`, `--tail -N`, `--tail +N`) to print only part of a long log — `--head 20 --tail 20` prints the first 20 and last 20 lines with a `... N lines omitted ...` marker between them. The log files persist after the instance exits. This is separate from `--save-logs`, which on any exit (TUI or detached) writes `temp/<name>.txt` in the project directory.
 
 `fog kill` waits for the instance to drain its services, showing docker-style progress: a checklist of every service, with each not-yet-stopped service followed by its `shutdown_cmd` when configured, otherwise the last 4 lines of its log. On a terminal the checklist redraws in place; when piped it prints the initial checklist and then a line as each service stops. Use `--force` to skip the long wait and escalate straight to SIGTERM/SIGKILL on a wedged instance.
+
+`fog <script> -d` narrates startup the same way: the setup phases (config, dnsmasq, router, index server, reclaim, ports, services) followed by a checklist of each service that spins until it is up. Only once every service has started does it print the PID block, so the wait is visible instead of silent and the PID it reports is one whose services are already running. The same in-place/piped split applies: on a terminal the checklist redraws, when piped it appends a line as each phase and service state changes.
 
 ### Agentic concurrent recipe — human + agent on the same branch
 
