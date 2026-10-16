@@ -14,7 +14,8 @@ Your job as an agent is to drive fog **detached** and observe it through its com
 
 ## Agent rules
 
-- **Run detached.** `fog <script> -d` starts in the background and returns; bare
+- **Run detached.** `fog <script> -d` starts in the background, showing setup and
+  per-service startup progress until the services are up, then returns; bare
   `fog <script>` opens the interactive TUI and blocks forever.
 - **Kill only pids you started** (or ones the user names). A human or another agent may
   share the `(project, script, branch)`; killing it tears down their services too.
@@ -35,7 +36,7 @@ Done when you can name the script you will run and the config path.
 ### 2. Start detached
 
 ```bash
-fog dev -d                      # background daemon; prints "daemon started pid=<pid>"
+fog dev -d                      # background daemon; shows startup progress, then prints "fog 'dev' started in background (pid <pid>)"
 fog dev -d --branch feature-x   # run the worktree checked out on that branch
 fog dev -d --no-share           # ignore share/reuse, start everything fresh
 ```

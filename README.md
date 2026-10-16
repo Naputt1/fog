@@ -186,7 +186,7 @@ fog index serve|kill|restart  # control the host-global web UI / API server
 | `-c`, `--config <PATH>`  | Path to config file or directory containing `fog.json` (default `fog.json`)                                     |
 | `--branch <BRANCH>`      | Run in the git worktree for this branch                                                                         |
 | `--port <NAME=PORT>`     | Override a top-level `ports` entry for this run (repeatable; `0` re-randomizes, e.g. `fog dev --port api=4000`) |
-| `-d`, `--detach`         | Run in background without TUI, captures logs to `$TMPDIR/fog-<pid>.logs/`                                       |
+| `-d`, `--detach`         | Run in background without TUI; waits until services start, showing progress, logs to `$TMPDIR/fog-<pid>.logs/`  |
 | `--no-share`             | Ignore `share:`/`reuse:` — start fresh even when a healthy sibling could be borrowed                            |
 | `--all`                  | With `fog kill`/`fog restart`: apply to every matching instance (conflicts with `PID`)                          |
 | `--force`                | With `fog kill`/`fog restart`: escalate to SIGTERM then SIGKILL for a wedged instance                           |

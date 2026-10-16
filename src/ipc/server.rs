@@ -107,6 +107,7 @@ pub(crate) fn handle_connection(mut stream: Stream, state: Arc<IpcState>) {
                 ports,
                 native_routes,
                 no_share: state.no_share,
+                started: state.startup_complete.load(Ordering::SeqCst),
             })
             .unwrap_or_default();
             let mut writer = stream;

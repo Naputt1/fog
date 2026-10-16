@@ -83,7 +83,7 @@ fog ls
 
 ```bash
 fog dev -d --branch main
-# prints: daemon started pid=5678 ... fog ls 5678
+# shows startup progress; prints the pid: fog ls 5678
 fog ls
 # 1234  dev  main  :3000   db:healthy api:healthy web:running
 # 5678  dev  main  :3001   db:reused  api:healthy web:running
