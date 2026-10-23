@@ -40,14 +40,32 @@ _fog() {{
         return 0
     fi
     if [[ "$cur" == --branch=* ]]; then
-        COMPREPLY=( $(compgen -W "{branches}" -- "${{cur#--branch=}}") )
+        COMPREPLY=( $(compgen -W "{branches}" -- "${{cur#--branch=}}" ) )
         return 0
     fi
-
-    opts="--config --save-logs --branch --detach --service --head --tail --all --force --port --completions -d -h --help -V --version"
+    if [[ "$prev" == "--config" || "$prev" == "-c" ]]; then
+        COMPREPLY=( $(compgen -f -- "$cur") )
+        return 0
+    fi
+    if [[ "$prev" == "--completions" ]]; then
+        COMPREPLY=( $(compgen -W "bash zsh fish" -- "$cur") )
+        return 0
+    fi
     if [[ "$prev" == "--service" || "$prev" == "-s" ]]; then
         return 0
     fi
+    if [[ "${{COMP_WORDS[1]}}" == "index" ]]; then
+        if [[ "$prev" == "index" ]]; then
+            COMPREPLY=( $(compgen -W "serve kill restart" -- "$cur") )
+            return 0
+        fi
+        if [[ "$prev" == "serve" ]]; then
+            COMPREPLY=( $(compgen -W "--foreground --port" -- "$cur") )
+            return 0
+        fi
+    fi
+
+    opts="--config --save-logs --branch --detach --service --head --tail --all --force --no-share --port --completions --verbose -c -d -s -v -h --help -V --version"
     if [[ "$cur" == -* ]]; then
         COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
     else
@@ -66,6 +84,15 @@ fn zsh_script() -> String {
         r##"#compdef fog
 # zsh completion for fog
 _fog() {{
+    if [[ $words[2] == "index" ]]; then
+        if (( CURRENT == 3 )); then
+            _values 'index command' serve kill restart
+        elif [[ $words[3] == "serve" ]]; then
+            _arguments '--foreground[Run in the foreground]' '--port=[Port for the index server]:port:'
+        fi
+        return 0
+    fi
+
     local context state line
     typeset -A opt_args
     _arguments \
@@ -78,8 +105,10 @@ _fog() {{
         '--tail=[Last N lines, or from +N to the end (fog logs)]:n:' \
         '--all[Apply to every matching instance (kill/restart)]' \
         '--force[Escalate to SIGTERM/SIGKILL if it does not stop (kill/restart)]' \
+        '--no-share[Ignore shared services]' \
         '--port=[Override a top-level ports entry for this run]:port:' \
         '--completions=[Generate a completion script]:shell:(bash zsh fish)' \
+        '(-v --verbose)'{{-v,--verbose}}'[Print verbose setup output]' \
         '(-h --help)'{{-h,--help}}'[Print help]' \
         '(-V --version)'{{-V,--version}}'[Print version]' \
         '1:command:(ls kill restart logs attach index)' \
@@ -110,11 +139,16 @@ complete -c fog -l head -d 'First N lines, or all but last N with -N (fog logs)'
 complete -c fog -l tail -d 'Last N lines, or from +N to the end (fog logs)' -r
 complete -c fog -l all -d 'Apply to every matching instance (kill/restart)'
 complete -c fog -l force -d 'Escalate to SIGTERM/SIGKILL if it does not stop (kill/restart)'
+complete -c fog -l no-share -d 'Ignore shared services'
 complete -c fog -l port -d 'Override a top-level ports entry for this run (NAME=PORT)' -r
 complete -c fog -l completions -d 'Generate a completion script' -a 'bash zsh fish'
+complete -c fog -s v -l verbose -d 'Print verbose setup output'
 complete -c fog -s h -l help -d 'Print help'
 complete -c fog -s V -l version -d 'Print version'
 complete -c fog -f -a 'ls kill restart logs attach index'
+complete -c fog -f -n 'test (count (commandline -opc)) -ge 2; and test (commandline -opc)[2] = index' -a 'serve kill restart' -d 'index command'
+complete -c fog -n 'test (count (commandline -opc)) -ge 3; and test (commandline -opc)[2] = index; and test (commandline -opc)[3] = serve' -l foreground -d 'Run the index server in the foreground'
+complete -c fog -n 'test (count (commandline -opc)) -ge 3; and test (commandline -opc)[2] = index; and test (commandline -opc)[3] = serve' -l port -r -d 'Index server port'
 "##,
     )
 }
