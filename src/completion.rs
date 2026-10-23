@@ -30,7 +30,8 @@ fn bash_script() -> String {
     format!(
         r##"# bash completion for fog
 _fog() {{
-    local cur prev opts
+    local cur prev opts i
+    local -i index_pos=0
     COMPREPLY=()
     cur="${{COMP_WORDS[COMP_CWORD]}}"
     prev="${{COMP_WORDS[COMP_CWORD-1]}}"
@@ -54,15 +55,28 @@ _fog() {{
     if [[ "$prev" == "--service" || "$prev" == "-s" ]]; then
         return 0
     fi
-    if [[ "${{COMP_WORDS[1]}}" == "index" ]]; then
-        if [[ "$prev" == "index" ]]; then
+    if [[ "$prev" == "--head" || "$prev" == "--tail" || "$prev" == "--port" ]]; then
+        return 0
+    fi
+    if [[ "$cur" == --port=* ]]; then
+        return 0
+    fi
+
+    # Locate `index` after any global flags, so `fog -v index serve` completes
+    # like `fog index serve`.
+    for (( i = 1; i < COMP_CWORD; i++ )); do
+        if [[ "${{COMP_WORDS[i]}}" == "index" ]]; then
+            index_pos=$i
+            break
+        fi
+    done
+    if (( index_pos > 0 )); then
+        if (( COMP_CWORD == index_pos + 1 )); then
             COMPREPLY=( $(compgen -W "serve kill restart" -- "$cur") )
-            return 0
-        fi
-        if [[ "$prev" == "serve" ]]; then
+        elif [[ "${{COMP_WORDS[index_pos+1]}}" == "serve" ]]; then
             COMPREPLY=( $(compgen -W "--foreground --port" -- "$cur") )
-            return 0
         fi
+        return 0
     fi
 
     opts="--config --save-logs --branch --detach --service --head --tail --all --force --no-share --port --completions --verbose -c -d -s -v -h --help -V --version"
@@ -84,10 +98,17 @@ fn zsh_script() -> String {
         r##"#compdef fog
 # zsh completion for fog
 _fog() {{
-    if [[ $words[2] == "index" ]]; then
-        if (( CURRENT == 3 )); then
+    local -i index_pos=0 i
+    for (( i = 2; i <= CURRENT; i++ )); do
+        if [[ $words[i] == index ]]; then
+            index_pos=$i
+            break
+        fi
+    done
+    if (( index_pos )); then
+        if (( CURRENT == index_pos + 1 )); then
             _values 'index command' serve kill restart
-        elif [[ $words[3] == "serve" ]]; then
+        elif [[ $words[index_pos+1] == serve ]]; then
             _arguments '--foreground[Run in the foreground]' '--port=[Port for the index server]:port:'
         fi
         return 0
@@ -165,6 +186,9 @@ mod tests {
         assert!(out.contains("--port"));
         assert!(out.contains("--head"));
         assert!(out.contains("--tail"));
+        assert!(out.contains("--no-share"));
+        assert!(out.contains("serve kill restart"));
+        assert!(out.contains("--foreground"));
         assert!(out.contains("complete -F _fog fog"));
     }
 
@@ -176,6 +200,9 @@ mod tests {
         assert!(out.contains("--port"));
         assert!(out.contains("--head"));
         assert!(out.contains("--tail"));
+        assert!(out.contains("--no-share"));
+        assert!(out.contains("serve kill restart"));
+        assert!(out.contains("--foreground"));
         assert!(out.contains("compdef _fog fog"));
     }
 
@@ -187,6 +214,9 @@ mod tests {
         assert!(out.contains("-l port"));
         assert!(out.contains("-l head"));
         assert!(out.contains("-l tail"));
+        assert!(out.contains("-l no-share"));
+        assert!(out.contains("serve kill restart"));
+        assert!(out.contains("-l foreground"));
         assert!(out.contains("complete -c fog"));
     }
 }
