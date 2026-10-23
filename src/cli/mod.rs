@@ -561,41 +561,29 @@ fn cmd_ls() -> io::Result<()> {
     let w_script = rows.iter().map(|r| r.script.len()).max().unwrap_or(0);
     let w_project = rows.iter().map(|r| r.project.len()).max().unwrap_or(0);
     let w_branch = rows.iter().map(|r| r.branch.len()).max().unwrap_or(0);
-    let w_proxy = rows.iter().map(|r| r.proxy.len()).max().unwrap_or(0);
-    let w_service = rows
-        .iter()
-        .flat_map(|r| r.services.iter())
-        .map(|(name, _)| name.len())
-        .max()
-        .unwrap_or(0);
-    let w_status = rows
-        .iter()
-        .flat_map(|r| r.services.iter())
-        .map(|(_, state)| state.len())
-        .max()
-        .unwrap_or(0);
 
     let w_pid = max(w_pid, "pid");
     let w_script = max(w_script, "script");
     let w_project = max(w_project, "project");
     let w_branch = max(w_branch, "branch");
-    let w_proxy = max(w_proxy, "proxy");
-    let w_service = max(w_service, "service");
-    let w_status = max(w_status, "status");
 
     println!(
-        "{:<w_pid$}  {:<w_script$}  {:<w_project$}  {:<w_branch$}  {:<w_proxy$}",
-        "pid", "script", "project", "branch", "proxy"
+        "{:>w_pid$}  {:<w_script$}  {:<w_project$}  {:<w_branch$}  proxy",
+        "pid", "script", "project", "branch"
     );
+    let color = color_enabled();
     for row in rows {
+        let proxy = match state_color(&row.proxy) {
+            Some(ansi) => colored(&row.proxy, ansi, color),
+            None => row.proxy.clone(),
+        };
         println!(
-            "{:<w_pid$}  {:<w_script$}  {:<w_project$}  {:<w_branch$}  {:<w_proxy$}",
-            row.pid, row.script, row.project, row.branch, row.proxy
+            "{:>w_pid$}  {:<w_script$}  {:<w_project$}  {:<w_branch$}  {proxy}",
+            row.pid, row.script, row.project, row.branch
         );
         if !row.services.is_empty() {
-            println!("  {:<w_service$}  {:<w_status$}", "service", "status");
-            for (name, state) in row.services {
-                println!("  {:<w_service$}  {:<w_status$}", name, state);
+            for line in service_table(&row.services, "  ") {
+                println!("{line}");
             }
         }
         println!();
@@ -634,6 +622,15 @@ fn colored(text: &str, ansi: &str, enable: bool) -> String {
     }
 }
 
+/// ANSI SGR dim, for de-emphasized table states (stopped/unknown).
+const ANSI_DIM: &str = "\x1b[2m";
+
+/// Whether styled stdout is wanted: it is a terminal and the user has not
+/// opted out with `NO_COLOR`.
+fn color_enabled() -> bool {
+    stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
+}
+
 /// Whether styled stderr is wanted: it is a terminal and the user has not
 /// opted out with `NO_COLOR`.
 fn stderr_color_enabled() -> bool {
@@ -666,6 +663,62 @@ fn usage_error(message: &str, hint: &str) -> ! {
     die(message, Some(hint), 2)
 }
 
+/// ANSI color for a status label, or `None` to leave it plain.
+fn state_color(state: &str) -> Option<&'static str> {
+    match state {
+        "healthy" | "running" => Some(MARKER_GREEN),
+        "unhealthy" | ":down" | "failed" => Some(MARKER_RED),
+        "starting" | "waiting" | "pending" => Some(MARKER_BLUE),
+        "stopped" | "unknown" => Some(ANSI_DIM),
+        _ => None,
+    }
+}
+
+/// Renders a `service  status` table for `fog ls` and `fog logs`, coloring the
+/// status column on a terminal.
+fn service_table(rows: &[(String, String)], indent: &str) -> Vec<String> {
+    let width = rows
+        .iter()
+        .map(|(name, _)| name.len())
+        .max()
+        .unwrap_or(0)
+        .max("service".len());
+    let color = color_enabled();
+    let mut lines = vec![format!("{indent}{:<width$}  status", "service")];
+    for (name, state) in rows {
+        let state = match state_color(state) {
+            Some(ansi) => colored(state, ansi, color),
+            None => state.clone(),
+        };
+        lines.push(format!("{indent}{:<width$}  {state}", name));
+    }
+    lines
+}
+
+/// Terminal width in columns, with a readable fallback when stdout is not a
+/// terminal (or the size cannot be read).
+fn terminal_width() -> usize {
+    crossterm::terminal::size()
+        .map(|(cols, _)| cols as usize)
+        .unwrap_or(100)
+}
+
+/// Shortens `line` to `width` characters, ending a cut line with `…`.
+fn truncate_to(line: &str, width: usize) -> String {
+    if line.chars().count() <= width {
+        return line.to_string();
+    }
+    match width {
+        0 => String::new(),
+        1 => "…".to_string(),
+        _ => {
+            let mut out: String = line.chars().take(width - 1).collect();
+            out.push('…');
+            out
+        }
+    }
+}
+
 /// A service's live state while an instance is shutting down.
 struct ShutdownService {
     name: String,
@@ -680,7 +733,10 @@ struct ShutdownService {
 struct StopProgress {
     pid: u32,
     tty: bool,
+    color: bool,
     script: String,
+    project: Option<String>,
+    branch: Option<String>,
     /// Whether the live block has been drawn (TTY only).
     drawn: bool,
     /// Whether the initial checklist has been printed (piped only).
@@ -696,7 +752,10 @@ impl StopProgress {
         Self {
             pid,
             tty: stdout().is_terminal(),
+            color: color_enabled(),
             script: String::new(),
+            project: None,
+            branch: None,
             drawn: false,
             printed: false,
             last: Vec::new(),
@@ -724,6 +783,8 @@ impl StopProgress {
         self.last_render = std::time::Instant::now();
         if self.script.is_empty() {
             self.script = status.script.clone();
+            self.project = status.project.as_deref().map(crate::project::display_name);
+            self.branch = status.branch.clone();
         }
         let services: Vec<ShutdownService> = status
             .services
@@ -742,11 +803,25 @@ impl StopProgress {
         self.last = services;
     }
 
+    /// `script 'dev', project 'acme', branch 'main'` — enough to tell which
+    /// environment is being stopped, even from a directory with no config.
+    fn target_label(&self) -> String {
+        let mut label = format!("script '{}'", self.script);
+        if let Some(project) = &self.project {
+            label.push_str(&format!(", project '{project}'"));
+        }
+        if let Some(branch) = &self.branch {
+            label.push_str(&format!(", branch '{branch}'"));
+        }
+        label
+    }
+
     fn render_live(&mut self, services: &[ShutdownService]) {
         if !self.drawn {
             println!(
-                "Shutting down fog instance {} (script '{}')...",
-                self.pid, self.script
+                "Shutting down fog instance {} ({})...",
+                self.pid,
+                self.target_label()
             );
             // Save the cursor so each redraw returns to the block start.
             print!("\x1b7");
@@ -756,7 +831,10 @@ impl StopProgress {
         let pending = SPINNER_FRAMES[self.frame % SPINNER_FRAMES.len()];
         self.frame = self.frame.wrapping_add(1);
         print!("\x1b8\x1b[J");
-        for line in shutdown_lines(services, pending, self.tty, |s| self.detail(s)) {
+        let detail_width = terminal_width().saturating_sub(6);
+        for line in shutdown_lines(services, pending, self.color, Some(detail_width), |s| {
+            self.detail(s)
+        }) {
             println!("{line}");
         }
         let _ = stdout().flush();
@@ -766,10 +844,12 @@ impl StopProgress {
         if !self.printed {
             self.printed = true;
             println!(
-                "Shutting down fog instance {} (script '{}')...",
-                self.pid, self.script
+                "Shutting down fog instance {} ({})...",
+                self.pid,
+                self.target_label()
             );
-            for line in shutdown_lines(services, SHUTDOWN_PENDING, false, |s| self.detail(s)) {
+            for line in shutdown_lines(services, SHUTDOWN_PENDING, false, None, |s| self.detail(s))
+            {
                 println!("{line}");
             }
             return;
@@ -807,7 +887,9 @@ impl StopProgress {
         }
         self.drawn = false;
         print!("\x1b8\x1b[J");
-        for line in shutdown_lines(&self.last, SHUTDOWN_PENDING, self.tty, |_| Vec::new()) {
+        for line in shutdown_lines(&self.last, SHUTDOWN_PENDING, self.color, None, |_| {
+            Vec::new()
+        }) {
             println!("{line}");
         }
         let _ = stdout().flush();
@@ -816,11 +898,12 @@ impl StopProgress {
 
 /// Builds the checklist rows for the shutdown view. `pending` is the marker
 /// shown for a service that has not stopped yet; `detail` supplies the extra
-/// lines shown under it.
+/// lines shown under it, truncated to `detail_width` when set.
 fn shutdown_lines(
     services: &[ShutdownService],
     pending: &str,
     color: bool,
+    detail_width: Option<usize>,
     detail: impl Fn(&ShutdownService) -> Vec<String>,
 ) -> Vec<String> {
     let width = services.iter().map(|s| s.name.len()).max().unwrap_or(0);
@@ -833,6 +916,10 @@ fn shutdown_lines(
         };
         lines.push(format!("  {marker} {:<width$}  {state}", svc.name));
         for d in detail(svc) {
+            let d = match detail_width {
+                Some(width) => truncate_to(&d, width),
+                None => d,
+            };
             lines.push(format!("      {d}"));
         }
     }
@@ -920,6 +1007,7 @@ struct StartProgress {
     pid: u32,
     script: String,
     tty: bool,
+    color: bool,
     drawn: bool,
     printed: bool,
     phases_printed: usize,
@@ -933,6 +1021,7 @@ impl StartProgress {
             pid,
             script: script.to_string(),
             tty: stdout().is_terminal(),
+            color: color_enabled(),
             drawn: false,
             printed: false,
             phases_printed: 0,
@@ -965,7 +1054,7 @@ impl StartProgress {
                 self.drawn = true;
             }
             print!("\x1b8\x1b[J");
-            for line in start_lines(phases, &services, pending, all_done, self.tty) {
+            for line in start_lines(phases, &services, pending, all_done, self.color) {
                 println!("{line}");
             }
             let _ = stdout().flush();
@@ -1748,21 +1837,8 @@ fn print_available_services(target_pid: u32, script: &str, rows: &[(String, Stri
         return;
     }
     println!("Services for instance {target_pid} (script '{script}'):");
-    let w_service = rows
-        .iter()
-        .map(|(name, _)| name.len())
-        .max()
-        .unwrap_or(0)
-        .max("service".len());
-    let w_status = rows
-        .iter()
-        .map(|(_, state)| state.len())
-        .max()
-        .unwrap_or(0)
-        .max("status".len());
-    println!("  {:<w_service$}  {:<w_status$}", "service", "status");
-    for (name, state) in rows {
-        println!("  {:<w_service$}  {:<w_status$}", name, state);
+    for line in service_table(rows, "  ") {
+        println!("{line}");
     }
     println!();
     println!("Show one service: fog logs {target_pid} --service <name>");
@@ -3541,7 +3617,7 @@ mod tests {
                 shutdown_cmd: None,
             },
         ];
-        let lines = shutdown_lines(&services, SHUTDOWN_PENDING, false, |s| {
+        let lines = shutdown_lines(&services, SHUTDOWN_PENDING, false, None, |s| {
             match s.name.as_str() {
                 "web" => vec!["$ docker compose down".to_string()],
                 "db" => vec!["db ready".to_string(), "db serving".to_string()],
@@ -3568,7 +3644,7 @@ mod tests {
             running: true,
             shutdown_cmd: None,
         }];
-        let lines = shutdown_lines(&services, SPINNER_FRAMES[3], false, |_| Vec::new());
+        let lines = shutdown_lines(&services, SPINNER_FRAMES[3], false, None, |_| Vec::new());
         assert_eq!(
             lines,
             vec![format!("  {} web  shutting down", SPINNER_FRAMES[3])]
@@ -3589,7 +3665,7 @@ mod tests {
                 shutdown_cmd: None,
             },
         ];
-        let lines = shutdown_lines(&services, SHUTDOWN_PENDING, true, |_| Vec::new());
+        let lines = shutdown_lines(&services, SHUTDOWN_PENDING, true, None, |_| Vec::new());
         assert_eq!(
             lines,
             vec![
@@ -3597,6 +3673,48 @@ mod tests {
                 format!("  {}⠙{} web  shutting down", MARKER_BLUE, ANSI_RESET),
             ]
         );
+    }
+
+    #[test]
+    fn test_truncate_to_keeps_short_lines() {
+        assert_eq!(truncate_to("hello", 5), "hello");
+        assert_eq!(truncate_to("hello", 6), "hello");
+    }
+
+    #[test]
+    fn test_truncate_to_cuts_with_ellipsis() {
+        assert_eq!(truncate_to("hello world", 5), "hell…");
+        assert_eq!(truncate_to("hello", 1), "…");
+        assert_eq!(truncate_to("hello", 0), "");
+    }
+
+    #[test]
+    fn test_truncate_to_counts_chars_not_bytes() {
+        assert_eq!(truncate_to("aé漢🙂", 3), "aé…");
+    }
+
+    #[test]
+    fn test_state_color_maps_known_states() {
+        assert_eq!(state_color("healthy"), Some(MARKER_GREEN));
+        assert_eq!(state_color("unhealthy"), Some(MARKER_RED));
+        assert_eq!(state_color(":down"), Some(MARKER_RED));
+        assert_eq!(state_color("starting"), Some(MARKER_BLUE));
+        assert_eq!(state_color("stopped"), Some(ANSI_DIM));
+        assert_eq!(state_color(":3000"), None);
+    }
+
+    #[test]
+    fn test_service_table_aligns_names() {
+        let rows = vec![
+            ("api".to_string(), "healthy".to_string()),
+            ("frontend".to_string(), "stopped".to_string()),
+        ];
+        // Test stdout is captured, so color_enabled() is false and the table is
+        // rendered plain.
+        let lines = service_table(&rows, "  ");
+        assert_eq!(lines[0], "  service   status");
+        assert_eq!(lines[1], "  api       healthy");
+        assert_eq!(lines[2], "  frontend  stopped");
     }
 
     #[test]
