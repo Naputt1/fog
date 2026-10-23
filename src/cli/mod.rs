@@ -2,7 +2,8 @@
 
 #![deny(unsafe_op_in_unsafe_fn)]
 
-use clap::Parser;
+use clap::parser::ValueSource;
+use clap::{CommandFactory, FromArgMatches, Parser};
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -10,7 +11,7 @@ use crossterm::terminal::{
 };
 use std::collections::HashMap;
 use std::ffi::OsString;
-use std::io::{BufRead, BufReader, IsTerminal, Write, stdout};
+use std::io::{BufRead, BufReader, IsTerminal, Write, stderr, stdout};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -48,13 +49,21 @@ const DAEMON_START_TIMEOUT: Duration = Duration::from_secs(120);
 /// only exists once the ports are settled).
 const STARTUP_PROGRESS_FILE: &str = "startup.progress";
 
+/// Names `fog` handles itself instead of looking up as a script in `fog.json`.
+const BUILTIN_COMMANDS: [&str; 6] = ["ls", "kill", "restart", "logs", "index", "attach"];
+
+/// Whether `name` is a built-in command rather than a configured script.
+fn is_builtin(name: &str) -> bool {
+    BUILTIN_COMMANDS.contains(&name)
+}
+
 /// Command-line interface arguments parsed via clap.
 #[derive(Parser)]
 #[command(
     name = "fog",
     version = env!("CARGO_PKG_VERSION"),
     about = "Terminal-based service orchestrator & reverse-proxy dashboard",
-    after_help = "Built-in commands:\n  fog ls [PID]                    list running instances and service status\n  fog kill [PID|--all]            gracefully shut down a running instance\n  fog kill --force [PID|--all]    forcibly shut down a wedged instance\n  fog restart [PID|--all]         restart a running instance\n  fog logs [PID]                  list services and their status\n  fog logs [PID] --service NAME   print captured output of one service\n  fog logs [PID] -s NAME --tail   limit lines: --head N|-N, --tail N|-N|+N\n  fog attach [PID]                reattach the TUI to a running instance (replays screen history)\n  fog index serve [--foreground] [--port N]  run the index server (detached by default)\n  fog index kill                  stop the index server\n  fog index restart               restart the index server\n\nWith no PID, kill/restart/logs target the instance started from the local\nfog.json (same config directory, so the branch is implicit). When several\nlocal instances match, the command lists them: pass an explicit PID, or\n--all (kill/restart) to apply to every local match. Outside a directory\nwith fog.json, --all applies to every running instance.\n\nWhen a kill/restart grace period is not enough (a wedged instance that never\nconsumes its kill flag), --force escalates to SIGTERM then SIGKILL.\n\nRun a script from fog.json:\n  fog <script> [OPTIONS]  (e.g. fog dev)\n\nOverride an allocated port for one run:\n  fog dev --port api=4000       (repeatable; --port web=0 re-randomizes)"
+    after_help = "Built-in commands:\n  fog ls [PID]                    list running instances and service status\n  fog kill [PID|--all]            gracefully shut down a running instance\n  fog kill --force [PID|--all]    forcibly shut down a wedged instance\n  fog restart [PID|--all]         restart a running instance\n  fog logs [PID]                  list services and their status\n  fog logs [PID] --service NAME   print captured output of one service\n  fog logs [PID] -s NAME --tail   limit lines: --head N|-N, --tail N|-N|+N\n  fog attach [PID]                reattach the TUI to a running instance (replays screen history)\n  fog index serve [--foreground] [--port N]  run the index server (detached by default)\n  fog index kill                  stop the index server\n  fog index restart               restart the index server\n\nWith no PID, kill/restart/logs target the instance started from the local\nfog.json (same config directory, so the branch is implicit). When several\nlocal instances match, the command lists them: pass an explicit PID, or\n--all (kill/restart) to apply to every local match. Outside a directory\nwith fog.json, --all applies to every running instance.\n\nWhen a kill/restart grace period is not enough (a wedged instance that never\nconsumes its kill flag), --force escalates to SIGTERM then SIGKILL.\n\nRun a script from fog.json:\n  fog <script> [OPTIONS]  (e.g. fog dev)\n\nWith no script, fog lists the scripts in fog.json, or prints this help when\nthere is no config in the current directory.\n\nOverride an allocated port for one run:\n  fog dev --port api=4000       (repeatable; --port web=0 re-randomizes)"
 )]
 struct Cli {
     /// Script to run (e.g. `fog dev`), or a built-in command
@@ -146,15 +155,22 @@ fn resolve_run_config(cli: &Cli) -> PathBuf {
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let worktrees = crate::worktree::list(&cwd).unwrap_or_else(|| {
-        eprintln!("error: --branch requires a git repository (could not list worktrees)");
-        std::process::exit(1);
+        die(
+            "--branch requires a git repository (could not list worktrees)",
+            Some("run `fog --branch <name>` inside a git checkout"),
+            1,
+        )
     });
 
     let Some(wt) = worktrees
         .iter()
         .find(|w| w.branch.as_deref() == Some(branch.as_str()))
     else {
-        eprintln!("error: no worktree is checked out on branch '{}'", branch);
+        eprintln!(
+            "{} no worktree is checked out on branch '{}'",
+            colored("error:", MARKER_RED, stderr_color_enabled()),
+            branch
+        );
         eprintln!("available worktrees:");
         for w in &worktrees {
             let label = w.branch.as_deref().unwrap_or("(detached)");
@@ -187,12 +203,16 @@ fn resolve_config_path(path: &Path) -> PathBuf {
 
 /// Loads and parses the config file, exiting with a diagnostic on failure.
 fn load_config(path: &Path) -> Config {
+    if !path.exists() {
+        die(
+            &format!("no fog.json found at '{}'", path.display()),
+            Some("create one here, pass --config <path>, or run `fog --help`"),
+            1,
+        );
+    }
     match crate::config::load(path) {
         Ok(c) => c,
-        Err(e) => {
-            eprintln!("error: {e}");
-            std::process::exit(1);
-        }
+        Err(e) => fail(&e),
     }
 }
 
@@ -203,13 +223,25 @@ fn load_runtime_config_for_index() -> crate::config::Config {
 
 /// Lists available script names and exits with an error.
 fn list_scripts_and_exit(config: &Config, message: &str) -> ! {
-    eprintln!("{message}");
+    let tty = stderr_color_enabled();
+    eprintln!("{} {message}", colored("error:", MARKER_RED, tty));
+    eprintln!();
+    eprintln!("Available scripts:");
     let mut names: Vec<&String> = config.scripts.keys().collect();
     names.sort();
     for name in names {
         eprintln!("  fog {name}");
     }
-    std::process::exit(1);
+    eprintln!();
+    eprintln!(
+        "{}",
+        colored(
+            "hint: run `fog --help` for built-in commands",
+            MARKER_BLUE,
+            tty
+        )
+    );
+    std::process::exit(2);
 }
 
 /// Names of reuse-flagged services in a script.
@@ -331,7 +363,10 @@ fn reclaim_takeover(from_pid: u32, names: &[String]) -> Option<HashMap<String, i
     let path = ipc::socket_path(from_pid);
     let outcome = ipc::reclaim(&path, names, true);
     if let Some(err) = &outcome.error {
-        eprintln!("error: could not take over instance {from_pid}: {err}");
+        eprintln!(
+            "{} could not take over instance {from_pid}: {err}",
+            colored("error:", MARKER_RED, stderr_color_enabled())
+        );
         return None;
     }
     if outcome.incomplete {
@@ -589,6 +624,33 @@ fn colored(text: &str, ansi: &str, enable: bool) -> String {
     } else {
         text.to_string()
     }
+}
+
+/// Whether styled stderr is wanted: it is a terminal and the user has not
+/// opted out with `NO_COLOR`.
+fn stderr_color_enabled() -> bool {
+    stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none()
+}
+
+/// Prints `error: <message>` and an optional `hint:` line to stderr, then
+/// exits with `code`.
+fn die(message: &str, hint: Option<&str>, code: i32) -> ! {
+    let tty = stderr_color_enabled();
+    eprintln!("{} {message}", colored("error:", MARKER_RED, tty));
+    if let Some(hint) = hint {
+        eprintln!("{} {hint}", colored("hint:", MARKER_BLUE, tty));
+    }
+    std::process::exit(code);
+}
+
+/// A runtime failure (the command was understood but could not run).
+fn fail(message: &str) -> ! {
+    die(message, None, 1)
+}
+
+/// Bad or conflicting flags: exits with clap's usage exit code.
+fn usage_error(message: &str, hint: &str) -> ! {
+    die(message, Some(hint), 2)
 }
 
 /// A service's live state while an instance is shutting down.
@@ -1069,8 +1131,11 @@ fn cmd_kill(pid: Option<u32>, all: bool, cli: &Cli) -> io::Result<()> {
     let instances = ipc::find_instances()?;
 
     if instances.is_empty() {
-        eprintln!("error: no running fog instances");
-        std::process::exit(1);
+        die(
+            "no running fog instances",
+            Some("start one with `fog <script>`"),
+            1,
+        );
     }
 
     let targets = resolve_targets(&instances, pid, all, cli, "kill");
@@ -1092,8 +1157,11 @@ fn cmd_restart(pid: Option<u32>, all: bool, cli: &Cli) -> io::Result<()> {
     let instances = ipc::find_instances()?;
 
     if instances.is_empty() {
-        eprintln!("error: no running fog instances");
-        std::process::exit(1);
+        die(
+            "no running fog instances",
+            Some("start one with `fog <script>`"),
+            1,
+        );
     }
 
     let targets = resolve_targets(&instances, pid, all, cli, "restart");
@@ -1101,8 +1169,11 @@ fn cmd_restart(pid: Option<u32>, all: bool, cli: &Cli) -> io::Result<()> {
         let target_pid = *target_pid;
         // Capture the target's status before killing so we can relaunch it.
         let status = ipc::query_status(path).unwrap_or_else(|e| {
-            eprintln!("error: could not query instance {target_pid}: {e}");
-            std::process::exit(1);
+            die(
+                &format!("could not query instance {target_pid}: {e}"),
+                None,
+                1,
+            )
         });
         let script = status.script.clone();
         let config_dir = status.config_dir.clone();
@@ -1384,6 +1455,11 @@ fn resolve_targets(
     match select_targets(instances, &statuses, pid, all, local.as_deref(), cmd) {
         Ok(targets) => targets,
         Err(msg) => {
+            let msg = msg.replacen(
+                "error:",
+                &colored("error:", MARKER_RED, stderr_color_enabled()),
+                1,
+            );
             eprintln!("{msg}");
             std::process::exit(1);
         }
@@ -1649,12 +1725,12 @@ fn print_log_file(
                     println!();
                 }
             }
-            Err(e) => eprintln!("error: could not read {}: {e}", file.display()),
+            Err(e) => die(&format!("could not read {}: {e}", file.display()), None, 1),
         }
         return;
     }
     if let Err(e) = print_log_slice(file, head, tail) {
-        eprintln!("error: could not read {}: {e}", file.display());
+        die(&format!("could not read {}: {e}", file.display()), None, 1);
     }
 }
 
@@ -1697,8 +1773,11 @@ fn cmd_logs(pid: Option<u32>, service: Option<String>, cli: &Cli) -> io::Result<
     let instances = ipc::find_instances()?;
 
     if instances.is_empty() {
-        eprintln!("error: no running fog instances");
-        std::process::exit(1);
+        die(
+            "no running fog instances",
+            Some("start one with `fog <script>`"),
+            1,
+        );
     }
 
     let targets = resolve_targets(&instances, pid, false, cli, "logs");
@@ -1706,10 +1785,11 @@ fn cmd_logs(pid: Option<u32>, service: Option<String>, cli: &Cli) -> io::Result<
 
     let status = match ipc::query_status(path) {
         Ok(s) => s,
-        Err(e) => {
-            eprintln!("error: could not query instance {target_pid}: {e}");
-            std::process::exit(1);
-        }
+        Err(e) => die(
+            &format!("could not query instance {target_pid}: {e}"),
+            None,
+            1,
+        ),
     };
 
     let dir = ipc::instance_log_dir(target_pid);
@@ -1739,7 +1819,10 @@ fn cmd_logs(pid: Option<u32>, service: Option<String>, cli: &Cli) -> io::Result<
         let file = dir.join(format!("{}.log", ipc::sanitize_service_name(wanted)));
         file.is_file().then(|| wanted.to_string())
     }) else {
-        eprintln!("error: unknown service '{wanted}' for instance {target_pid}");
+        eprintln!(
+            "{} unknown service '{wanted}' for instance {target_pid}",
+            colored("error:", MARKER_RED, stderr_color_enabled())
+        );
         print_available_services(target_pid, &status.script, &rows);
         std::process::exit(1);
     };
@@ -1765,8 +1848,11 @@ fn cmd_logs(pid: Option<u32>, service: Option<String>, cli: &Cli) -> io::Result<
                 }
             }
             Err(e) => {
-                eprintln!("error: could not query proxy log on instance {target_pid}: {e}");
-                std::process::exit(1);
+                die(
+                    &format!("could not query proxy log on instance {target_pid}: {e}"),
+                    None,
+                    1,
+                );
             }
         }
         return Ok(());
@@ -1774,8 +1860,11 @@ fn cmd_logs(pid: Option<u32>, service: Option<String>, cli: &Cli) -> io::Result<
 
     let file = dir.join(format!("{}.log", ipc::sanitize_service_name(&name)));
     if !file.is_file() {
-        eprintln!("error: instance {target_pid} has no captured log for service '{name}'");
-        std::process::exit(1);
+        die(
+            &format!("instance {target_pid} has no captured log for service '{name}'"),
+            Some("run `fog logs <pid>` to list services with logs"),
+            1,
+        );
     }
     print_log_file(&status.script, &name, &file, cli.head, cli.tail);
     Ok(())
@@ -1869,7 +1958,7 @@ fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>) -> io::Res
     let config = load_config(&config_path);
     let script = match config.scripts.get(name) {
         Some(s) => s,
-        None => list_scripts_and_exit(&config, &format!("error: unknown script '{}'", name)),
+        None => list_scripts_and_exit(&config, &format!("unknown script '{name}'")),
     };
 
     // Setup diagnostics are collected rather than printed immediately: in
@@ -2579,14 +2668,18 @@ fn daemonize(script: &str) -> io::Result<()> {
         }
         if child.try_wait().ok().flatten().is_some() {
             view.finish();
-            eprintln!("error: detached fog '{script}' (pid {pid}) exited during startup");
+            eprintln!(
+                "{} detached fog '{script}' (pid {pid}) exited during startup",
+                colored("error:", MARKER_RED, stderr_color_enabled())
+            );
             eprintln!("  logs: {}", ipc::instance_log_dir(pid).display());
             std::process::exit(1);
         }
         if !socket_ready && std::time::Instant::now() >= socket_deadline {
             view.finish();
             eprintln!(
-                "error: detached fog '{script}' (pid {pid}) did not become ready within {}s",
+                "{} detached fog '{script}' (pid {pid}) did not become ready within {}s",
+                colored("error:", MARKER_RED, stderr_color_enabled()),
                 DAEMON_READY_TIMEOUT.as_secs()
             );
             eprintln!("  logs: {}", ipc::instance_log_dir(pid).display());
@@ -2623,20 +2716,18 @@ fn parse_index_serve_args(args: &[String]) -> (bool, Option<u16>) {
             i += 1;
             match args.get(i).and_then(|s| s.parse::<u16>().ok()) {
                 Some(p) => port = Some(p),
-                None => {
-                    eprintln!(
-                        "error: {a} requires a port number (e.g. `fog index serve --port 18080`)"
-                    );
-                    std::process::exit(1);
-                }
+                None => usage_error(
+                    &format!("{a} requires a port number"),
+                    "e.g. `fog index serve --port 18080`",
+                ),
             }
         } else if let Some(v) = a.strip_prefix("--port=") {
             match v.parse::<u16>() {
                 Ok(p) => port = Some(p),
-                Err(_) => {
-                    eprintln!("error: invalid --port value '{v}'");
-                    std::process::exit(1);
-                }
+                Err(_) => usage_error(
+                    &format!("invalid --port value '{v}'"),
+                    "pass a port between 1 and 65535",
+                ),
             }
         } else if a == "-h" || a == "--help" {
             println!("Usage: fog index serve [--foreground] [--port N]");
@@ -2645,10 +2736,10 @@ fn parse_index_serve_args(args: &[String]) -> (bool, Option<u16>) {
             println!("pass --foreground to block in the terminal.");
             std::process::exit(0);
         } else {
-            eprintln!(
-                "error: unknown flag '{a}' for `fog index serve` (see `fog index serve --help`)"
+            usage_error(
+                &format!("unknown flag '{a}' for `fog index serve`"),
+                "see `fog index serve --help`",
             );
-            std::process::exit(1);
         }
         i += 1;
     }
@@ -2683,8 +2774,11 @@ fn cmd_attach(cli: &Cli) -> io::Result<()> {
             match ipc::query_status(&path) {
                 Ok(status) => (pid, status),
                 Err(e) => {
-                    eprintln!("error: no running fog instance with pid {pid}: {e}");
-                    std::process::exit(1);
+                    die(
+                        &format!("no running fog instance with pid {pid}: {e}"),
+                        Some("run `fog ls` to list running instances"),
+                        1,
+                    );
                 }
             }
         }
@@ -2697,12 +2791,18 @@ fn cmd_attach(cli: &Cli) -> io::Result<()> {
             }
             match live.len() {
                 0 => {
-                    eprintln!("error: no running fog instances to attach to");
-                    std::process::exit(1);
+                    die(
+                        "no running fog instances",
+                        Some("start one with `fog <script>`"),
+                        1,
+                    );
                 }
                 1 => live.pop().expect("checked len"),
                 _ => {
-                    eprintln!("error: multiple fog instances are running; pass a pid:");
+                    eprintln!(
+                        "{} multiple fog instances are running; pass a pid:",
+                        colored("error:", MARKER_RED, stderr_color_enabled())
+                    );
                     for (pid, status) in &live {
                         eprintln!(
                             "  fog attach {pid}    {} ({})",
@@ -2717,8 +2817,11 @@ fn cmd_attach(cli: &Cli) -> io::Result<()> {
     };
 
     if status.no_share {
-        eprintln!("error: instance {pid} runs with --no-share; its services cannot be handed over");
-        std::process::exit(1);
+        die(
+            &format!("instance {pid} runs with --no-share; its services cannot be handed over"),
+            None,
+            1,
+        );
     }
 
     // Reconstruct the target's invocation: its script plus its exact config
@@ -2730,8 +2833,11 @@ fn cmd_attach(cli: &Cli) -> io::Result<()> {
             .map(|d| Path::new(d).join("fog.json").to_string_lossy().into_owned())
     });
     let Some(config_path) = config_path else {
-        eprintln!("error: instance {pid} did not report a config path");
-        std::process::exit(1);
+        die(
+            &format!("instance {pid} did not report a config path"),
+            Some("restart it with a current fog build"),
+            1,
+        );
     };
 
     let mut attach_cli = Cli::parse_from([
@@ -2744,6 +2850,34 @@ fn cmd_attach(cli: &Cli) -> io::Result<()> {
     attach_cli.save_logs = cli.save_logs;
 
     run_script_inner(&status.script, &attach_cli, Some(pid))
+}
+
+/// Usage shown by `fog index` with no (or an unknown) subcommand.
+const INDEX_USAGE: &str = "\
+Usage: fog index <command>
+
+Commands:
+  serve    Run the index server (detached by default)
+  kill     Stop the index server
+  restart  Restart the index server
+
+Options for `serve`:
+  --foreground  Run in the foreground instead of detaching
+  --port <N>    Listen on this port instead of the configured one
+";
+
+/// Prints the CLI help to stdout, tolerating a closed pipe (`fog | head`).
+fn print_cli_help() -> io::Result<()> {
+    let mut command = Cli::command();
+    let result = command.print_help().and_then(|()| {
+        let mut out = stdout();
+        out.write_all(b"\n")?;
+        out.flush()
+    });
+    match result {
+        Err(err) if err.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+        other => other,
+    }
 }
 
 pub fn run() -> io::Result<()> {
@@ -2784,16 +2918,39 @@ pub fn run() -> io::Result<()> {
                             .display()
                     );
                 } else {
-                    eprintln!("error: index server did not start on :{port}");
-                    std::process::exit(1);
+                    fail(&format!("index server did not start on :{port}"));
                 }
                 return Ok(());
             }
-            _ => {}
+            Some("-h") | Some("--help") | Some("help") => {
+                print!("{INDEX_USAGE}");
+                return Ok(());
+            }
+            Some(other) => {
+                eprintln!(
+                    "{} unknown index command '{other}'",
+                    colored("error:", MARKER_RED, stderr_color_enabled())
+                );
+                eprint!("{INDEX_USAGE}");
+                std::process::exit(2);
+            }
+            None => {
+                eprintln!(
+                    "{} missing index command",
+                    colored("error:", MARKER_RED, stderr_color_enabled())
+                );
+                eprint!("{INDEX_USAGE}");
+                std::process::exit(2);
+            }
         }
     }
 
-    let cli = Cli::parse();
+    let matches = Cli::command().get_matches();
+    let config_from_cli = matches.value_source("config") == Some(ValueSource::CommandLine);
+    let cli = match Cli::from_arg_matches(&matches) {
+        Ok(cli) => cli,
+        Err(err) => err.exit(),
+    };
 
     if let Some(shell) = cli.completions {
         print!("{}", crate::completion::generate(shell));
@@ -2803,24 +2960,26 @@ pub fn run() -> io::Result<()> {
     // `--service` only applies to `fog logs`; reject it elsewhere before the
     // detach path so it can never leak into a daemon child's arguments.
     if cli.service.is_some() && cli.script.as_deref() != Some("logs") {
-        eprintln!("error: --service only applies to `fog logs` (e.g. `fog logs --service api`)");
-        std::process::exit(1);
+        usage_error(
+            "--service only applies to `fog logs`",
+            "e.g. `fog logs --service api`",
+        );
     }
 
     // `--head`/`--tail` only apply to `fog logs`, and only alongside a service
     // selection (the plain listing is already short).
     if cli.head.is_some() || cli.tail.is_some() {
         if cli.script.as_deref() != Some("logs") {
-            eprintln!(
-                "error: --head/--tail only apply to `fog logs` (e.g. `fog logs <pid> -s api --tail 50`)"
+            usage_error(
+                "--head/--tail only apply to `fog logs`",
+                "e.g. `fog logs <pid> -s api --tail 50`",
             );
-            std::process::exit(1);
         }
         if cli.service.is_none() {
-            eprintln!(
-                "error: --head/--tail require --service (e.g. `fog logs <pid> -s api --tail 50`)"
+            usage_error(
+                "--head/--tail require --service",
+                "e.g. `fog logs <pid> -s api --tail 50`",
             );
-            std::process::exit(1);
         }
     }
 
@@ -2830,43 +2989,40 @@ pub fn run() -> io::Result<()> {
         match cli.script.as_deref() {
             Some("kill") | Some("restart") => {}
             Some("logs") => {
-                eprintln!(
-                    "error: --all only applies to `fog kill` and `fog restart`; for logs, pass an explicit PID"
+                usage_error(
+                    "--all only applies to `fog kill` and `fog restart`",
+                    "for logs, pass an explicit PID",
                 );
-                std::process::exit(1);
             }
             _ => {
-                eprintln!("error: --all only applies to `fog kill` and `fog restart`");
-                std::process::exit(1);
+                usage_error(
+                    "--all only applies to `fog kill` and `fog restart`",
+                    "e.g. `fog kill --all`",
+                );
             }
         }
         if cli.pid.is_some() {
-            eprintln!("error: --all cannot be used with a PID");
-            std::process::exit(1);
+            usage_error(
+                "--all cannot be used with a PID",
+                "drop the PID or drop --all",
+            );
         }
     }
 
     // `--force` only applies to `fog kill` / `fog restart`.
     if cli.force && !matches!(cli.script.as_deref(), Some("kill") | Some("restart")) {
-        eprintln!("error: --force only applies to `fog kill` and `fog restart`");
-        std::process::exit(1);
+        usage_error(
+            "--force only applies to `fog kill` and `fog restart`",
+            "e.g. `fog kill --force`",
+        );
     }
 
     // `--port` only applies when running a script.
-    if !cli.port.is_empty() {
-        match cli.script.as_deref() {
-            Some(name)
-                if !matches!(
-                    name,
-                    "ls" | "kill" | "restart" | "logs" | "index" | "attach"
-                ) => {}
-            _ => {
-                eprintln!(
-                    "error: --port only applies when running a script (e.g. `fog dev --port api=4000`)"
-                );
-                std::process::exit(1);
-            }
-        }
+    if !cli.port.is_empty() && cli.script.as_deref().is_none_or(is_builtin) {
+        usage_error(
+            "--port only applies when running a script",
+            "e.g. `fog dev --port api=4000`",
+        );
     }
 
     // Detach: run the script in the background and return once it is serving.
@@ -2874,21 +3030,17 @@ pub fn run() -> io::Result<()> {
     // headless path in run_script and must not re-daemonize.
     if cli.detach && std::env::var_os("FOG_DAEMON_CHILD").is_none() {
         match cli.script.as_deref() {
-            Some(name)
-                if !matches!(
-                    name,
-                    "ls" | "kill" | "restart" | "logs" | "index" | "attach"
-                ) =>
-            {
+            Some(name) if !is_builtin(name) => {
                 return daemonize(name);
             }
             Some(_) => {
-                eprintln!("error: --detach only applies to running a script (e.g. `fog dev -d`)");
-                std::process::exit(1);
+                usage_error(
+                    "--detach only applies to running a script",
+                    "e.g. `fog dev -d`",
+                );
             }
             None => {
-                eprintln!("error: --detach requires a script (e.g. `fog dev -d`)");
-                std::process::exit(1);
+                usage_error("--detach requires a script", "e.g. `fog dev -d`");
             }
         }
     }
@@ -2902,12 +3054,29 @@ pub fn run() -> io::Result<()> {
         Some(name) => run_script(name, &cli),
         None => {
             let config_path = resolve_config_path(&resolve_run_config(&cli));
+            // `fog` on its own is an orientation prompt, not an error: show the
+            // help when there is no config here, and the script list when there
+            // is. Only an explicitly named missing config is an error.
+            if !config_path.exists() && !config_from_cli {
+                print_cli_help()?;
+                return Ok(());
+            }
             let config = load_config(&config_path);
             if config.scripts.is_empty() {
-                eprintln!("error: no scripts defined in '{}'", config_path.display());
-                std::process::exit(1);
+                fail(&format!(
+                    "no scripts defined in '{}'",
+                    config_path.display()
+                ));
             }
-            list_scripts_and_exit(&config, "error: no script specified")
+            println!("Available scripts in '{}':", config_path.display());
+            let mut names: Vec<&String> = config.scripts.keys().collect();
+            names.sort();
+            for name in names {
+                println!("  fog {name}");
+            }
+            println!();
+            println!("Run one with `fog <script>`; see `fog --help` for built-in commands.");
+            Ok(())
         }
     }
 }

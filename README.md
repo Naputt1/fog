@@ -168,6 +168,7 @@ for full details.
 ## Usage
 
 ```bash
+fog                           # list scripts here, or print help when there is no fog.json
 fog <script> [OPTIONS]        # run a script (e.g. fog dev)
 fog ls                        # list running instances, project/branch and service status
 fog restart [pid]             # restart a running instance
