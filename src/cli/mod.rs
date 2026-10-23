@@ -168,7 +168,7 @@ fn resolve_run_config(cli: &Cli) -> PathBuf {
     else {
         eprintln!(
             "{} no worktree is checked out on branch '{}'",
-            colored("error:", MARKER_RED, stderr_color_enabled()),
+            error_label(),
             branch
         );
         eprintln!("available worktrees:");
@@ -234,7 +234,7 @@ fn script_list_lines(config: &Config) -> Vec<String> {
 /// Lists available script names and exits with an error.
 fn list_scripts_and_exit(config: &Config, message: &str) -> ! {
     let tty = stderr_color_enabled();
-    eprintln!("{} {message}", colored("error:", MARKER_RED, tty));
+    eprintln!("{} {message}", error_label());
     eprintln!();
     eprintln!("Available scripts:");
     for line in script_list_lines(config) {
@@ -373,7 +373,7 @@ fn reclaim_takeover(from_pid: u32, names: &[String]) -> Option<HashMap<String, i
     if let Some(err) = &outcome.error {
         eprintln!(
             "{} could not take over instance {from_pid}: {err}",
-            colored("error:", MARKER_RED, stderr_color_enabled())
+            error_label()
         );
         return None;
     }
@@ -640,11 +640,16 @@ fn stderr_color_enabled() -> bool {
     stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none()
 }
 
+/// The colored `error:` label that prefixes an error line on stderr.
+fn error_label() -> String {
+    colored("error:", MARKER_RED, stderr_color_enabled())
+}
+
 /// Prints `error: <message>` and an optional `hint:` line to stderr, then
 /// exits with `code`.
 fn die(message: &str, hint: Option<&str>, code: i32) -> ! {
     let tty = stderr_color_enabled();
-    eprintln!("{} {message}", colored("error:", MARKER_RED, tty));
+    eprintln!("{} {message}", error_label());
     if let Some(hint) = hint {
         eprintln!("{} {hint}", colored("hint:", MARKER_BLUE, tty));
     }
@@ -1821,7 +1826,7 @@ fn cmd_logs(pid: Option<u32>, service: Option<String>, cli: &Cli) -> io::Result<
     }) else {
         eprintln!(
             "{} unknown service '{wanted}' for instance {target_pid}",
-            colored("error:", MARKER_RED, stderr_color_enabled())
+            error_label()
         );
         print_available_services(target_pid, &status.script, &rows);
         std::process::exit(1);
@@ -2670,7 +2675,7 @@ fn daemonize(script: &str) -> io::Result<()> {
             view.finish();
             eprintln!(
                 "{} detached fog '{script}' (pid {pid}) exited during startup",
-                colored("error:", MARKER_RED, stderr_color_enabled())
+                error_label()
             );
             eprintln!("  logs: {}", ipc::instance_log_dir(pid).display());
             std::process::exit(1);
@@ -2679,7 +2684,7 @@ fn daemonize(script: &str) -> io::Result<()> {
             view.finish();
             eprintln!(
                 "{} detached fog '{script}' (pid {pid}) did not become ready within {}s",
-                colored("error:", MARKER_RED, stderr_color_enabled()),
+                error_label(),
                 DAEMON_READY_TIMEOUT.as_secs()
             );
             eprintln!("  logs: {}", ipc::instance_log_dir(pid).display());
@@ -2801,7 +2806,7 @@ fn cmd_attach(cli: &Cli) -> io::Result<()> {
                 _ => {
                     eprintln!(
                         "{} multiple fog instances are running; pass a pid:",
-                        colored("error:", MARKER_RED, stderr_color_enabled())
+                        error_label()
                     );
                     for (pid, status) in &live {
                         eprintln!(
@@ -2927,18 +2932,12 @@ pub fn run() -> io::Result<()> {
                 return Ok(());
             }
             Some(other) => {
-                eprintln!(
-                    "{} unknown index command '{other}'",
-                    colored("error:", MARKER_RED, stderr_color_enabled())
-                );
+                eprintln!("{} unknown index command '{other}'", error_label());
                 eprint!("{INDEX_USAGE}");
                 std::process::exit(2);
             }
             None => {
-                eprintln!(
-                    "{} missing index command",
-                    colored("error:", MARKER_RED, stderr_color_enabled())
-                );
+                eprintln!("{} missing index command", error_label());
                 eprint!("{INDEX_USAGE}");
                 std::process::exit(2);
             }
