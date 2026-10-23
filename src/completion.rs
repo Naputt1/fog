@@ -219,4 +219,65 @@ mod tests {
         assert!(out.contains("-l foreground"));
         assert!(out.contains("complete -c fog"));
     }
+
+    /// Runs the generated bash script in a real shell, so a position-sensitive
+    /// bug - "index is only recognised as the first word" - cannot hide behind
+    /// a substring assertion.
+    #[cfg(unix)]
+    fn bash_completion(words: &[&str]) -> Option<Vec<String>> {
+        let script =
+            std::env::temp_dir().join(format!("fog-completion-{}.bash", std::process::id()));
+        std::fs::write(&script, generate(CompletionShell::Bash)).ok()?;
+        let output = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(
+                r#"source "$1" || exit 1; shift
+COMP_WORDS=("$@"); COMP_CWORD=$(( ${#COMP_WORDS[@]} - 1 )); _fog
+for candidate in "${COMPREPLY[@]}"; do printf 'candidate:%s\n' "$candidate"; done"#,
+            )
+            .arg("fog-completion-test")
+            .arg(script.to_string_lossy().replace('\\', "/"))
+            .args(words)
+            .output()
+            .ok();
+        let _ = std::fs::remove_file(&script);
+        let output = output?;
+        output.status.success().then(|| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter_map(|line| line.strip_prefix("candidate:").map(str::to_string))
+                .collect()
+        })
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_bash_completion_probes_index_and_flag_values() {
+        if bash_completion(&["fog", ""]).is_none() {
+            return;
+        }
+        let candidate = |words: &[&str]| -> Vec<String> {
+            bash_completion(words).expect("bash must run the generated script")
+        };
+        assert_eq!(
+            candidate(&["fog", "index", ""]),
+            ["serve", "kill", "restart"]
+        );
+        assert_eq!(
+            candidate(&["fog", "index", "serve", "-"]),
+            ["--foreground", "--port"]
+        );
+        assert!(candidate(&["fog", "index", "serve", "--port", ""]).is_empty());
+        assert!(candidate(&["fog", "index", "serve", "--port=18"]).is_empty());
+        assert_eq!(
+            candidate(&["fog", "-v", "index", "serve", "-"]),
+            ["--foreground", "--port"]
+        );
+        assert!(candidate(&["fog", "logs", "--tail", ""]).is_empty());
+        assert!(
+            candidate(&["fog", "-"])
+                .iter()
+                .any(|flag| flag == "--no-share")
+        );
+    }
 }
