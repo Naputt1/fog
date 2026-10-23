@@ -221,16 +221,24 @@ fn load_runtime_config_for_index() -> crate::config::Config {
     crate::index::load_runtime_config()
 }
 
+/// The `  fog <name>` lines listing every script in `config`, sorted by name.
+fn script_list_lines(config: &Config) -> Vec<String> {
+    let mut names: Vec<&String> = config.scripts.keys().collect();
+    names.sort();
+    names
+        .into_iter()
+        .map(|name| format!("  fog {name}"))
+        .collect()
+}
+
 /// Lists available script names and exits with an error.
 fn list_scripts_and_exit(config: &Config, message: &str) -> ! {
     let tty = stderr_color_enabled();
     eprintln!("{} {message}", colored("error:", MARKER_RED, tty));
     eprintln!();
     eprintln!("Available scripts:");
-    let mut names: Vec<&String> = config.scripts.keys().collect();
-    names.sort();
-    for name in names {
-        eprintln!("  fog {name}");
+    for line in script_list_lines(config) {
+        eprintln!("{line}");
     }
     eprintln!();
     eprintln!(
@@ -1348,6 +1356,8 @@ fn query_statuses(
 ///   config the legacy global rule applies directly.
 ///
 /// Returns owned `(pid, socket)` pairs so multi-target commands can iterate.
+/// Selects the instances `fog kill`/`restart`/`logs` should act on. The
+/// returned message is plain text: the caller prints it as the command's error.
 fn select_targets(
     instances: &[(u32, PathBuf)],
     statuses: &std::collections::HashMap<u32, ipc::StatusResponse>,
@@ -1358,15 +1368,13 @@ fn select_targets(
 ) -> Result<Vec<(u32, PathBuf)>, String> {
     if let Some(pid) = pid {
         if all {
-            return Err(format!(
-                "error: --all cannot be used with a PID (got {pid})"
-            ));
+            return Err(format!("--all cannot be used with a PID (got {pid})"));
         }
         return instances
             .iter()
             .find(|(p, _)| *p == pid)
             .map(|(p, path)| vec![(*p, path.clone())])
-            .ok_or_else(|| format!("error: no fog instance with pid {pid}"));
+            .ok_or_else(|| format!("no fog instance with pid {pid}"));
     }
 
     if all {
@@ -1384,7 +1392,7 @@ fn select_targets(
                     .collect();
                 if matched.is_empty() {
                     return Err(format!(
-                        "error: no fog instances from this config ({}); nothing to apply --all to",
+                        "no fog instances from this config ({}); nothing to apply --all to",
                         dir.display()
                     ));
                 }
@@ -1414,7 +1422,7 @@ fn select_targets(
             0 => { /* fall through to the legacy global rule */ }
             _ => {
                 let mut msg = format!(
-                    "error: multiple fog instances from this config ({}), specify a pid:",
+                    "multiple fog instances from this config ({}), specify a pid:",
                     dir.display()
                 );
                 for (p, _) in &matched {
@@ -1434,7 +1442,7 @@ fn select_targets(
     if instances.len() == 1 {
         Ok(vec![instances[0].clone()])
     } else {
-        let mut msg = "error: multiple fog instances running, specify a pid:".to_string();
+        let mut msg = "multiple fog instances running, specify a pid:".to_string();
         for (p, _) in instances {
             msg.push_str(&format!("\n  fog {cmd} {p}"));
         }
@@ -1454,15 +1462,7 @@ fn resolve_targets(
     let statuses = query_statuses(instances);
     match select_targets(instances, &statuses, pid, all, local.as_deref(), cmd) {
         Ok(targets) => targets,
-        Err(msg) => {
-            let msg = msg.replacen(
-                "error:",
-                &colored("error:", MARKER_RED, stderr_color_enabled()),
-                1,
-            );
-            eprintln!("{msg}");
-            std::process::exit(1);
-        }
+        Err(message) => fail(&message),
     }
 }
 
@@ -2946,11 +2946,13 @@ pub fn run() -> io::Result<()> {
     }
 
     let matches = Cli::command().get_matches();
+    // `config` has a default, so the only way to tell an explicit `--config`
+    // (a missing file is an error) from the default (a missing file means
+    // "print help") is where the value came from.
     let config_from_cli = matches.value_source("config") == Some(ValueSource::CommandLine);
-    let cli = match Cli::from_arg_matches(&matches) {
-        Ok(cli) => cli,
-        Err(err) => err.exit(),
-    };
+    // `get_matches` already exited on a parse error, so this can only fail if
+    // the derive and the command definition disagree.
+    let cli = Cli::from_arg_matches(&matches).expect("clap arguments must deserialize");
 
     if let Some(shell) = cli.completions {
         print!("{}", crate::completion::generate(shell));
@@ -3069,10 +3071,8 @@ pub fn run() -> io::Result<()> {
                 ));
             }
             println!("Available scripts in '{}':", config_path.display());
-            let mut names: Vec<&String> = config.scripts.keys().collect();
-            names.sort();
-            for name in names {
-                println!("  fog {name}");
+            for line in script_list_lines(&config) {
+                println!("{line}");
             }
             println!();
             println!("Run one with `fog <script>`; see `fog --help` for built-in commands.");
@@ -3129,6 +3129,16 @@ mod tests {
         let dir = temp_dir();
         let missing = dir.join("missing.json");
         assert_eq!(resolve_config_path(&missing), missing);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_script_list_lines_sorts_and_indents_names() {
+        let dir = temp_dir();
+        let path = dir.join("fog.json");
+        fs::write(&path, r#"{"scripts":{"web":{},"api":{}}}"#).unwrap();
+        let config = crate::config::load(&path).unwrap();
+        assert_eq!(script_list_lines(&config), vec!["  fog api", "  fog web"]);
         let _ = fs::remove_dir_all(&dir);
     }
 
