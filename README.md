@@ -182,6 +182,9 @@ fog attach [pid]              # reattach the TUI to a running instance (replays 
 fog index serve|kill|restart  # control the host-global web UI / API server
 ```
 
+Exit codes: `0` success, `1` the command could not run (missing config, no such
+instance), `2` a usage error (bad flag, unknown script).
+
 | Option                   | Description                                                                                                     |
 | ------------------------ | --------------------------------------------------------------------------------------------------------------- |
 | `-c`, `--config <PATH>`  | Path to config file or directory containing `fog.json` (default `fog.json`)                                     |
