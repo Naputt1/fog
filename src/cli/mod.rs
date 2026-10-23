@@ -582,7 +582,7 @@ fn cmd_ls() -> io::Result<()> {
             row.pid, row.script, row.project, row.branch
         );
         if !row.services.is_empty() {
-            for line in service_table(&row.services, "  ") {
+            for line in service_table(&row.services, "  ", color) {
                 println!("{line}");
             }
         }
@@ -675,15 +675,15 @@ fn state_color(state: &str) -> Option<&'static str> {
 }
 
 /// Renders a `service  status` table for `fog ls` and `fog logs`, coloring the
-/// status column on a terminal.
-fn service_table(rows: &[(String, String)], indent: &str) -> Vec<String> {
+/// status column when `color`. The caller decides, so a test can render the
+/// table plain regardless of whether stdout is a terminal.
+fn service_table(rows: &[(String, String)], indent: &str, color: bool) -> Vec<String> {
     let width = rows
         .iter()
         .map(|(name, _)| name.len())
         .max()
         .unwrap_or(0)
         .max("service".len());
-    let color = color_enabled();
     let mut lines = vec![format!("{indent}{:<width$}  status", "service")];
     for (name, state) in rows {
         let state = match state_color(state) {
@@ -1837,7 +1837,7 @@ fn print_available_services(target_pid: u32, script: &str, rows: &[(String, Stri
         return;
     }
     println!("Services for instance {target_pid} (script '{script}'):");
-    for line in service_table(rows, "  ") {
+    for line in service_table(rows, "  ", color_enabled()) {
         println!("{line}");
     }
     println!();
@@ -3709,9 +3709,9 @@ mod tests {
             ("api".to_string(), "healthy".to_string()),
             ("frontend".to_string(), "stopped".to_string()),
         ];
-        // Test stdout is captured, so color_enabled() is false and the table is
-        // rendered plain.
-        let lines = service_table(&rows, "  ");
+        // Colour is chosen by the caller, so this renders plain even when the
+        // test runs with stdout attached to a terminal.
+        let lines = service_table(&rows, "  ", false);
         assert_eq!(lines[0], "  service   status");
         assert_eq!(lines[1], "  api       healthy");
         assert_eq!(lines[2], "  frontend  stopped");
