@@ -168,6 +168,7 @@ for full details.
 ## Usage
 
 ```bash
+fog                           # list scripts here, or print help when there is no fog.json
 fog <script> [OPTIONS]        # run a script (e.g. fog dev)
 fog ls                        # list running instances, project/branch and service status
 fog restart [pid]             # restart a running instance
@@ -180,6 +181,9 @@ fog logs [pid] -s <name> --tail 50   # last 50 lines (--head 50, --head -50, --t
 fog attach [pid]              # reattach the TUI to a running instance (replays screen history)
 fog index serve|kill|restart  # control the host-global web UI / API server
 ```
+
+Exit codes: `0` success, `1` the command could not run (missing config, no such
+instance), `2` a usage error (bad flag, unknown script).
 
 | Option                   | Description                                                                                                     |
 | ------------------------ | --------------------------------------------------------------------------------------------------------------- |
