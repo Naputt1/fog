@@ -27,7 +27,7 @@ mod reader;
 use self::reader::spawn_reader_pty;
 #[cfg(unix)]
 use self::reader::{FdWriter, make_stop_pipe, spawn_reader};
-use self::reader::{borrow_notice, open_log_file, shell_command, wait_reaped};
+use self::reader::{LogTee, borrow_notice, shell_command, wait_reaped};
 use self::style::{cell_style, scrollback_len};
 
 const INITIAL_COLS: u16 = 256;
@@ -572,9 +572,8 @@ impl Terminal {
         let Some(dir) = self.log_dir.as_deref() else {
             return;
         };
-        if let Ok(mut f) = open_log_file(dir, &self.name) {
-            use std::io::Write;
-            let _ = writeln!(f, "{}", borrow_notice(&self.name));
+        if let Ok(mut tee) = LogTee::create(dir, &self.name) {
+            tee.write_line(&borrow_notice(&self.name));
         }
     }
 
@@ -609,7 +608,7 @@ impl Terminal {
     ) -> Self {
         let tee = log_dir
             .as_deref()
-            .and_then(|dir| open_log_file(dir, &name).ok());
+            .and_then(|dir| LogTee::create(dir, &name).ok());
         // Replay the source terminal's history at its own size so the screen
         // matches what the user saw before detaching/reattaching.
         let (screen_rows, screen_cols) = if rows > 0 && cols > 0 {
@@ -883,7 +882,7 @@ impl Terminal {
         let tee = self
             .log_dir
             .as_deref()
-            .and_then(|dir| open_log_file(dir, &self.name).ok());
+            .and_then(|dir| LogTee::create(dir, &self.name).ok());
 
         self.parser = Arc::new(Mutex::new(vt100::Parser::new(
             24,

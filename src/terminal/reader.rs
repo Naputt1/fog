@@ -5,7 +5,7 @@ use crate::process;
 use std::{
     collections::VecDeque,
     fs,
-    io::{self, Write},
+    io::{self, Seek, SeekFrom, Write},
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -14,15 +14,67 @@ use std::{
     time::Duration,
 };
 
-/// Opens a tee file for a service's raw PTY output inside `log_dir`, if set.
-/// The service name is sanitized so a name containing a `/` cannot escape the
-/// directory.
-pub(super) fn open_log_file(log_dir: &std::path::Path, name: &str) -> io::Result<fs::File> {
-    let safe_name: String = name
-        .chars()
-        .map(|c| if c == '/' { '_' } else { c })
-        .collect();
-    fs::File::create(log_dir.join(format!("{safe_name}.log")))
+/// Largest log fog keeps per service.
+///
+/// Raw PTY output is unbounded by nature: one redraw per HMR update, a progress
+/// bar, or an error loop can emit hundreds of megabytes per hour. Past this
+/// size the tee discards the file and continues from the top, which keeps the
+/// newest output (what `fog logs` tails) without ever filling the disk.
+pub(super) const MAX_LOG_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Bounded append sink for one service's raw PTY output.
+pub(super) struct LogTee {
+    file: fs::File,
+    written: u64,
+    cap: u64,
+}
+
+impl LogTee {
+    /// Opens `<log_dir>/<name>.log`, replacing any previous run's file. The
+    /// service name is sanitized so a name containing a `/` cannot escape the
+    /// directory.
+    pub(super) fn create(log_dir: &std::path::Path, name: &str) -> io::Result<Self> {
+        let safe_name: String = name
+            .chars()
+            .map(|c| if c == '/' { '_' } else { c })
+            .collect();
+        Ok(Self {
+            file: fs::File::create(log_dir.join(format!("{safe_name}.log")))?,
+            written: 0,
+            cap: MAX_LOG_BYTES,
+        })
+    }
+
+    /// Appends one line, bounded like [`Self::write`].
+    pub(super) fn write_line(&mut self, line: &str) {
+        self.write(format!("{line}\n").as_bytes());
+    }
+
+    /// Appends `buf`, discarding earlier output once the cap is reached so the
+    /// file never grows past it.
+    fn write(&mut self, buf: &[u8]) {
+        if self.written + buf.len() as u64 > self.cap {
+            self.reset();
+        }
+        if self.file.write_all(buf).is_ok() {
+            self.written += buf.len() as u64;
+        }
+    }
+
+    /// Truncates the file and marks where earlier output was dropped.
+    fn reset(&mut self) {
+        self.written = 0;
+        if self.file.set_len(0).is_err() || self.file.seek(SeekFrom::Start(0)).is_err() {
+            return;
+        }
+        let marker = format!(
+            "[fog] log truncated after reaching {} MiB; earlier output discarded\n",
+            self.cap >> 20
+        );
+        if self.file.write_all(marker.as_bytes()).is_ok() {
+            self.written = marker.len() as u64;
+        }
+    }
 }
 
 /// Notice shown for a borrowed (shared/reused) service, both in its tab and
@@ -51,7 +103,7 @@ fn ingest(
     parser: &Mutex<vt100::Parser>,
     generation: &AtomicUsize,
     raw_output: &Mutex<VecDeque<Vec<u8>>>,
-    tee: &mut Option<fs::File>,
+    tee: &mut Option<LogTee>,
     buf: &[u8],
 ) {
     if let Ok(mut p) = parser.lock() {
@@ -65,16 +117,16 @@ fn ingest(
         }
         q.push_back(buf.to_vec());
     }
-    if let Some(file) = tee.as_mut() {
-        let _ = file.write_all(buf);
+    if let Some(tee) = tee.as_mut() {
+        tee.write(buf);
     }
 }
 
 /// Spawns a thread that reads PTY output from `fd` and feeds the parser,
 /// stopping when the PTY reaches EOF or the `stop` pipe becomes readable.
 ///
-/// When `tee` is `Some`, each raw chunk read is also appended to it (used by
-/// detached runs to capture service output to `<log_dir>/<name>.log`).
+/// When `tee` is `Some`, each raw chunk read is also appended to it (bounded by
+/// [`MAX_LOG_BYTES`]), capturing service output to `<log_dir>/<name>.log`.
 ///
 /// The thread owns `fd`, `stop`, and `tee` and closes them on exit.
 #[cfg(unix)]
@@ -84,7 +136,7 @@ pub(super) fn spawn_reader(
     raw_output: Arc<Mutex<VecDeque<Vec<u8>>>>,
     fd: Fd,
     stop: Fd,
-    mut tee: Option<fs::File>,
+    mut tee: Option<LogTee>,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
         let mut buf = [0u8; 4096];
@@ -147,7 +199,7 @@ pub(super) fn spawn_reader_pty(
     generation: Arc<AtomicUsize>,
     raw_output: Arc<Mutex<VecDeque<Vec<u8>>>>,
     mut reader: Box<dyn std::io::Read + Send>,
-    mut tee: Option<fs::File>,
+    mut tee: Option<LogTee>,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
         let mut buf = [0u8; 4096];
@@ -231,5 +283,53 @@ impl Drop for FdWriter {
     fn drop(&mut self) {
         // SAFETY: this struct owns the fd.
         unsafe { libc::close(self.fd) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "fog-test-tee-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn test_log_tee_caps_file_and_keeps_newest_output() {
+        let dir = temp_dir("cap");
+        let path = dir.join("web.log");
+        let mut tee = LogTee::create(&dir, "web").unwrap();
+
+        let chunk = vec![b'x'; 4096];
+        let chunks = (MAX_LOG_BYTES / chunk.len() as u64) + 40;
+        for _ in 0..chunks {
+            tee.write(&chunk);
+        }
+
+        let content = fs::read(&path).unwrap();
+        assert!(
+            content.len() as u64 <= MAX_LOG_BYTES,
+            "tee must keep the file under its cap, got {} bytes",
+            content.len()
+        );
+        assert!(
+            content.starts_with(b"[fog] log truncated after reaching"),
+            "dropped output must be recorded in the log"
+        );
+        assert!(
+            content.ends_with(&chunk),
+            "the newest output must survive truncation"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }
