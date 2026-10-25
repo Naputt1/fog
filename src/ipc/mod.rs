@@ -234,7 +234,7 @@ mod tests {
             stream_service_log(&mut stream, &state, &server_dir, "web", 3, true);
         });
 
-        let client = super::transport::connect(&sock).unwrap();
+        let mut client = super::transport::connect(&sock).unwrap();
         client
             .set_read_timeout(Some(Duration::from_millis(200)))
             .unwrap();

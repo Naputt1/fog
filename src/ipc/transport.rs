@@ -57,7 +57,9 @@ mod imp {
             Ok(Self(UnixStream::connect(path)?))
         }
 
-        pub fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        /// Takes `&mut self` to match the Windows implementation, which
+        /// stores the timeout alongside the pipe handle.
+        pub fn set_read_timeout(&mut self, timeout: Option<Duration>) -> io::Result<()> {
             self.0.set_read_timeout(timeout)
         }
 
