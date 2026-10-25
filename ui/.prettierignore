@@ -1,5 +1,5 @@
 node_modules
 dist
-pnpm-lock.yaml
+bun.lock
 routeTree.gen.ts
 src/routeTree.gen.ts

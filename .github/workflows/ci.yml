@@ -44,28 +44,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Set up pnpm
-        uses: pnpm/action-setup@v6
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
         with:
-          version: 12.8.1
-      - name: Set up Node
-        uses: actions/setup-node@v7
+          bun-version: 1.4.4
+      - name: Cache Bun install
+        uses: actions/cache@v4
         with:
-          node-version: 24
-          cache: pnpm
-          cache-dependency-path: ui/pnpm-lock.yaml
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('ui/bun.lock') }}
+          restore-keys: ${{ runner.os }}-bun-
       - name: Install dependencies
         working-directory: ui
-        run: pnpm install --frozen-lockfile
-      - name: Lint frontend
+        run: bun install --frozen-lockfile
+      - name: Check, lint, format and build frontend (SPA -> ui/dist)
         working-directory: ui
-        run: pnpm lint
-      - name: Check formatting
-        working-directory: ui
-        run: pnpm format:check
-      - name: Build frontend (SPA -> ui/dist)
-        working-directory: ui
-        run: pnpm build
+        run: bun run check
       - name: Upload frontend bundle
         uses: actions/upload-artifact@v4
         with:
