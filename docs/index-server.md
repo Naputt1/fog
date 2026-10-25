@@ -91,7 +91,7 @@ uses it as the project card image on the project list, falling back to the
 default glyph on any error. Only files named in `project.icon` are read; the
 request path selects a project, never a file.
 
-Build the SPA with `cd ui && pnpm install && pnpm build`; `build.rs` embeds
+Build the SPA with `cd ui && bun install && bun run build`; `build.rs` embeds
 `ui/dist/` into the binary at compile time. Without a build the server falls
 back to the generated directory page above.
 

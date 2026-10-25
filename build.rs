@@ -63,12 +63,12 @@ fn main() {
 
     if env::var("FOG_REQUIRE_SPA").is_ok() {
         panic!(
-            "ui/dist not found and SPA fetch failed (tried v{} + latest) but FOG_REQUIRE_SPA=1 — run `cd ui && pnpm install && pnpm build` or ensure GitHub Release has fog-spa tarball",
+            "ui/dist not found and SPA fetch failed (tried v{} + latest) but FOG_REQUIRE_SPA=1 — run `cd ui && bun install && bun run build` or ensure GitHub Release has fog-spa tarball",
             env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "unknown".to_string())
         );
     }
     println!(
-        "cargo:warning=ui/dist not found and SPA fetch failed; embedding fallback page (run `cd ui && pnpm install && pnpm build` to embed full SPA)"
+        "cargo:warning=ui/dist not found and SPA fetch failed; embedding fallback page (run `cd ui && bun install && bun run build` to embed full SPA)"
     );
     generate_fallback(&out_dir, &manifest_dir);
 }

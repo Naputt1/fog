@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "packageManager": "pnpm@12.8.1",
+  "packageManager": "bun@1.4.4",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
@@ -13,6 +13,8 @@
     "lint:fix": "oxlint --fix",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
+    "check": "bun run format:check && bun run lint && bun run typecheck && bun run build",
+    "fix": "bun run format && bun run lint:fix",
     "preview": "vite preview"
   },
   "dependencies": {

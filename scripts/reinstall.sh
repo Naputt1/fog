@@ -99,22 +99,13 @@ echo "==> repo:        $root"
 echo "==> destination: $dest"
 
 if [ "$build_ui" = 1 ]; then
-  # `pnpm build` runs `tsc`/`vite`, which need a `node` runtime. A pnpm shim on
-  # PATH can itself be a node script, and nvm is typically loaded only in login
-  # shells, so check node explicitly rather than failing inside tsc.
-  command -v node >/dev/null 2>&1 || {
-    echo "error: node not found on \$PATH (use --skip-ui to skip the frontend)" >&2
-    exit 1
-  }
-  command -v pnpm >/dev/null 2>&1 || {
-    echo "error: pnpm not found on \$PATH (use --skip-ui to skip the frontend)" >&2
+  command -v bun >/dev/null 2>&1 || {
+    echo "error: bun not found on \$PATH (use --skip-ui to skip the frontend)" >&2
     exit 1
   }
   echo "==> building frontend (ui/)"
-  # --pm-on-fail=ignore tolerates a corepack/pnpm version mismatch with the
-  # `packageManager` pin in ui/package.json.
-  pnpm --pm-on-fail=ignore -C "$root/ui" install
-  pnpm --pm-on-fail=ignore -C "$root/ui" build
+  # A subshell instead of a flag: bun has no pnpm-style `-C <dir>`.
+  ( cd "$root/ui" && bun install && bun run build )
 else
   echo "==> skipping frontend build (--skip-ui)"
 fi
