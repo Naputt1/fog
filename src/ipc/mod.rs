@@ -1,5 +1,5 @@
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const READ_TIMEOUT_SECS: u64 = 5;
@@ -99,49 +99,101 @@ pub fn ensure_instance_dir() -> io::Result<PathBuf> {
     Ok(dir)
 }
 
-/// Removes the log directories of instances that are no longer running.
+/// What a prune pass removed, or would remove for a dry run.
+#[derive(Debug, Default)]
+pub struct PruneSummary {
+    /// Log directories removed (or that a dry run would remove).
+    pub removed: Vec<PathBuf>,
+    /// Total bytes of captured logs reclaimed.
+    pub bytes: u64,
+    /// Stale socket files removed; crashed instances leave these behind.
+    pub sockets: usize,
+    /// Instances left alone because they are still running.
+    pub running: usize,
+}
+
+/// Removes the log directories of instances that are no longer running,
+/// keeping the most recent one so `fog logs <pid>` can still read the run that
+/// just finished.
 ///
-/// Every run (interactive or detached) creates `fog-<pid>.logs` and never
-/// removes it, so without this the captured service logs of every past run
-/// accumulate in the temp directory. The most recent dead instance is kept so
-/// `fog logs <pid>` can still read the run that just finished. Best-effort: an
-/// entry that cannot be inspected or removed is skipped.
+/// Every run creates `fog-<pid>.logs` and never removes it, so without this the
+/// captured logs of every past run accumulate in the temp directory.
 pub fn prune_stale_instance_logs() {
-    let self_pid = std::process::id();
-    let Ok(entries) = std::fs::read_dir(instance_dir()) else {
-        return;
+    let _ = prune_instance_dirs(&instance_dir(), true, false);
+}
+
+/// Prunes an instance directory: log directories and stale socket files whose
+/// PID is gone. With `keep_newest` the most recent finished run's logs stay
+/// readable. `dry_run` reports without deleting anything. Best-effort: an entry
+/// that cannot be inspected or removed is skipped.
+pub fn prune_instance_dirs(root: &Path, keep_newest: bool, dry_run: bool) -> PruneSummary {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return PruneSummary::default();
     };
-    let mut stale: Vec<(std::time::SystemTime, PathBuf)> = entries
-        .flatten()
-        .filter_map(|entry| {
-            let path = entry.path();
-            let pid = log_dir_pid(&path)?;
-            if pid == self_pid || crate::process::is_pid_alive(pid) {
-                return None;
+    let mut summary = PruneSummary::default();
+    let mut finished: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
+    let mut sockets: Vec<PathBuf> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if let Some(pid) = instance_entry_pid(&path, ".logs") {
+            if crate::process::is_pid_alive(pid) {
+                summary.running += 1;
+                continue;
             }
             let modified = entry
                 .metadata()
                 .and_then(|m| m.modified())
                 .unwrap_or(std::time::UNIX_EPOCH);
-            Some((modified, path))
-        })
-        .collect();
-    if stale.len() < 2 {
-        return;
+            finished.push((modified, path));
+        } else if instance_entry_pid(&path, ".sock")
+            .is_some_and(|pid| !crate::process::is_pid_alive(pid))
+        {
+            // A live socket belongs to a running instance: leave it alone.
+            sockets.push(path);
+        }
     }
-    // Newest first, then drop it: the latest finished run stays readable.
-    stale.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
-    for (_, path) in stale.into_iter().skip(1) {
-        let _ = std::fs::remove_dir_all(&path);
+
+    // Newest first, so `keep_newest` leaves the latest finished run readable.
+    finished.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
+    if keep_newest && !finished.is_empty() {
+        finished.remove(0);
     }
+    for (_, path) in finished {
+        summary.bytes += dir_size(&path);
+        if !dry_run {
+            let _ = std::fs::remove_dir_all(&path);
+        }
+        summary.removed.push(path);
+    }
+    for path in sockets {
+        if !dry_run {
+            let _ = std::fs::remove_file(&path);
+        }
+        summary.sockets += 1;
+    }
+    summary
 }
 
-/// Extracts the PID from an instance log directory name (`fog-<pid>.logs`).
-fn log_dir_pid(path: &std::path::Path) -> Option<u32> {
+/// Total size of the regular files directly inside `dir`. A log directory is
+/// flat: one `.log` per service plus the daemon's own files.
+fn dir_size(dir: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| entry.metadata().ok())
+        .filter(|meta| meta.is_file())
+        .map(|meta| meta.len())
+        .sum()
+}
+
+/// Extracts the PID from an instance entry name (`fog-<pid><suffix>`).
+fn instance_entry_pid(path: &Path, suffix: &str) -> Option<u32> {
     path.file_name()?
         .to_str()?
         .strip_prefix("fog-")?
-        .strip_suffix(".logs")?
+        .strip_suffix(suffix)?
         .parse()
         .ok()
 }
@@ -176,30 +228,120 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_prune_stale_instance_logs_keeps_self_and_newest() {
-        ensure_instance_dir().unwrap();
-        let self_dir = instance_log_dir(std::process::id());
-        fs::create_dir_all(&self_dir).unwrap();
-        // PIDs far above anything alive, so both count as finished instances.
+    /// A scratch instance directory, so the prune tests never touch the real
+    /// `$TMPDIR/fog-<uid>` (running `cargo test` must not wipe a developer's
+    /// own finished-run logs).
+    fn temp_instance_root(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "fog-test-prune-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    /// PIDs far above anything alive, so entries built from them count as
+    /// finished instances.
+    fn dead_pids() -> [u32; 2] {
         let base = 3_900_000 + (std::process::id() % 500) * 2;
-        let dead = [base, base + 1];
-        for pid in dead {
+        let pids = [base, base + 1];
+        for pid in pids {
             assert!(!crate::process::is_pid_alive(pid));
-            fs::create_dir_all(instance_log_dir(pid)).unwrap();
+        }
+        pids
+    }
+
+    #[test]
+    fn test_prune_instance_dirs_removes_finished_and_keeps_running() {
+        let root = temp_instance_root("finished");
+        let [dead, also_dead] = dead_pids();
+        let live = std::process::id();
+        fs::create_dir_all(root.join(format!("fog-{live}.logs"))).unwrap();
+        for pid in [dead, also_dead] {
+            let dir = root.join(format!("fog-{pid}.logs"));
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("web.log"), "0123456789").unwrap();
+            fs::write(root.join(format!("fog-{pid}.sock")), "").unwrap();
+        }
+        fs::write(root.join(format!("fog-{live}.sock")), "").unwrap();
+
+        let summary = prune_instance_dirs(&root, false, false);
+
+        assert!(
+            root.join(format!("fog-{live}.logs")).is_dir(),
+            "live logs kept"
+        );
+        assert!(
+            root.join(format!("fog-{live}.sock")).exists(),
+            "live socket kept"
+        );
+        for pid in [dead, also_dead] {
+            assert!(!root.join(format!("fog-{pid}.logs")).exists());
+            assert!(!root.join(format!("fog-{pid}.sock")).exists());
+        }
+        assert_eq!(summary.removed.len(), 2);
+        assert_eq!(summary.bytes, 20);
+        assert_eq!(summary.sockets, 2);
+        assert_eq!(summary.running, 1);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_prune_instance_dirs_keeps_newest_finished_run() {
+        let root = temp_instance_root("keep");
+        let [older, newer] = dead_pids();
+        for pid in [older, newer] {
+            fs::create_dir_all(root.join(format!("fog-{pid}.logs"))).unwrap();
+            // A distinct mtime per directory: both are created back to back.
+            std::thread::sleep(Duration::from_millis(20));
         }
 
-        prune_stale_instance_logs();
+        let summary = prune_instance_dirs(&root, true, false);
 
-        assert!(self_dir.exists(), "running instance's logs must be kept");
-        let kept = dead
-            .iter()
-            .filter(|pid| instance_log_dir(**pid).exists())
-            .count();
-        assert_eq!(kept, 1, "only the newest finished run's logs survive");
-        for pid in dead {
-            let _ = fs::remove_dir_all(instance_log_dir(pid));
-        }
+        assert!(!root.join(format!("fog-{older}.logs")).exists());
+        assert!(
+            root.join(format!("fog-{newer}.logs")).is_dir(),
+            "the most recent finished run must stay readable"
+        );
+        assert_eq!(summary.removed.len(), 1);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_prune_instance_dirs_dry_run_removes_nothing() {
+        let root = temp_instance_root("dry");
+        let [dead, _] = dead_pids();
+        let dir = root.join(format!("fog-{dead}.logs"));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("web.log"), "0123456789").unwrap();
+        fs::write(root.join(format!("fog-{dead}.sock")), "").unwrap();
+
+        let summary = prune_instance_dirs(&root, false, true);
+
+        assert!(dir.is_dir(), "a dry run must not delete anything");
+        assert!(root.join(format!("fog-{dead}.sock")).exists());
+        assert_eq!(summary.removed.len(), 1);
+        assert_eq!(summary.bytes, 10);
+        assert_eq!(summary.sockets, 1);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_prune_instance_dirs_missing_root_is_quiet() {
+        let summary = prune_instance_dirs(
+            &std::env::temp_dir().join("fog-test-prune-does-not-exist"),
+            false,
+            false,
+        );
+        assert!(summary.removed.is_empty());
+        assert_eq!(summary.bytes, 0);
     }
 
     #[test]

@@ -54,6 +54,11 @@ fog logs <pid> -s api --tail 100     # only the last 100 lines (keep output smal
 fog logs <pid> -s api --head 20 --tail 20  # first + last 20, middle elided
 ```
 
+`fog logs <pid>` also reads a finished instance's logs, so the run you just killed stays
+inspectable. Those logs sit in `$TMPDIR/fog-<pid>.logs/` until pruned: `fog prune --dry-run`
+reports what they hold, `fog prune` removes them (a running instance's logs are never
+touched). Don't leave output from runs you started lying around.
+
 `fog ls` prints one row per instance — `pid script project branch proxy services` — with
 each service's state (`healthy`, `reused`, `running`, `stopped`, `unhealthy`).
 

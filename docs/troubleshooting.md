@@ -118,7 +118,7 @@ No — at minimum, fog needs a config file to know what services to run.
 ### Does fog persist logs?
 
 * `--save-logs` writes `temp/<name>.txt` on exit (TUI or detached).
-* Detached (`-d`) runs always tee raw PTY output to `$TMPDIR/fog-<pid>.logs/<name>.log` (and `daemon.log`); `fog logs <pid>` prints them. Each file is capped at 8 MiB, dropping the oldest output and leaving a `[fog] log truncated` marker. A finished instance's directory stays readable after exit, and older runs are pruned the next time an instance starts, so these files cannot accumulate across runs.
+* Detached (`-d`) runs always tee raw PTY output to `$TMPDIR/fog-<pid>.logs/<name>.log` (and `daemon.log`); `fog logs <pid>` prints them. Each file is capped at 8 MiB, dropping the oldest output and leaving a `[fog] log truncated` marker. A finished instance's directory stays readable after exit, and older runs are pruned the next time an instance starts, so these files cannot accumulate across runs. `fog prune` reclaims the space immediately (`--dry-run` shows what it would free first).
 * Without either, TUI scrollback (`max_scrollback`) is in-memory only.
 
 ### Why does `share: true` still start a duplicate DB?

@@ -50,7 +50,7 @@ const DAEMON_START_TIMEOUT: Duration = Duration::from_secs(120);
 const STARTUP_PROGRESS_FILE: &str = "startup.progress";
 
 /// Names `fog` handles itself instead of looking up as a script in `fog.json`.
-const BUILTIN_COMMANDS: [&str; 6] = ["ls", "kill", "restart", "logs", "index", "attach"];
+const BUILTIN_COMMANDS: [&str; 7] = ["ls", "kill", "restart", "logs", "prune", "index", "attach"];
 
 /// Whether `name` is a built-in command rather than a configured script.
 fn is_builtin(name: &str) -> bool {
@@ -63,7 +63,7 @@ fn is_builtin(name: &str) -> bool {
     name = "fog",
     version = env!("CARGO_PKG_VERSION"),
     about = "Terminal-based service orchestrator & reverse-proxy dashboard",
-    after_help = "Built-in commands:\n  fog ls [PID]                    list running instances and service status\n  fog kill [PID|--all]            gracefully shut down a running instance\n  fog kill --force [PID|--all]    forcibly shut down a wedged instance\n  fog restart [PID|--all]         restart a running instance\n  fog logs [PID]                  list services and their status\n  fog logs [PID] --service NAME   print captured output of one service\n  fog logs [PID] -s NAME --tail   limit lines: --head N|-N, --tail N|-N|+N\n  fog attach [PID]                reattach the TUI to a running instance (replays screen history)\n  fog index serve [--foreground] [--port N]  run the index server (detached by default)\n  fog index kill                  stop the index server\n  fog index restart               restart the index server\n\nWith no PID, kill/restart/logs target the instance started from the local\nfog.json (same config directory, so the branch is implicit). When several\nlocal instances match, the command lists them: pass an explicit PID, or\n--all (kill/restart) to apply to every local match. Outside a directory\nwith fog.json, --all applies to every running instance.\n\nWhen a kill/restart grace period is not enough (a wedged instance that never\nconsumes its kill flag), --force escalates to SIGTERM then SIGKILL.\n\nRun a script from fog.json:\n  fog <script> [OPTIONS]  (e.g. fog dev)\n\nWith no script, fog lists the scripts in fog.json, or prints this help when\nthere is no config in the current directory.\n\nOverride an allocated port for one run:\n  fog dev --port api=4000       (repeatable; --port web=0 re-randomizes)"
+    after_help = "Built-in commands:\n  fog ls [PID]                    list running instances and service status\n  fog kill [PID|--all]            gracefully shut down a running instance\n  fog kill --force [PID|--all]    forcibly shut down a wedged instance\n  fog restart [PID|--all]         restart a running instance\n  fog logs [PID]                  list services and their status\n  fog logs [PID] --service NAME   print captured output of one service\n  fog logs [PID] -s NAME --tail   limit lines: --head N|-N, --tail N|-N|+N\n  fog prune [--dry-run]           remove the captured logs of finished instances\n  fog attach [PID]                reattach the TUI to a running instance (replays screen history)\n  fog index serve [--foreground] [--port N]  run the index server (detached by default)\n  fog index kill                  stop the index server\n  fog index restart               restart the index server\n\nWith no PID, kill/restart/logs target the instance started from the local\nfog.json (same config directory, so the branch is implicit). `fog logs <PID>`\nalso reads the captured logs of an instance that has finished; `fog prune`\nremoves those logs (a running instance's logs are never touched). When several\nlocal instances match, the command lists them: pass an explicit PID, or\n--all (kill/restart) to apply to every local match. Outside a directory\nwith fog.json, --all applies to every running instance.\n\nWhen a kill/restart grace period is not enough (a wedged instance that never\nconsumes its kill flag), --force escalates to SIGTERM then SIGKILL.\n\nRun a script from fog.json:\n  fog <script> [OPTIONS]  (e.g. fog dev)\n\nWith no script, fog lists the scripts in fog.json, or prints this help when\nthere is no config in the current directory.\n\nOverride an allocated port for one run:\n  fog dev --port api=4000       (repeatable; --port web=0 re-randomizes)"
 )]
 struct Cli {
     /// Script to run (e.g. `fog dev`), or a built-in command
@@ -136,6 +136,11 @@ struct Cli {
     /// are added for this run. Only applies when running a script.
     #[arg(long, value_name = "NAME=PORT")]
     port: Vec<String>,
+
+    /// Only used with `fog prune`: report what would be removed without
+    /// deleting anything.
+    #[arg(long)]
+    dry_run: bool,
 
     /// Print verbose setup output (DNS, router, index, port and native-route
     /// details). Warnings are always printed.
@@ -1831,17 +1836,70 @@ fn print_log_file(
 /// Lists the instance's services and their status, with a hint pointing at
 /// `--service`. Used when `fog logs` runs without a service filter and when
 /// reporting an unknown `--service` name.
-fn print_available_services(target_pid: u32, script: &str, rows: &[(String, String)]) {
+fn print_available_services(target_pid: u32, script: Option<&str>, rows: &[(String, String)]) {
     if rows.is_empty() {
-        println!("(no services for instance {target_pid})");
+        match script {
+            Some(_) => println!("(no services for instance {target_pid})"),
+            None => println!("(no captured logs for instance {target_pid})"),
+        }
         return;
     }
-    println!("Services for instance {target_pid} (script '{script}'):");
+    match script {
+        Some(script) => println!("Services for instance {target_pid} (script '{script}'):"),
+        None => println!("Captured logs of finished instance {target_pid} (not running):"),
+    }
     for line in service_table(rows, "  ", color_enabled()) {
         println!("{line}");
     }
     println!();
     println!("Show one service: fog logs {target_pid} --service <name>");
+}
+
+/// Lists the captured log files of a finished instance as `(service, state)`
+/// rows. A finished run has no live status, so every row reads `finished`.
+fn finished_log_rows(dir: &Path) -> Vec<(String, String)> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let name = name.to_str()?.strip_suffix(".log")?;
+            entry.path().is_file().then(|| name.to_string())
+        })
+        .collect();
+    names.sort();
+    names
+        .into_iter()
+        .map(|name| (name, "finished".to_string()))
+        .collect()
+}
+
+/// Resolves a user-supplied service name to the instance's canonical name:
+/// an exact match first, then a sanitized filename-stem match (so a service
+/// whose name contains `/` etc. is found by either form), and finally a
+/// `<name>.log` on disk, so a stale log left by a removed service stays
+/// printable by name.
+fn resolve_service_name(dir: &Path, rows: &[(String, String)], wanted: &str) -> Option<String> {
+    if let Some(name) = rows
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .find(|name| *name == wanted)
+    {
+        return Some(name.to_string());
+    }
+    let safe = ipc::sanitize_service_name(wanted);
+    if let Some(name) = rows
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .find(|name| ipc::sanitize_service_name(name) == safe || *name == safe)
+    {
+        return Some(name.to_string());
+    }
+    dir.join(format!("{safe}.log"))
+        .is_file()
+        .then(|| wanted.to_string())
 }
 
 /// Prints the captured logs of a running instance.
@@ -1853,7 +1911,13 @@ fn print_available_services(target_pid: u32, script: &str, rows: &[(String, Stri
 fn cmd_logs(pid: Option<u32>, service: Option<String>, cli: &Cli) -> io::Result<()> {
     let instances = ipc::find_instances()?;
 
-    if instances.is_empty() {
+    // A finished instance has no socket and no live status, but its captured
+    // logs stay on disk until a prune: read those directly.
+    if let Some(pid) = pid {
+        if !instances.iter().any(|(p, _)| *p == pid) {
+            return cmd_finished_logs(pid, service.as_deref(), cli);
+        }
+    } else if instances.is_empty() {
         die(
             "no running fog instances",
             Some("start one with `fog <script>`"),
@@ -1877,34 +1941,16 @@ fn cmd_logs(pid: Option<u32>, service: Option<String>, cli: &Cli) -> io::Result<
     let rows = log_service_rows(&status, dir.join("daemon.log").is_file());
 
     let Some(wanted) = service.as_deref() else {
-        print_available_services(target_pid, &status.script, &rows);
+        print_available_services(target_pid, Some(&status.script), &rows);
         return Ok(());
     };
 
-    // Exact match first, then a sanitized filename-stem match (so a service
-    // whose name contains `/` etc. is found by either form). A stale
-    // `<name>.log` left by a removed service is still printable by name even
-    // though it is not listed.
-    let canonical = rows
-        .iter()
-        .map(|(name, _)| name.as_str())
-        .find(|name| *name == wanted)
-        .or_else(|| {
-            let safe = ipc::sanitize_service_name(wanted);
-            rows.iter()
-                .map(|(name, _)| name.as_str())
-                .find(|name| ipc::sanitize_service_name(name) == safe || *name == safe)
-        })
-        .map(str::to_string);
-    let Some(name) = canonical.or_else(|| {
-        let file = dir.join(format!("{}.log", ipc::sanitize_service_name(wanted)));
-        file.is_file().then(|| wanted.to_string())
-    }) else {
+    let Some(name) = resolve_service_name(&dir, &rows, wanted) else {
         eprintln!(
             "{} unknown service '{wanted}' for instance {target_pid}",
             error_label()
         );
-        print_available_services(target_pid, &status.script, &rows);
+        print_available_services(target_pid, Some(&status.script), &rows);
         std::process::exit(1);
     };
 
@@ -1949,6 +1995,118 @@ fn cmd_logs(pid: Option<u32>, service: Option<String>, cli: &Cli) -> io::Result<
     }
     print_log_file(&status.script, &name, &file, cli.head, cli.tail);
     Ok(())
+}
+
+/// Prints the captured logs of an instance that is no longer running, using the
+/// files left in its log directory.
+fn cmd_finished_logs(pid: u32, service: Option<&str>, cli: &Cli) -> io::Result<()> {
+    let dir = ipc::instance_log_dir(pid);
+    if !dir.is_dir() {
+        die(
+            &format!("no running instance and no captured logs for pid {pid}"),
+            Some("run `fog ls` to list running instances"),
+            1,
+        );
+    }
+
+    let rows = finished_log_rows(&dir);
+    let Some(wanted) = service else {
+        print_available_services(pid, None, &rows);
+        return Ok(());
+    };
+
+    if wanted == "proxy" {
+        die(
+            "the proxy request log is held in memory and is gone once the instance exits",
+            Some("the other services' logs are still readable"),
+            1,
+        );
+    }
+
+    let Some(name) = resolve_service_name(&dir, &rows, wanted) else {
+        eprintln!(
+            "{} unknown service '{wanted}' for finished instance {pid}",
+            error_label()
+        );
+        print_available_services(pid, None, &rows);
+        std::process::exit(1);
+    };
+
+    let file = dir.join(format!("{}.log", ipc::sanitize_service_name(&name)));
+    if !file.is_file() {
+        die(
+            &format!("finished instance {pid} has no captured log for service '{name}'"),
+            Some("run `fog logs <pid>` to list services with logs"),
+            1,
+        );
+    }
+    print_log_file(
+        &format!("finished run {pid}"),
+        &name,
+        &file,
+        cli.head,
+        cli.tail,
+    );
+    Ok(())
+}
+
+/// Removes the captured logs of instances that have finished.
+///
+/// A running instance's logs are never touched. `--dry-run` reports what would
+/// be removed without deleting anything; `--verbose` lists each directory.
+fn cmd_prune(dry_run: bool, verbose: bool) -> io::Result<()> {
+    let summary = ipc::prune_instance_dirs(&ipc::instance_dir(), false, dry_run);
+    if summary.removed.is_empty() {
+        println!("nothing to prune: no finished instances");
+    } else {
+        println!(
+            "{} logs of {} finished instance{} ({})",
+            if dry_run { "would prune" } else { "pruned" },
+            summary.removed.len(),
+            if summary.removed.len() == 1 { "" } else { "s" },
+            format_bytes(summary.bytes),
+        );
+        if verbose {
+            for path in &summary.removed {
+                println!("  {}", path.display());
+            }
+        }
+    }
+    if summary.sockets > 0 {
+        println!(
+            "{} {} stale socket{}",
+            if dry_run {
+                "would remove"
+            } else {
+                "also removed"
+            },
+            summary.sockets,
+            if summary.sockets == 1 { "" } else { "s" },
+        );
+    }
+    if summary.running > 0 {
+        println!(
+            "kept {} running instance{}",
+            summary.running,
+            if summary.running == 1 { "" } else { "s" }
+        );
+    }
+    Ok(())
+}
+
+/// Formats a byte count for one-line summaries (`512 B`, `24.1 MiB`).
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["KiB", "MiB", "GiB", "TiB"];
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    let mut value = bytes as f64 / 1024.0;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    format!("{value:.1} {}", UNITS[unit])
 }
 
 /// Restores the terminal (raw mode off, alternate screen left, mouse capture
@@ -3098,6 +3256,22 @@ pub fn run() -> io::Result<()> {
         );
     }
 
+    // `fog prune` applies to every finished instance, so it takes no PID.
+    if cli.script.as_deref() == Some("prune") && cli.pid.is_some() {
+        usage_error(
+            "`fog prune` takes no PID",
+            "it removes the logs of every finished instance",
+        );
+    }
+
+    // `--dry-run` only applies to `fog prune`.
+    if cli.dry_run && cli.script.as_deref() != Some("prune") {
+        usage_error(
+            "--dry-run only applies to `fog prune`",
+            "e.g. `fog prune --dry-run`",
+        );
+    }
+
     // `--port` only applies when running a script.
     if !cli.port.is_empty() && cli.script.as_deref().is_none_or(is_builtin) {
         usage_error(
@@ -3131,6 +3305,7 @@ pub fn run() -> io::Result<()> {
         Some("kill") => cmd_kill(cli.pid, cli.all, &cli),
         Some("restart") => cmd_restart(cli.pid, cli.all, &cli),
         Some("logs") => cmd_logs(cli.pid, cli.service.clone(), &cli),
+        Some("prune") => cmd_prune(cli.dry_run, cli.verbose),
         Some("attach") => cmd_attach(&cli),
         Some(name) => run_script(name, &cli),
         None => {
@@ -3305,6 +3480,73 @@ mod tests {
             log_service_rows(&status, false),
             vec![("proxy".to_string(), ":down".to_string())]
         );
+    }
+
+    #[test]
+    fn test_finished_log_rows_lists_log_files_sorted() {
+        let dir = temp_dir();
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("worker.log"), "w").unwrap();
+        fs::write(dir.join("api.log"), "a").unwrap();
+        fs::write(dir.join("daemon.log"), "d").unwrap();
+        fs::write(dir.join("startup.progress"), "x").unwrap();
+        fs::create_dir_all(dir.join("nested.log")).unwrap();
+
+        let rows = finished_log_rows(&dir);
+
+        assert_eq!(
+            rows,
+            vec![
+                ("api".to_string(), "finished".to_string()),
+                ("daemon".to_string(), "finished".to_string()),
+                ("worker".to_string(), "finished".to_string()),
+            ],
+            "only *.log files, sorted, with no live status"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_finished_log_rows_missing_dir_is_empty() {
+        let dir = temp_dir().join("gone");
+        assert!(finished_log_rows(&dir).is_empty());
+    }
+
+    #[test]
+    fn test_resolve_service_name_finds_listed_and_stale_logs() {
+        let dir = temp_dir();
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("orphan.log"), "x").unwrap();
+        let rows = vec![
+            ("api".to_string(), "finished".to_string()),
+            ("a/b".to_string(), "finished".to_string()),
+        ];
+
+        assert_eq!(
+            resolve_service_name(&dir, &rows, "api").as_deref(),
+            Some("api")
+        );
+        // Sanitized form of a name containing `/` maps back to the row.
+        assert_eq!(
+            resolve_service_name(&dir, &rows, "a_b").as_deref(),
+            Some("a/b")
+        );
+        // Not listed, but its log file is on disk: still printable by name.
+        assert_eq!(
+            resolve_service_name(&dir, &[], "orphan").as_deref(),
+            Some("orphan")
+        );
+        assert_eq!(resolve_service_name(&dir, &[], "nope"), None);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_format_bytes_units() {
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(1023), "1023 B");
+        assert_eq!(format_bytes(1024), "1.0 KiB");
+        assert_eq!(format_bytes(8 * 1024 * 1024), "8.0 MiB");
+        assert_eq!(format_bytes(23 * 1024 * 1024 * 1024), "23.0 GiB");
     }
 
     #[test]

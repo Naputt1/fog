@@ -79,11 +79,11 @@ _fog() {{
         return 0
     fi
 
-    opts="--config --save-logs --branch --detach --service --head --tail --all --force --no-share --port --completions --verbose -c -d -s -v -h --help -V --version"
+    opts="--config --save-logs --branch --detach --service --head --tail --all --force --no-share --port --dry-run --completions --verbose -c -d -s -v -h --help -V --version"
     if [[ "$cur" == -* ]]; then
         COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
     else
-        COMPREPLY=( $(compgen -W "ls kill restart logs attach index" -- "$cur") )
+        COMPREPLY=( $(compgen -W "ls kill restart logs prune attach index" -- "$cur") )
     fi
     return 0
 }}
@@ -128,11 +128,12 @@ _fog() {{
         '--force[Escalate to SIGTERM/SIGKILL if it does not stop (kill/restart)]' \
         '--no-share[Ignore shared services]' \
         '--port=[Override a top-level ports entry for this run]:port:' \
+        '--dry-run[Report what would be removed without deleting anything (fog prune)]' \
         '--completions=[Generate a completion script]:shell:(bash zsh fish)' \
         '(-v --verbose)'{{-v,--verbose}}'[Print verbose setup output]' \
         '(-h --help)'{{-h,--help}}'[Print help]' \
         '(-V --version)'{{-V,--version}}'[Print version]' \
-        '1:command:(ls kill restart logs attach index)' \
+        '1:command:(ls kill restart logs prune attach index)' \
         '*:pid:'
     case $state in
         branches)
@@ -162,11 +163,12 @@ complete -c fog -l all -d 'Apply to every matching instance (kill/restart)'
 complete -c fog -l force -d 'Escalate to SIGTERM/SIGKILL if it does not stop (kill/restart)'
 complete -c fog -l no-share -d 'Ignore shared services'
 complete -c fog -l port -d 'Override a top-level ports entry for this run (NAME=PORT)' -r
+complete -c fog -l dry-run -d 'Report what would be removed without deleting anything (fog prune)'
 complete -c fog -l completions -d 'Generate a completion script' -a 'bash zsh fish'
 complete -c fog -s v -l verbose -d 'Print verbose setup output'
 complete -c fog -s h -l help -d 'Print help'
 complete -c fog -s V -l version -d 'Print version'
-complete -c fog -f -a 'ls kill restart logs attach index'
+complete -c fog -f -a 'ls kill restart logs prune attach index'
 complete -c fog -f -n 'test (count (commandline -opc)) -ge 2; and test (commandline -opc)[2] = index' -a 'serve kill restart' -d 'index command'
 complete -c fog -n 'test (count (commandline -opc)) -ge 3; and test (commandline -opc)[2] = index; and test (commandline -opc)[3] = serve' -l foreground -d 'Run the index server in the foreground'
 complete -c fog -n 'test (count (commandline -opc)) -ge 3; and test (commandline -opc)[2] = index; and test (commandline -opc)[3] = serve' -l port -r -d 'Index server port'
@@ -187,6 +189,8 @@ mod tests {
         assert!(out.contains("--head"));
         assert!(out.contains("--tail"));
         assert!(out.contains("--no-share"));
+        assert!(out.contains("logs prune attach"));
+        assert!(out.contains("--dry-run"));
         assert!(out.contains("serve kill restart"));
         assert!(out.contains("--foreground"));
         assert!(out.contains("complete -F _fog fog"));
@@ -201,6 +205,8 @@ mod tests {
         assert!(out.contains("--head"));
         assert!(out.contains("--tail"));
         assert!(out.contains("--no-share"));
+        assert!(out.contains("logs prune attach"));
+        assert!(out.contains("--dry-run"));
         assert!(out.contains("serve kill restart"));
         assert!(out.contains("--foreground"));
         assert!(out.contains("compdef _fog fog"));
@@ -215,6 +221,8 @@ mod tests {
         assert!(out.contains("-l head"));
         assert!(out.contains("-l tail"));
         assert!(out.contains("-l no-share"));
+        assert!(out.contains("logs prune attach"));
+        assert!(out.contains("-l dry-run"));
         assert!(out.contains("serve kill restart"));
         assert!(out.contains("-l foreground"));
         assert!(out.contains("complete -c fog"));
@@ -278,6 +286,16 @@ for candidate in "${COMPREPLY[@]}"; do printf 'candidate:%s\n' "$candidate"; don
             candidate(&["fog", "-"])
                 .iter()
                 .any(|flag| flag == "--no-share")
+        );
+        assert!(
+            candidate(&["fog", "prune", "-"])
+                .iter()
+                .any(|flag| flag == "--dry-run")
+        );
+        assert!(
+            candidate(&["fog", ""])
+                .iter()
+                .any(|command| command == "prune")
         );
     }
 }

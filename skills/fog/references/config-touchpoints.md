@@ -26,8 +26,10 @@ into every service process.
 ## Logs and remote view
 
 - Detached runs tee each service's raw PTY output to `$TMPDIR/fog-<pid>.logs/<name>.log`
-  (and `daemon.log`). The files persist after the instance exits; `fog logs <pid> -s <name>`
-  reads them.
+  (and `daemon.log`), capped at 8 MiB per service. The files persist after the instance
+  exits; `fog logs <pid> -s <name>` reads them, and `fog prune` removes the logs of every
+  finished instance (`--dry-run` reports the size first). The proxy log is memory-only and
+  is gone once the instance exits.
 - `--save-logs` additionally writes `temp/<name>.txt` on exit.
 - Web UI / API on `127.0.0.1:18080`: `GET /api/services`, `/api/status`, `/api/health`;
   live logs via SSE at `/logs/stream?pid=<pid>`. The directory is also reachable from a
