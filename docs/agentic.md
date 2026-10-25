@@ -91,6 +91,8 @@ fog ls
 fog logs 5678          # captured agent output, ANSI stripped
 fog logs 5678 --tail 100           # last 100 lines
 fog logs 5678 --head 50 --tail 50  # first 50 + last 50, middle elided
+fog logs 5678 -s api               # still readable after the instance exits
+fog prune --dry-run                # what finished runs still hold on disk
 # or SSE via web UI /logs/stream?pid=5678
 ```
 

@@ -178,6 +178,7 @@ fog kill [pid] --force        # escalate SIGTERM → SIGKILL for a wedged instan
 fog logs [pid]                # list services and their status
 fog logs [pid] -s <name>      # print captured output of one service
 fog logs [pid] -s <name> --tail 50   # last 50 lines (--head 50, --head -50, --tail +51)
+fog prune [--dry-run]         # remove the captured logs of finished instances
 fog attach [pid]              # reattach the TUI to a running instance (replays screen history)
 fog index serve|kill|restart  # control the host-global web UI / API server
 ```
@@ -197,6 +198,7 @@ instance), `2` a usage error (bad flag, unknown script).
 | `-s`, `--service <NAME>` | With `fog logs`: show one service instead of listing (`daemon` and `proxy` included)                            |
 | `--head <N\|-N>`         | With `fog logs -s`: keep the first `N` lines, or all but the last `N` with `-N`                                 |
 | `--tail <N\|-N\|+N>`     | With `fog logs -s`: keep the last `N` lines, or from line `N` to the end with `+N`                              |
+| `--dry-run`              | With `fog prune`: report what would be removed, and how much space that frees, without deleting anything       |
 | `--save-logs`            | Save service output to `temp/<name>.txt` on exit                                                                |
 | `-v`, `--verbose`        | Print informational setup output (DNS, router, index, ports, native routes); warnings always print              |
 | `--completions <SHELL>`  | Print bash/zsh/fish completions                                                                                 |
