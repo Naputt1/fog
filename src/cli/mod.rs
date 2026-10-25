@@ -2592,7 +2592,11 @@ fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>) -> io::Res
 
 /// Creates the per-instance log directory for the current process, which
 /// every run (interactive or detached) tees each service's output into.
+///
+/// Stale directories from finished instances are pruned first, so the captured
+/// logs of past runs cannot pile up in the temp directory.
 fn create_log_dir() -> io::Result<PathBuf> {
+    ipc::prune_stale_instance_logs();
     let dir = ipc::instance_log_dir(std::process::id());
     fs::create_dir_all(&dir)?;
     // Restrict to the owner, matching `ipc::ensure_instance_dir`.

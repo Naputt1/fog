@@ -99,13 +99,60 @@ pub fn ensure_instance_dir() -> io::Result<PathBuf> {
     Ok(dir)
 }
 
+/// Removes the log directories of instances that are no longer running.
+///
+/// Every run (interactive or detached) creates `fog-<pid>.logs` and never
+/// removes it, so without this the captured service logs of every past run
+/// accumulate in the temp directory. The most recent dead instance is kept so
+/// `fog logs <pid>` can still read the run that just finished. Best-effort: an
+/// entry that cannot be inspected or removed is skipped.
+pub fn prune_stale_instance_logs() {
+    let self_pid = std::process::id();
+    let Ok(entries) = std::fs::read_dir(instance_dir()) else {
+        return;
+    };
+    let mut stale: Vec<(std::time::SystemTime, PathBuf)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let pid = log_dir_pid(&path)?;
+            if pid == self_pid || crate::process::is_pid_alive(pid) {
+                return None;
+            }
+            let modified = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::UNIX_EPOCH);
+            Some((modified, path))
+        })
+        .collect();
+    if stale.len() < 2 {
+        return;
+    }
+    // Newest first, then drop it: the latest finished run stays readable.
+    stale.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
+    for (_, path) in stale.into_iter().skip(1) {
+        let _ = std::fs::remove_dir_all(&path);
+    }
+}
+
+/// Extracts the PID from an instance log directory name (`fog-<pid>.logs`).
+fn log_dir_pid(path: &std::path::Path) -> Option<u32> {
+    path.file_name()?
+        .to_str()?
+        .strip_prefix("fog-")?
+        .strip_suffix(".logs")?
+        .parse()
+        .ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::proxy::LogEntry;
     use std::collections::VecDeque;
     use std::fs::{self};
-    use std::io::{BufReader, Read, Seek, SeekFrom, Write};
+    use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
     use std::path::PathBuf;
     use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex};
@@ -127,6 +174,113 @@ mod tests {
         for w in instances.windows(2) {
             assert!(w[0].0 <= w[1].0, "instances must be sorted by pid");
         }
+    }
+
+    #[test]
+    fn test_prune_stale_instance_logs_keeps_self_and_newest() {
+        ensure_instance_dir().unwrap();
+        let self_dir = instance_log_dir(std::process::id());
+        fs::create_dir_all(&self_dir).unwrap();
+        // PIDs far above anything alive, so both count as finished instances.
+        let base = 3_900_000 + (std::process::id() % 500) * 2;
+        let dead = [base, base + 1];
+        for pid in dead {
+            assert!(!crate::process::is_pid_alive(pid));
+            fs::create_dir_all(instance_log_dir(pid)).unwrap();
+        }
+
+        prune_stale_instance_logs();
+
+        assert!(self_dir.exists(), "running instance's logs must be kept");
+        let kept = dead
+            .iter()
+            .filter(|pid| instance_log_dir(**pid).exists())
+            .count();
+        assert_eq!(kept, 1, "only the newest finished run's logs survive");
+        for pid in dead {
+            let _ = fs::remove_dir_all(instance_log_dir(pid));
+        }
+    }
+
+    #[test]
+    fn test_stream_service_log_follows_after_truncation() {
+        let dir = std::env::temp_dir().join(format!("fog-test-follow-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        // Fill past the tail window so the follow reader starts at a high
+        // offset: a stale offset is what truncation has to recover from.
+        let path = dir.join("web.log");
+        let mut f = fs::File::create(&path).unwrap();
+        for _ in 0..200_000 {
+            let _ = writeln!(f, "old output line");
+        }
+        drop(f);
+
+        let sock = instance_dir().join(format!("fog-test-follow-{}.sock", std::process::id()));
+        let _ = fs::remove_file(&sock);
+        let listener = super::transport::Listener::bind(&sock).unwrap();
+        let state = IpcState::new("dev".to_string(), None, None, false);
+        state.services.lock().unwrap().push(ServiceStatus {
+            name: "web".into(),
+            running: true,
+            health: "unknown".into(),
+            endpoints: Vec::new(),
+            shutdown_cmd: None,
+        });
+        let state = Arc::new(state);
+        let server_dir = dir.clone();
+        let server = thread::spawn(move || {
+            let mut stream = listener.accept().unwrap();
+            stream_service_log(&mut stream, &state, &server_dir, "web", 3, true);
+        });
+
+        let mut client = super::transport::connect(&sock).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        let mut client = BufReader::new(client);
+        let mut line = String::new();
+        assert!(
+            read_until(&mut client, &mut line, "old output line"),
+            "the tail must arrive before truncation"
+        );
+
+        // The tee truncates a log that outgrows its cap; a follower parked at
+        // the old offset must rewind and pick up the new content.
+        let mut f = fs::File::create(&path).unwrap();
+        let _ = writeln!(f, "after truncation");
+        drop(f);
+        assert!(
+            read_until(&mut client, &mut line, "after truncation"),
+            "a follower must resume reading a truncated log from the start"
+        );
+
+        drop(client);
+        let _ = server.join();
+        let _ = fs::remove_file(&sock);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Reads lines until one contains `needle` or `timeout` elapses.
+    fn read_until(
+        reader: &mut BufReader<super::transport::Stream>,
+        line: &mut String,
+        needle: &str,
+    ) -> bool {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            line.clear();
+            match reader.read_line(line) {
+                Ok(0) => return false,
+                Ok(_) if line.contains(needle) => return true,
+                Ok(_) => {}
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut => {}
+                Err(_) => return false,
+            }
+        }
+        false
     }
 
     #[test]

@@ -328,6 +328,18 @@ pub(crate) fn stream_service_log(
         if last_growth.elapsed() > super::LOG_FOLLOW_IDLE && !service_running(state, service) {
             break;
         }
+        // The tee discards a log that outgrows its cap, so our offset can point
+        // past the end of a freshly truncated file. Rewind instead of waiting
+        // forever at a stale position.
+        if let Ok(len) = reader.get_ref().metadata().map(|m| m.len()) {
+            let pos = reader.stream_position().unwrap_or(0);
+            if len < pos {
+                pending.clear();
+                if reader.seek(SeekFrom::Start(0)).is_err() {
+                    return;
+                }
+            }
+        }
         match reader.read(&mut chunk) {
             Ok(0) => {}
             Ok(n) => {
