@@ -101,6 +101,11 @@ fn discover_launch_targets() -> LaunchTargets {
     for root in compose_project_roots() {
         push(&mut roots, &root);
     }
+    // Remembered config dirs keep a project launchable after it stopped: a
+    // stopped project has no instance and no container to discover it from.
+    for project in super::registry::load() {
+        push(&mut roots, std::path::Path::new(&project.path));
+    }
 
     roots.sort();
     build_launch_targets(&roots, crate::project::detect)
@@ -433,6 +438,7 @@ pub(super) async fn handle_launch_request(
     };
 
     let script = parsed.script.clone();
+    let launched_dir = PathBuf::from(parsed.config_dir.clone());
     let config_task = config_path.clone();
     // The spawn + readiness wait can block for up to ~60s; move it onto a
     // blocking thread so the HTTP task is never blocked.
@@ -441,7 +447,12 @@ pub(super) async fn handle_launch_request(
         .unwrap_or_else(|e| Err(io::Error::other(e.to_string())));
 
     match outcome {
-        Ok(pid) => json_response(&serde_json::json!({ "ok": true, "pid": pid })),
+        Ok(pid) => {
+            // Remember the config dir so the project stays launchable after it
+            // stops (discovery alone only sees what runs).
+            super::registry::remember(&launched_dir);
+            json_response(&serde_json::json!({ "ok": true, "pid": pid }))
+        }
         Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
 }

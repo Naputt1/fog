@@ -10,9 +10,11 @@ use hyper::{Request, Response, StatusCode};
 
 use super::api::{api_config, api_health, api_services_with_query, api_status};
 use super::assets::serve_spa_fallback;
+use super::browse::api_fs_list_method;
 use super::icons::{api_project_icon, parse_project_icon_route};
 use super::launch::{api_launch_inspect_method, api_launch_targets_method, handle_launch_request};
 use super::logs::{serve_logs_history, serve_logs_stream};
+use super::registry::handle_launch_projects_request;
 use super::{
     CURRENT_INDEX_PORT, DEFAULT_INDEX_PORT, RespBody, api_error, api_not_found,
     discover_fog_instances, index_pid_path, json_response, load_runtime_config,
@@ -173,6 +175,7 @@ pub(super) async fn serve_index(
     let is_write_route = parse_action_route(&path).is_some()
         || parse_kill_route(&path).is_some()
         || path == "/api/launch"
+        || path == "/api/launch/projects"
         || path == "/api/server/kill"
         || path == "/api/server/restart"
         || parse_restart_route(&path).is_some();
@@ -233,6 +236,32 @@ pub(super) async fn serve_index(
         return Ok(handle_launch_request(&method, &bytes).await);
     }
 
+    // The project registry is read with GET, extended with POST (which carries
+    // a body) and pruned with DELETE, so it is dispatched with the body readers
+    // above instead of the path-only match below.
+    if path == "/api/launch/projects" {
+        let (parts, body) = req.into_parts();
+        let bytes = if parts.method == hyper::Method::POST {
+            if !json_content_type_allowed(&parts.headers) {
+                return Ok(api_error(
+                    StatusCode::BAD_REQUEST,
+                    "unsupported content-type",
+                ));
+            }
+            match body.collect().await {
+                Ok(collected) => collected.to_bytes(),
+                Err(_) => Bytes::new(),
+            }
+        } else {
+            Bytes::new()
+        };
+        return Ok(handle_launch_projects_request(
+            &parts.method,
+            parts.uri.query(),
+            &bytes,
+        ));
+    }
+
     if path == "/api/server/kill" {
         return Ok(handle_server_kill_request(&method).await);
     }
@@ -281,6 +310,7 @@ pub(super) async fn serve_index(
         "/api/health" => Ok(api_health()),
         "/api/launch/targets" => Ok(api_launch_targets_method(&method)),
         "/api/launch/inspect" => Ok(api_launch_inspect_method(&method, req.uri().query())),
+        "/api/fs/list" => Ok(api_fs_list_method(&method, req.uri().query())),
         _ if path.starts_with("/api/") => Ok(api_not_found()),
         _ => {
             let accept_encoding = req

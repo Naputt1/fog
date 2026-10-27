@@ -21,6 +21,9 @@ import {
 } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
+  deleteRegisteredProject,
+  fetchDirectoryListing,
+  fetchRegisteredProjects,
   fetchServices,
   fetchStatus,
   fetchHealth,
@@ -28,6 +31,7 @@ import {
   fetchLaunchTargets,
   postLaunch,
   postKillInstance,
+  postRegisteredProject,
   postServiceAction,
   type ServiceAction,
   type StatusSnapshot,
@@ -235,11 +239,64 @@ export function useLaunchInspect(path: string) {
 }
 
 /**
+ * Subdirectories of one folder for the launch picker. `dir` may start with
+ * `~`; an empty string lists the home directory. No polling: a folder only
+ * changes when the user navigates.
+ */
+export function useDirectoryListing(dir: string) {
+  return useQuery({
+    queryKey: ["fs-list", dir],
+    queryFn: () => fetchDirectoryListing(dir),
+    staleTime: 10_000,
+    retry: false,
+  });
+}
+
+/** Config dirs the launch picker remembers, beyond what discovery sees. */
+export function useRegisteredProjects() {
+  return useQuery({
+    queryKey: ["projects-registry"],
+    queryFn: fetchRegisteredProjects,
+    staleTime: 30_000,
+  });
+}
+
+/** Remember a picked config dir and refresh the launch targets that list it. */
+export function useRegisterProject() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (path: string) => postRegisteredProject(path),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["launch-targets"] });
+      void queryClient.invalidateQueries({ queryKey: ["projects-registry"] });
+    },
+    onError: (error) => {
+      toast.error("Could not add project", { description: error.message });
+    },
+  });
+}
+
+/** Drop a remembered config dir from the known-project list. */
+export function useForgetProject() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (path: string) => deleteRegisteredProject(path),
+    onSuccess: () => {
+      toast.success("Project forgotten");
+      void queryClient.invalidateQueries({ queryKey: ["launch-targets"] });
+      void queryClient.invalidateQueries({ queryKey: ["projects-registry"] });
+    },
+    onError: (error) => {
+      toast.error("Could not forget project", { description: error.message });
+    },
+  });
+}
+
+/**
  * Launch mutation. Toasts through loading → success/error and invalidates
  * `status`/`health` on settle so the new instance appears. Callers read
  * `mutation.error` / `mutation.isPending` / `mutation.data` for inline state.
- */
-export function useLaunch() {
+ */ export function useLaunch() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationKey: LAUNCH_KEY,

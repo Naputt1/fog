@@ -1,7 +1,15 @@
 import { useEffect, useId, useState } from "react";
-import { ChevronDown } from "lucide-react";
+import { ChevronDown, FolderOpen } from "lucide-react";
 
-import { useLaunch, useLaunchInspect, useLaunchTargets } from "@/lib/hooks";
+import {
+  useForgetProject,
+  useLaunch,
+  useLaunchInspect,
+  useLaunchTargets,
+  useRegisterProject,
+  useRegisteredProjects,
+} from "@/lib/hooks";
+import { DirectoryBrowser } from "@/components/directory-browser";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -120,11 +128,15 @@ export function LaunchForm({
   const fieldId = useId();
 
   const [mode, setMode] = useState<Mode>("known");
+  /** Which mode's folder browser is open, if any. */
+  const [browse, setBrowse] = useState<Mode | null>(null);
 
   // Known-project mode state.
   const [projectPath, setProjectPath] = useState("");
   const [worktreePath, setWorktreePath] = useState("");
   const [script, setScript] = useState("");
+  /** A browsed dir that launch targets don't list (yet). */
+  const [pendingPath, setPendingPath] = useState<string | null>(null);
 
   // New-project mode state.
   const [newPath, setNewPath] = useState("");
@@ -138,6 +150,33 @@ export function LaunchForm({
     selectedProject?.worktrees.filter((w) => w.scripts.length > 0) ?? [];
   const selectedWorktree = launchable.find((w) => w.path === worktreePath);
   const scripts = selectedWorktree?.scripts ?? [];
+
+  const registration = useRegisterProject();
+  const { mutate: forgetProject, isPending: isForgetting } = useForgetProject();
+  const registered = useRegisteredProjects();
+
+  // A browsed folder becomes selectable once the launch targets list it, which
+  // remembering it does; until then the form waits on that refetch.
+  useEffect(() => {
+    if (!pendingPath) return;
+    const match = projects.find(
+      (p) =>
+        p.path === pendingPath ||
+        p.worktrees.some((w) => w.path === pendingPath)
+    );
+    if (!match) return;
+    setProjectPath(match.path);
+    setWorktreePath("");
+    setScript("");
+    setPendingPath(null);
+  }, [pendingPath, projects]);
+
+  /** Remembered config dir behind the current selection, if any. */
+  const registeredPath = registered.data?.projects.find(
+    (p) =>
+      p.path === projectPath ||
+      selectedProject?.worktrees.some((w) => w.path === p.path)
+  )?.path;
 
   // New-project mode: the backend inspects the typed dir for its scripts, its
   // branch and its repo's worktrees, so nothing has to be typed blind.
@@ -172,7 +211,7 @@ export function LaunchForm({
 
   const knownReady = Boolean(projectPath && worktreePath && script);
   const newReady = Boolean(detected?.path && newScript);
-  const ready = mode === "known" ? knownReady : newReady;
+  const ready = mode === "known" ? knownReady && !pendingPath : newReady;
 
   const startKnown = () => {
     if (!selectedWorktree || !script) return;
@@ -203,6 +242,23 @@ export function LaunchForm({
     if (ok && pid != null) onLaunched?.(pid);
   };
 
+  /**
+   * A browsed folder: a new project takes the path as-is (the inspect endpoint
+   * fills in its scripts and branch), a known one is remembered so discovery
+   * lists it, then picked once the refetch brings it in.
+   */
+  const pickDirectory = (path: string) => {
+    const target = browse;
+    setBrowse(null);
+    if (target === "new") {
+      setNewPath(path);
+      return;
+    }
+    registration.reset();
+    setPendingPath(path);
+    registration.mutate(path);
+  };
+
   const failure = launchError?.message ?? result?.error ?? null;
   const status = isPending
     ? "Starting instance…"
@@ -210,17 +266,33 @@ export function LaunchForm({
       ? failure
       : result?.ok && result.pid != null
         ? `Started pid ${result.pid}`
-        : ready
-          ? "Runs detached in the background"
-          : mode === "known"
-            ? "Pick a project, worktree and script"
-            : !newPath.trim()
-              ? "Enter a config dir to detect its scripts"
-              : inspect.isFetching
-                ? "Inspecting config dir…"
-                : detected && !newScript
-                  ? "That config dir has no scripts"
-                  : "Pick a script";
+        : registration.isError
+          ? (registration.error?.message ?? "Could not add this project.")
+          : pendingPath
+            ? `Adding ${basename(pendingPath)}…`
+            : ready
+              ? "Runs detached in the background"
+              : mode === "known"
+                ? "Pick a project, worktree and script"
+                : !newPath.trim()
+                  ? "Enter a config dir to detect its scripts"
+                  : inspect.isFetching
+                    ? "Inspecting config dir…"
+                    : detected && !newScript
+                      ? "That config dir has no scripts"
+                      : "Pick a script";
+
+  if (browse) {
+    return (
+      <DirectoryBrowser
+        startDir={
+          browse === "known" ? (selectedProject?.path ?? "") : newPath.trim()
+        }
+        onPick={pickDirectory}
+        onCancel={() => setBrowse(null)}
+      />
+    );
+  }
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3">
@@ -263,75 +335,110 @@ export function LaunchForm({
             <p className="text-destructive font-mono text-xs">
               {error?.message ?? "Failed to load launch targets."}
             </p>
-          ) : projects.length === 0 ? (
-            <p className="text-muted-foreground font-mono text-xs">
-              No known projects. Start an instance from a config dir below.
-            </p>
           ) : (
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-              <SelectField
-                id={`${fieldId}-project`}
-                label="Project"
-                value={projectPath}
-                disabled={isPending}
-                autoFocus={autoFocus}
-                hint={
-                  selectedProject && launchable.length === 0
-                    ? "No worktree with scripts on this project."
-                    : undefined
-                }
-                onChange={(value) => {
-                  setProjectPath(value);
-                  setWorktreePath("");
-                  setScript("");
-                }}
-              >
-                <option value="" disabled>
-                  Select a project…
-                </option>
-                {projects.map((p) => (
-                  <option key={p.path} value={p.path}>
-                    {p.name}
-                  </option>
-                ))}
-              </SelectField>
+            <div className="space-y-3">
+              {projects.length === 0 ? (
+                <p className="text-muted-foreground font-mono text-xs">
+                  No known projects yet. Browse to a folder with a fog.json.
+                </p>
+              ) : (
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                  <SelectField
+                    id={`${fieldId}-project`}
+                    label="Project"
+                    value={projectPath}
+                    disabled={isPending}
+                    autoFocus={autoFocus}
+                    hint={
+                      selectedProject && launchable.length === 0
+                        ? "No worktree with scripts on this project."
+                        : undefined
+                    }
+                    onChange={(value) => {
+                      setProjectPath(value);
+                      setWorktreePath("");
+                      setScript("");
+                    }}
+                  >
+                    <option value="" disabled>
+                      Select a project…
+                    </option>
+                    {projects.map((p) => (
+                      <option key={p.path} value={p.path}>
+                        {p.name}
+                      </option>
+                    ))}
+                  </SelectField>
 
-              <SelectField
-                id={`${fieldId}-worktree`}
-                label="Worktree / branch"
-                value={worktreePath}
-                disabled={isPending || launchable.length === 0}
-                onChange={(value) => {
-                  setWorktreePath(value);
-                  setScript("");
-                }}
-              >
-                <option value="" disabled>
-                  Select a worktree…
-                </option>
-                {launchable.map((w) => (
-                  <option key={w.path} value={w.path}>
-                    {w.branch ?? basename(w.path)}
-                  </option>
-                ))}
-              </SelectField>
+                  <SelectField
+                    id={`${fieldId}-worktree`}
+                    label="Worktree / branch"
+                    value={worktreePath}
+                    disabled={isPending || launchable.length === 0}
+                    onChange={(value) => {
+                      setWorktreePath(value);
+                      setScript("");
+                    }}
+                  >
+                    <option value="" disabled>
+                      Select a worktree…
+                    </option>
+                    {launchable.map((w) => (
+                      <option key={w.path} value={w.path}>
+                        {w.branch ?? basename(w.path)}
+                      </option>
+                    ))}
+                  </SelectField>
 
-              <SelectField
-                id={`${fieldId}-known-script`}
-                label="Script"
-                value={script}
-                disabled={isPending || !selectedWorktree}
-                onChange={setScript}
-              >
-                <option value="" disabled>
-                  Select a script…
-                </option>
-                {scripts.map((s) => (
-                  <option key={s} value={s}>
-                    {s}
-                  </option>
-                ))}
-              </SelectField>
+                  <SelectField
+                    id={`${fieldId}-known-script`}
+                    label="Script"
+                    value={script}
+                    disabled={isPending || !selectedWorktree}
+                    onChange={setScript}
+                  >
+                    <option value="" disabled>
+                      Select a script…
+                    </option>
+                    {scripts.map((s) => (
+                      <option key={s} value={s}>
+                        {s}
+                      </option>
+                    ))}
+                  </SelectField>
+                </div>
+              )}
+
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={isPending}
+                  onClick={() => setBrowse("known")}
+                >
+                  <FolderOpen aria-hidden />
+                  Browse folders
+                </Button>
+                {registeredPath ? (
+                  <Button
+                    variant="muted"
+                    size="sm"
+                    loading={isForgetting}
+                    disabled={isPending}
+                    onClick={() =>
+                      forgetProject(registeredPath, {
+                        onSuccess: () => {
+                          setProjectPath("");
+                          setWorktreePath("");
+                          setScript("");
+                        },
+                      })
+                    }
+                  >
+                    Forget this project
+                  </Button>
+                ) : null}
+              </div>
             </div>
           )
         ) : (
@@ -340,16 +447,31 @@ export function LaunchForm({
               <FieldLabel htmlFor={`${fieldId}-new-path`}>
                 Config dir (absolute)
               </FieldLabel>
-              <Input
-                id={`${fieldId}-new-path`}
-                value={newPath}
-                placeholder="/abs/path/to/project"
-                font="mono"
-                autoFocus={autoFocus}
-                disabled={isPending}
-                aria-invalid={inspect.isError}
-                onChange={(e) => setNewPath(e.target.value)}
-              />
+              <div className="flex items-center gap-2">
+                <div className="min-w-0 flex-1">
+                  <Input
+                    id={`${fieldId}-new-path`}
+                    value={newPath}
+                    placeholder="/abs/path/to/project"
+                    font="mono"
+                    autoFocus={autoFocus}
+                    disabled={isPending}
+                    aria-invalid={inspect.isError}
+                    onChange={(e) => setNewPath(e.target.value)}
+                  />
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="shrink-0"
+                  disabled={isPending}
+                  onClick={() => setBrowse("new")}
+                >
+                  <FolderOpen aria-hidden />
+                  Browse
+                </Button>
+              </div>
               <p
                 className={cn(
                   "text-2xs mt-1 truncate font-mono",

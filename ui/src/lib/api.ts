@@ -308,6 +308,80 @@ export function fetchLaunchInspect(path: string): Promise<LaunchInspect> {
   );
 }
 
+/** One subdirectory of GET /api/fs/list. */
+export interface BrowseEntry {
+  /** Directory name (no path). */
+  name: string;
+  /** Absolute path of the directory. */
+  path: string;
+  /** The dir is a git repository or worktree (has a `.git`). */
+  git: boolean;
+  /** The dir holds a `fog.json`, so fog can launch it. */
+  fog: boolean;
+}
+
+/** Response body of GET /api/fs/list: subdirectories of one directory. */
+export interface BrowseListing {
+  /** Canonical path of the listed directory. */
+  path: string;
+  /** Parent directory, null at a filesystem root. */
+  parent: string | null;
+  /** The listed directory itself holds a `fog.json`. */
+  fog: boolean;
+  /** Subdirectories, sorted by name (hidden dirs and files omitted). */
+  entries: BrowseEntry[];
+}
+
+/** A config dir remembered by the launch picker. */
+export interface RegisteredProject {
+  /** Absolute canonical path of the config dir. */
+  path: string;
+  /** Unix seconds when it was added. */
+  added_at: number;
+}
+
+/** Response body of GET /api/launch/projects. */
+export interface RegisteredProjects {
+  projects: RegisteredProject[];
+}
+
+/**
+ * List the subdirectories of `dir` for the launch picker. `dir` may start with
+ * `~`; omitting it lists the home directory. Throws ApiError (400) for a path
+ * that is not an absolute, readable directory.
+ */
+export function fetchDirectoryListing(dir?: string): Promise<BrowseListing> {
+  const query = dir?.trim() ? `?dir=${encodeURIComponent(dir.trim())}` : "";
+  return fetchJson<BrowseListing>(`/api/fs/list${query}`);
+}
+
+/** The config dirs the launch picker remembers (survive restarts). */
+export function fetchRegisteredProjects(): Promise<RegisteredProjects> {
+  return fetchJson<RegisteredProjects>("/api/launch/projects");
+}
+
+/**
+ * Remember a config dir so it stays in the known-project list after it stops.
+ * Throws ApiError (400) when the dir is missing or has no `fog.json`.
+ */
+export function postRegisteredProject(
+  path: string
+): Promise<{ project: RegisteredProject }> {
+  return postJson<{ project: RegisteredProject }>("/api/launch/projects", {
+    path,
+  });
+}
+
+/** Forget a remembered config dir. */
+export function deleteRegisteredProject(
+  path: string
+): Promise<{ ok: boolean }> {
+  return fetchJson<{ ok: boolean }>(
+    `/api/launch/projects?path=${encodeURIComponent(path)}`,
+    { method: "DELETE" }
+  );
+}
+
 /**
  * Launch a fog instance on a config dir.
  *
