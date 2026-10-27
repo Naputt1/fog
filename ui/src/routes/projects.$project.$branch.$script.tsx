@@ -21,6 +21,7 @@ import { ErrorState, LoadingState, PageHeader } from "@/components/page-state";
 import { StatusBadge } from "@/components/status-badge";
 import { ServiceUrl } from "@/components/service-url";
 import { ServiceActions } from "@/components/service-actions";
+import { InstanceKillButton } from "@/components/instance-kill-button";
 import {
   ServiceTerminal,
   type TerminalMode,
@@ -249,6 +250,8 @@ function ScriptServicesPage() {
   const label = (bucket?.worktree ?? legacy?.worktree) || DEFAULT_WORKTREE;
   const projectName = bucket?.project ?? projectBucket?.project ?? project;
   const multi = scriptInstances.length > 1 || search.pid != null;
+  // Synthetic instances (pid <= 0) have no process to kill.
+  const killable = instances.filter((inst) => inst.pid > 0);
 
   const selected = search.service
     ? (instances
@@ -323,7 +326,20 @@ function ScriptServicesPage() {
 
   return (
     <div className="min-w-0 space-y-4">
-      <PageHeader title={script} />
+      <PageHeader
+        title={script}
+        actions={killable.map((inst) => (
+          <InstanceKillButton
+            key={inst.pid}
+            pid={inst.pid}
+            script={inst.script}
+            project={inst.project}
+            branch={inst.branch}
+            label={multi ? `Kill pid ${inst.pid}` : "Kill"}
+            size="sm"
+          />
+        ))}
+      />
 
       {multi ? (
         <div className="flex flex-wrap gap-1.5">

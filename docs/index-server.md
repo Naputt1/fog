@@ -108,7 +108,9 @@ The branch views are driven by `GET /api/status` (so **stopped** services are
 still listed and can be restarted) and enriched with `GET /api/services` for the
 URL/ports/container of running services. When several scripts (or several
 instances of the same script) serve one branch, the branch list splits them per
-instance, and each instance has a **Kill** button.
+instance, and each instance has a **Kill** button. The branch script page
+carries a **Kill** in its header for the instance it shows — one per instance
+when several are listed.
 
 The buttons call
 `POST /api/instances/{pid}/services/{name}/action` with a JSON body:
