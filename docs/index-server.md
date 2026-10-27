@@ -137,6 +137,10 @@ The `/status` page includes a **Start instance** card with two modes:
 2. **New project** — enter an absolute config directory path and a script
    name (optionally a branch), and press **Start**.
 
+The same form opens from the services index (`/`) header **Start instance**
+button — a centered dialog on desktop, a bottom sheet on mobile — and closes
+once the instance has started.
+
 Either mode spawns a new **detached** fog instance. Launching on a *different*
 branch uses the existing [concurrent/share/reuse machinery](/configuration#concurrent-mode--sharing-services) —
 different branches always run concurrently, so the freshly launched branch

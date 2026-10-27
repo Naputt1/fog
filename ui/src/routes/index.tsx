@@ -1,5 +1,5 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { Boxes, ChevronRight } from "lucide-react";
+import { Boxes, ChevronRight, Plus } from "lucide-react";
 import { useState } from "react";
 
 import { useServices } from "@/lib/hooks";
@@ -9,7 +9,17 @@ import {
   type ProjectBucket,
 } from "@/lib/services";
 import { PageHeader, LoadingState, ErrorState } from "@/components/page-state";
+import { LaunchForm } from "@/components/launch-instance";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Sheet, SheetContent } from "@/components/ui/sheet";
+import { useMediaQuery } from "@/lib/use-media-query";
 
 export const Route = createFileRoute("/")({
   component: ServicesPage,
@@ -78,10 +88,75 @@ function ProjectCard({ project }: { project: ProjectBucket }) {
   );
 }
 
+/**
+ * Launch form in a popup: a centered dialog on desktop and a bottom sheet on
+ * mobile, the same split the branch script page uses for its service panel.
+ * Only one surface is ever mounted, so there is no duplicate focus trap.
+ */
+function LaunchPopup({
+  open,
+  onOpenChange,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const isDesktop = useMediaQuery("(min-width: 1024px)");
+  const close = () => onOpenChange(false);
+
+  if (isDesktop) {
+    return (
+      <Dialog open={open} onOpenChange={onOpenChange}>
+        <DialogContent spacing="none" className="max-h-[85dvh] max-w-xl">
+          <DialogHeader>
+            <div className="min-w-0">
+              <DialogTitle>Start instance</DialogTitle>
+              <p className="text-muted-foreground mt-0.5 text-xs">
+                Launch a detached fog instance
+              </p>
+            </div>
+          </DialogHeader>
+          <div className="flex min-h-0 flex-1 flex-col p-4">
+            <LaunchForm onLaunched={close} onCancel={close} autoFocus />
+          </div>
+        </DialogContent>
+      </Dialog>
+    );
+  }
+
+  return (
+    <Sheet open={open} onOpenChange={onOpenChange}>
+      <SheetContent
+        side="bottom"
+        shape="roundedTop"
+        spacing="none"
+        className="max-h-[85dvh]"
+      >
+        <div
+          aria-hidden
+          className="bg-muted-foreground/30 mx-auto mt-2 h-1 w-10 shrink-0 rounded-full"
+        />
+        <DialogHeader>
+          <div className="min-w-0">
+            <DialogTitle>Start instance</DialogTitle>
+            <p className="text-muted-foreground mt-0.5 text-xs">
+              Launch a detached fog instance
+            </p>
+          </div>
+        </DialogHeader>
+        <div className="flex min-h-0 flex-1 flex-col px-4 pt-4 pb-4">
+          <LaunchForm onLaunched={close} onCancel={close} autoFocus />
+        </div>
+        <div aria-hidden className="h-safe-bottom shrink-0" />
+      </SheetContent>
+    </Sheet>
+  );
+}
+
 function ServicesPage() {
   const { data, isLoading, isError, error } = useServices({
     withInternal: true,
   });
+  const [launchOpen, setLaunchOpen] = useState(false);
   const groups = groupServices(data ?? []);
   const running = data?.filter((s) => s.status === "running").length ?? 0;
 
@@ -90,12 +165,18 @@ function ServicesPage() {
       <PageHeader
         title="Services"
         actions={
-          data && data.length > 0 ? (
-            <div className="border-primary/30 bg-primary/10 text-primary flex items-center gap-1.5 rounded-full border px-3 py-1 font-mono text-xs whitespace-nowrap">
-              <span className="bg-primary size-1.5 shrink-0 animate-pulse rounded-full" />
-              {running}/{data.length} running
-            </div>
-          ) : undefined
+          <>
+            {data && data.length > 0 ? (
+              <div className="border-primary/30 bg-primary/10 text-primary flex items-center gap-1.5 rounded-full border px-3 py-1 font-mono text-xs whitespace-nowrap">
+                <span className="bg-primary size-1.5 shrink-0 animate-pulse rounded-full" />
+                {running}/{data.length} running
+              </div>
+            ) : null}
+            <Button size="sm" onClick={() => setLaunchOpen(true)}>
+              <Plus aria-hidden />
+              Start instance
+            </Button>
+          </>
         }
       />
 
@@ -116,6 +197,15 @@ function ServicesPage() {
             <p className="text-muted-foreground/70 mt-2 text-xs">
               Start a script to see its services appear here.
             </p>
+            <Button
+              variant="outline"
+              size="sm"
+              className="mt-4"
+              onClick={() => setLaunchOpen(true)}
+            >
+              <Plus aria-hidden />
+              Start instance
+            </Button>
           </CardContent>
         </Card>
       ) : (
@@ -125,6 +215,8 @@ function ServicesPage() {
           ))}
         </div>
       )}
+
+      <LaunchPopup open={launchOpen} onOpenChange={setLaunchOpen} />
     </div>
   );
 }

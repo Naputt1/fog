@@ -260,6 +260,8 @@ export function useLaunch() {
     onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: ["status"] });
       void queryClient.invalidateQueries({ queryKey: ["health"] });
+      // The services index shows the launched project's services straight away.
+      void queryClient.invalidateQueries({ queryKey: ["services"] });
     },
   });
 }
