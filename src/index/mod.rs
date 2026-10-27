@@ -871,7 +871,8 @@ mod tests {
         resolve_icon_file, resolve_project_icon, serve_icon_file,
     };
     use super::launch::{
-        api_launch_targets_method, build_launch_targets, handle_launch_request, launch_project_for,
+        api_launch_inspect_method, api_launch_targets_method, build_launch_targets,
+        handle_launch_request, inspect_launch_target, launch_project_for,
     };
     use super::logs::{
         is_valid_container, is_valid_service_name, parse_docker_timestamp, slice_log_window,
@@ -1887,6 +1888,41 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_inspect_launch_target_reports_scripts_and_rejects_bad_paths() {
+        // A config dir with a fog.json reports its scripts and (outside git) no
+        // branch, which is what the new-project form shows once a path is typed.
+        let dir = test_dir("inspect");
+        std::fs::write(dir.join("fog.json"), r#"{"scripts":{"dev":{},"lint":{}}}"#).unwrap();
+
+        let inspect = inspect_launch_target(dir.to_str().unwrap()).unwrap();
+        assert_eq!(inspect.scripts, vec!["dev", "lint"], "scripts are sorted");
+        assert_eq!(inspect.branch, None, "temp dirs are not git worktrees");
+        assert_eq!(inspect.worktrees.len(), 1, "non-git fallback");
+        assert_eq!(inspect.worktrees[0].scripts, vec!["dev", "lint"]);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Missing path and a dir without a fog.json are rejected with messages
+        // the form can show inline.
+        let err = inspect_launch_target("/nonexistent/zz/does-not-exist").unwrap_err();
+        assert!(err.contains("config directory not found"), "{err}");
+
+        let empty = test_dir("inspect-empty");
+        let err = inspect_launch_target(empty.to_str().unwrap()).unwrap_err();
+        assert!(err.contains("no fog.json with scripts"), "{err}");
+        let _ = std::fs::remove_dir_all(&empty);
+
+        // The route needs a path and treats other methods as unknown.
+        assert_eq!(
+            api_launch_inspect_method(&hyper::Method::GET, None).status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            api_launch_inspect_method(&hyper::Method::POST, Some("path=%2Ftmp")).status(),
+            StatusCode::NOT_FOUND
+        );
     }
 
     #[test]

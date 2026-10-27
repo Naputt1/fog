@@ -24,6 +24,7 @@ import {
   fetchServices,
   fetchStatus,
   fetchHealth,
+  fetchLaunchInspect,
   fetchLaunchTargets,
   postLaunch,
   postKillInstance,
@@ -215,6 +216,21 @@ export function useLaunchTargets() {
     queryKey: ["launch-targets"],
     queryFn: fetchLaunchTargets,
     staleTime: 30_000,
+  });
+}
+
+/**
+ * Scripts/branch/worktrees of a config dir typed into the launch form. Only
+ * runs once a path is set; callers debounce so typing doesn't inspect per key.
+ * A 400 (bad path, no fog.json) is final — no retries.
+ */
+export function useLaunchInspect(path: string) {
+  return useQuery({
+    queryKey: ["launch-inspect", path],
+    queryFn: () => fetchLaunchInspect(path),
+    enabled: path.length > 0,
+    staleTime: 30_000,
+    retry: false,
   });
 }
 

@@ -134,8 +134,10 @@ The `/status` page includes a **Start instance** card with two modes:
 
 1. **Known project** — pick a project, then a branch/worktree, then one of
    the scripts that worktree's `fog.json` defines, and press **Start**.
-2. **New project** — enter an absolute config directory path and a script
-   name (optionally a branch), and press **Start**.
+2. **New project** — enter an absolute config directory path. The server
+   inspects it (`GET /api/launch/inspect`), so the script list comes from that
+   dir's `fog.json` and a branch can be picked from the repo's worktrees; then
+   press **Start**.
 
 The same form opens from the services index (`/`) header **Start instance**
 button — a centered dialog on desktop, a bottom sheet on mobile — and closes

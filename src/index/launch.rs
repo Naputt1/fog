@@ -13,7 +13,7 @@ use super::{
 
 /// A launchable worktree (or the single non-git fallback) reported by
 /// `GET /api/launch/targets`.
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, Debug)]
 pub(super) struct LaunchWorktree {
     pub(super) path: String,
     pub(super) branch: Option<String>,
@@ -134,6 +134,77 @@ pub(super) fn build_launch_targets(
     // Sort projects by name for a stable, readable listing.
     projects.sort_by(|a, b| a.name.cmp(&b.name));
     LaunchTargets { projects }
+}
+
+/// The response body for `GET /api/launch/inspect`: what a config dir typed
+/// into the "new project" form would launch.
+#[derive(serde::Serialize, Debug)]
+pub(super) struct LaunchInspect {
+    /// Canonicalized config dir that was inspected.
+    pub(super) path: String,
+    /// Branch checked out there, or `None` outside a git repository / detached.
+    pub(super) branch: Option<String>,
+    /// Scripts this config dir itself offers (its `fog.json`).
+    pub(super) scripts: Vec<String>,
+    /// The repo's worktrees with their own scripts, for picking a branch.
+    pub(super) worktrees: Vec<LaunchWorktree>,
+}
+
+/// Inspects one config dir for the launch form: its scripts, the branch checked
+/// out there, and its repo's worktrees.
+///
+/// Returns a human-readable error when the path is not a directory or nothing
+/// under it has a readable `fog.json`.
+pub(super) fn inspect_launch_target(raw: &str) -> Result<LaunchInspect, String> {
+    let dir = std::path::Path::new(raw);
+    if !dir.is_dir() {
+        return Err(format!("config directory not found: {raw}"));
+    }
+    let canon = dir
+        .canonicalize()
+        .map_err(|_| format!("config directory not found: {raw}"))?;
+
+    let project = launch_project_for(&canon);
+    let branch = crate::worktree::list(&canon).and_then(|worktrees| {
+        crate::worktree::containing_worktree(&worktrees, &canon).and_then(|wt| wt.branch.clone())
+    });
+
+    let scripts = worktree_scripts(&canon);
+    if scripts.is_empty() && project.worktrees.iter().all(|w| w.scripts.is_empty()) {
+        return Err(format!(
+            "no fog.json with scripts in {}",
+            canon.to_string_lossy()
+        ));
+    }
+
+    Ok(LaunchInspect {
+        path: canon.to_string_lossy().into_owned(),
+        branch,
+        scripts,
+        worktrees: project.worktrees,
+    })
+}
+
+/// `GET /api/launch/inspect?path=<abs>`: what a typed config dir would launch.
+/// Any method other than GET is treated like an unknown route (404).
+pub(super) fn api_launch_inspect_method(
+    method: &hyper::Method,
+    query: Option<&str>,
+) -> Response<RespBody> {
+    if method != hyper::Method::GET {
+        return api_not_found();
+    }
+    let path = query
+        .map(|q| url::form_urlencoded::parse(q.as_bytes()))
+        .and_then(|mut pairs| pairs.find_map(|(k, v)| (k == "path").then(|| v.into_owned())))
+        .unwrap_or_default();
+    if path.trim().is_empty() {
+        return api_error(StatusCode::BAD_REQUEST, "path is required");
+    }
+    match inspect_launch_target(path.trim()) {
+        Ok(inspect) => json_response(&inspect),
+        Err(message) => api_error(StatusCode::BAD_REQUEST, &message),
+    }
 }
 
 /// Builds a single launchable project from a canonicalized root path: its

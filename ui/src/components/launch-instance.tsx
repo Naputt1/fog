@@ -1,7 +1,7 @@
-import { useId, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { ChevronDown } from "lucide-react";
 
-import { useLaunch, useLaunchTargets } from "@/lib/hooks";
+import { useLaunch, useLaunchInspect, useLaunchTargets } from "@/lib/hooks";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -83,6 +83,16 @@ function basename(p: string) {
   return p.split("/").filter(Boolean).pop() ?? p;
 }
 
+/** Trailing-edge debounce, so inspecting a typed path doesn't run per key. */
+function useDebounced<T>(value: T, ms: number): T {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const timer = setTimeout(() => setDebounced(value), ms);
+    return () => clearTimeout(timer);
+  }, [value, ms]);
+  return debounced;
+}
+
 /**
  * Launch form: a fog instance on a known project/worktree, or on an entirely
  * new config dir. Shared by the `/status` card and the services index's popup
@@ -119,7 +129,8 @@ export function LaunchForm({
   // New-project mode state.
   const [newPath, setNewPath] = useState("");
   const [newScript, setNewScript] = useState("");
-  const [newBranch, setNewBranch] = useState("");
+  /** Worktree picked for a new-project launch; "" means the typed dir itself. */
+  const [newWorktreePath, setNewWorktreePath] = useState("");
 
   const projects = data?.projects ?? [];
   const selectedProject = projects.find((p) => p.path === projectPath);
@@ -128,8 +139,39 @@ export function LaunchForm({
   const selectedWorktree = launchable.find((w) => w.path === worktreePath);
   const scripts = selectedWorktree?.scripts ?? [];
 
+  // New-project mode: the backend inspects the typed dir for its scripts, its
+  // branch and its repo's worktrees, so nothing has to be typed blind.
+  const debouncedPath = useDebounced(newPath.trim(), 300);
+  const inspect = useLaunchInspect(debouncedPath);
+  const detected = inspect.data;
+  const detectedWorktrees = detected?.worktrees ?? [];
+  const pickedWorktree = detectedWorktrees.find(
+    (w) => w.path === newWorktreePath
+  );
+  const newScripts = pickedWorktree?.scripts ?? detected?.scripts ?? [];
+  const hasBranches = detectedWorktrees.some((w) => w.branch);
+  /** Branch the launch resolves to: the picked worktree, else the checkout. */
+  const branchLabel = pickedWorktree?.branch ?? detected?.branch ?? null;
+  const scriptKey = newScripts.join(",");
+
+  // A fresh inspection decides the valid scripts; pick one as soon as it
+  // arrives and keep the choice valid when the branch changes.
+  useEffect(() => {
+    if (!detected) return;
+    setNewScript((current) =>
+      newScripts.includes(current) ? current : (newScripts[0] ?? "")
+    );
+    // newScripts is derived from detected + newWorktreePath (see scriptKey).
+  }, [detected, scriptKey]);
+
+  // A different dir means a different repo: drop a worktree picked for the old
+  // one so its scripts can't leak into the new launch.
+  useEffect(() => {
+    setNewWorktreePath("");
+  }, [detected?.path]);
+
   const knownReady = Boolean(projectPath && worktreePath && script);
-  const newReady = Boolean(newPath.trim() && newScript.trim());
+  const newReady = Boolean(detected?.path && newScript);
   const ready = mode === "known" ? knownReady : newReady;
 
   const startKnown = () => {
@@ -148,9 +190,9 @@ export function LaunchForm({
     if (!newReady) return;
     mutate(
       {
-        configDir: newPath.trim(),
-        script: newScript.trim(),
-        branch: newBranch.trim() || null,
+        configDir: detected?.path ?? newPath.trim(),
+        script: newScript,
+        branch: pickedWorktree?.branch ?? null,
       },
       { onSuccess: (r) => onSettled(r.ok, r.pid) }
     );
@@ -172,7 +214,13 @@ export function LaunchForm({
           ? "Runs detached in the background"
           : mode === "known"
             ? "Pick a project, worktree and script"
-            : "Enter a config dir and a script";
+            : !newPath.trim()
+              ? "Enter a config dir to detect its scripts"
+              : inspect.isFetching
+                ? "Inspecting config dir…"
+                : detected && !newScript
+                  ? "That config dir has no scripts"
+                  : "Pick a script";
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3">
@@ -299,39 +347,81 @@ export function LaunchForm({
                 font="mono"
                 autoFocus={autoFocus}
                 disabled={isPending}
+                aria-invalid={inspect.isError}
                 onChange={(e) => setNewPath(e.target.value)}
               />
-              <p className="text-muted-foreground text-2xs mt-1 font-mono">
-                A directory with a fog.json, anywhere on this machine.
+              <p
+                className={cn(
+                  "text-2xs mt-1 truncate font-mono",
+                  inspect.isError ? "text-destructive" : "text-muted-foreground"
+                )}
+                title={detected?.path}
+              >
+                {inspect.isError
+                  ? (inspect.error?.message ??
+                    "Could not inspect this config dir.")
+                  : inspect.isFetching
+                    ? "Inspecting…"
+                    : detected
+                      ? `${detected.path} · ${newScripts.length} ${
+                          newScripts.length === 1 ? "script" : "scripts"
+                        }${branchLabel ? ` · on ${branchLabel}` : ""}`
+                      : "A directory with a fog.json, anywhere on this machine."}
               </p>
             </div>
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <div>
-                <FieldLabel htmlFor={`${fieldId}-new-script`}>
-                  Script
-                </FieldLabel>
-                <Input
-                  id={`${fieldId}-new-script`}
-                  value={newScript}
-                  placeholder="dev"
-                  font="mono"
-                  disabled={isPending}
-                  onChange={(e) => setNewScript(e.target.value)}
-                />
-              </div>
-              <div>
-                <FieldLabel htmlFor={`${fieldId}-new-branch`}>
-                  Branch (optional)
-                </FieldLabel>
-                <Input
+
+            <div
+              className={cn(
+                "grid grid-cols-1 gap-3",
+                hasBranches && "sm:grid-cols-2"
+              )}
+            >
+              <SelectField
+                id={`${fieldId}-new-script`}
+                label="Script"
+                value={newScript}
+                disabled={isPending || newScripts.length === 0}
+                onChange={setNewScript}
+                hint={
+                  detected && newScripts.length === 0
+                    ? "No scripts in this config dir's fog.json."
+                    : undefined
+                }
+              >
+                <option value="" disabled>
+                  {detected
+                    ? "Select a script…"
+                    : "Detected from the config dir…"}
+                </option>
+                {newScripts.map((s) => (
+                  <option key={s} value={s}>
+                    {s}
+                  </option>
+                ))}
+              </SelectField>
+
+              {hasBranches ? (
+                <SelectField
                   id={`${fieldId}-new-branch`}
-                  value={newBranch}
-                  placeholder="feature-x"
-                  font="mono"
+                  label="Branch"
+                  value={newWorktreePath}
                   disabled={isPending}
-                  onChange={(e) => setNewBranch(e.target.value)}
-                />
-              </div>
+                  onChange={setNewWorktreePath}
+                >
+                  <option value="">
+                    {detected?.branch
+                      ? `Current checkout (${detected.branch})`
+                      : "Current checkout"}
+                  </option>
+                  {detectedWorktrees
+                    .filter((w) => w.branch)
+                    .map((w) => (
+                      <option key={w.path} value={w.path}>
+                        {w.branch}
+                      </option>
+                    ))}
+                </SelectField>
+              ) : null}
             </div>
           </div>
         )}

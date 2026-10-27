@@ -281,9 +281,31 @@ export interface LaunchResult {
   error?: string;
 }
 
+/** Response body of GET /api/launch/inspect: what a typed config dir offers. */
+export interface LaunchInspect {
+  /** Canonicalized config dir that was inspected. */
+  path: string;
+  /** Branch checked out there, null outside git or when detached. */
+  branch: string | null;
+  /** Script names the config dir's own fog.json offers. */
+  scripts: string[];
+  /** The repo's worktrees with their own scripts, for picking a branch. */
+  worktrees: LaunchWorktree[];
+}
+
 /** List the projects/worktrees/scripts a fog instance can be launched on. */
 export function fetchLaunchTargets(): Promise<LaunchTargets> {
   return fetchJson<LaunchTargets>("/api/launch/targets");
+}
+
+/**
+ * Inspect a config dir typed into the launch form: its scripts, its branch and
+ * its repo's worktrees. Throws ApiError (400) for a missing dir or no fog.json.
+ */
+export function fetchLaunchInspect(path: string): Promise<LaunchInspect> {
+  return fetchJson<LaunchInspect>(
+    `/api/launch/inspect?path=${encodeURIComponent(path)}`
+  );
 }
 
 /**

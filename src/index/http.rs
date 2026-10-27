@@ -11,7 +11,7 @@ use hyper::{Request, Response, StatusCode};
 use super::api::{api_config, api_health, api_services_with_query, api_status};
 use super::assets::serve_spa_fallback;
 use super::icons::{api_project_icon, parse_project_icon_route};
-use super::launch::{api_launch_targets_method, handle_launch_request};
+use super::launch::{api_launch_inspect_method, api_launch_targets_method, handle_launch_request};
 use super::logs::{serve_logs_history, serve_logs_stream};
 use super::{
     CURRENT_INDEX_PORT, DEFAULT_INDEX_PORT, RespBody, api_error, api_not_found,
@@ -280,6 +280,7 @@ pub(super) async fn serve_index(
         "/api/config" => Ok(api_config()),
         "/api/health" => Ok(api_health()),
         "/api/launch/targets" => Ok(api_launch_targets_method(&method)),
+        "/api/launch/inspect" => Ok(api_launch_inspect_method(&method, req.uri().query())),
         _ if path.starts_with("/api/") => Ok(api_not_found()),
         _ => {
             let accept_encoding = req
