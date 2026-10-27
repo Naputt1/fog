@@ -16,7 +16,7 @@ mod browse;
 mod icons;
 mod launch;
 mod logs;
-mod registry;
+pub(crate) mod registry;
 use self::icons::project_icons;
 mod api;
 mod http;
@@ -2036,6 +2036,34 @@ mod tests {
             load_existing_from(&registry).is_empty(),
             "missing dirs are filtered out of the picker"
         );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_registry_remember_keeps_concurrent_entries() {
+        // Launches happen in parallel: without the registry lock the last write
+        // would keep only its own entry.
+        let base = test_dir("registry-race");
+        let registry = base.join("state").join("projects.json");
+        let mut dirs = Vec::new();
+        for i in 0..8 {
+            let dir = base.join(format!("project-{i}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            dirs.push(dir);
+        }
+        let threads: Vec<_> = dirs
+            .iter()
+            .map(|dir| {
+                let registry = registry.clone();
+                let dir = dir.clone();
+                std::thread::spawn(move || remember_in(&registry, &dir))
+            })
+            .collect();
+        for thread in threads {
+            assert!(thread.join().unwrap().is_some());
+        }
+        assert_eq!(load_from(&registry).len(), dirs.len());
 
         let _ = std::fs::remove_dir_all(&base);
     }

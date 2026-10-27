@@ -95,10 +95,17 @@ fn discover_launch_targets() -> LaunchTargets {
 
     for inst in discover_fog_instances() {
         if let Some(cfg) = inst.config_dir {
-            push(&mut roots, std::path::Path::new(&cfg));
+            let dir = std::path::Path::new(&cfg);
+            // A running instance is proof the dir is launchable: keep it in the
+            // registry so it survives its own shutdown.
+            super::registry::remember(dir);
+            push(&mut roots, dir);
         }
     }
     for root in compose_project_roots() {
+        if root.join("fog.json").is_file() {
+            super::registry::remember(&root);
+        }
         push(&mut roots, &root);
     }
     // Remembered config dirs keep a project launchable after it stopped: a

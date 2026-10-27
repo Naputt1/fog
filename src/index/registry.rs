@@ -63,6 +63,12 @@ pub(super) fn registry_path() -> PathBuf {
     state_dir().join(REGISTRY_FILE)
 }
 
+/// Sidecar file whose exclusive lock serializes registry read-modify-writes
+/// across processes (see [`crate::lock::with_file_lock`]).
+fn lock_path(path: &Path) -> PathBuf {
+    path.with_extension("json.lock")
+}
+
 /// Expands a leading `~` to `$HOME`; other paths are returned unchanged.
 pub(super) fn expand_home(raw: &str) -> PathBuf {
     let trimmed = raw.trim();
@@ -123,18 +129,22 @@ fn write_to(path: &Path, projects: &[RegisteredProject]) -> io::Result<()> {
 pub(super) fn remember_in(path: &Path, dir: &Path) -> Option<RegisteredProject> {
     let canon = dir.canonicalize().ok()?;
     let canon = canon.to_string_lossy().into_owned();
-    let mut projects = load_from(path);
-    if let Some(existing) = projects.iter().find(|p| p.path == canon) {
-        return Some(existing.clone());
-    }
-    let entry = RegisteredProject {
-        path: canon,
-        added_at: now_secs(),
-    };
-    projects.push(entry.clone());
-    projects.sort_by(|a, b| a.path.cmp(&b.path));
-    let _ = write_to(path, &projects);
-    Some(entry)
+    // Read-modify-write under a lock: two launches at once would otherwise
+    // read the same list and the later write would drop the other's entry.
+    crate::lock::with_file_lock(&lock_path(path), || {
+        let mut projects = load_from(path);
+        if let Some(existing) = projects.iter().find(|p| p.path == canon) {
+            return Some(existing.clone());
+        }
+        let entry = RegisteredProject {
+            path: canon.clone(),
+            added_at: now_secs(),
+        };
+        projects.push(entry.clone());
+        projects.sort_by(|a, b| a.path.cmp(&b.path));
+        let _ = write_to(path, &projects);
+        Some(entry)
+    })
 }
 
 /// Adds a user-picked config dir, rejecting paths that fog could not launch
@@ -177,7 +187,9 @@ pub(super) fn forget_from(path: &Path, raw: &str) -> Result<(), String> {
     if kept.len() == projects.len() {
         return Err(format!("project not registered: {raw}"));
     }
-    write_to(path, &kept).map_err(|e| format!("could not update the project registry: {e}"))
+    crate::lock::with_file_lock(&lock_path(path), || {
+        write_to(path, &kept).map_err(|e| format!("could not update the project registry: {e}"))
+    })
 }
 
 /// The registered config dirs that still exist, in path order.
@@ -196,9 +208,9 @@ pub(super) fn load() -> Vec<RegisteredProject> {
     load_existing_from(&registry_path())
 }
 
-/// Remembers a config dir after a successful launch. Best-effort: a launch
-/// target may point at `fog.json` itself, in which case its parent is stored.
-pub(super) fn remember(config_dir: &Path) {
+/// Remembers a config dir that fog was started from or is running. Best-effort:
+/// the path may be `fog.json` itself, in which case its parent is stored.
+pub(crate) fn remember(config_dir: &Path) {
     let Ok(canon) = config_dir.canonicalize() else {
         return;
     };

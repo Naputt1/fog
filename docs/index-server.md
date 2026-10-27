@@ -133,7 +133,9 @@ instance yields `404`.
 The `/status` page includes a **Start instance** card with two modes:
 
 1. **Known project** — pick a project, then a branch/worktree, then one of
-   the scripts that worktree's `fog.json` defines, and press **Start**.
+   the scripts that worktree's `fog.json` defines, and press **Start**. Every
+   picker is searchable: click it and type to narrow the list, which matches a
+   project or worktree by name *and* path.
 2. **New project** — enter an absolute config directory path, or press
    **Browse** to walk the filesystem (`GET /api/fs/list` marks the folders that
    are git repos and the ones holding a `fog.json`). The server inspects the
@@ -147,9 +149,10 @@ folder, while a *path* (`~/code/r`, `/Users/me/c`) lists the folders in its
 parent that match the last segment, ones starting with it first. Picking a
 folder keeps its path in the field with a trailing `/`, ready for the next
 name. A folder launched from the browser is remembered in
-`$XDG_STATE_HOME/fog/projects.json` (`GET`/`POST`/`DELETE /api/launch/projects`),
-so it stays in **Known project** after its instance stops, even when nothing is
-running to discover it from; **Forget this project** drops it again.
+`$XDG_STATE_HOME/fog/projects.json` (`GET`/`POST`/`DELETE /api/launch/projects`)
+with every config dir a `fog` run is started from, so it stays in **Known
+project** after its instance stops, even when nothing is running to discover it
+from; **Forget this project** drops it again.
 
 The same form opens from the services index (`/`) header **Start instance**
 button — a centered dialog on desktop, a bottom sheet on mobile — and closes

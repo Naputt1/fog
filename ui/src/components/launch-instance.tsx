@@ -1,5 +1,5 @@
 import { useEffect, useId, useState } from "react";
-import { ChevronDown, FolderOpen } from "lucide-react";
+import { FolderOpen } from "lucide-react";
 
 import {
   useForgetProject,
@@ -12,13 +12,10 @@ import {
 import { DirectoryBrowser } from "@/components/directory-browser";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { ComboboxField } from "@/components/ui/combobox";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
-
-/** Tailwind classes shared by the native selects in the launch form. */
-const selectClass =
-  "border-input dark:bg-input/30 h-9 w-full min-w-0 appearance-none rounded-md border bg-transparent py-1 pr-8 pl-3 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-3 disabled:cursor-not-allowed disabled:opacity-50";
 
 /** Tiny stacked field label above a select/input, wired to its control id. */
 function FieldLabel({
@@ -35,52 +32,6 @@ function FieldLabel({
     >
       {children}
     </label>
-  );
-}
-
-/** Native select with a chevron, since `appearance-none` removes the OS one. */
-function SelectField({
-  id,
-  label,
-  value,
-  disabled,
-  autoFocus,
-  onChange,
-  hint,
-  children,
-}: {
-  id: string;
-  label: string;
-  value: string;
-  disabled?: boolean;
-  autoFocus?: boolean;
-  onChange: (value: string) => void;
-  hint?: React.ReactNode;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="min-w-0">
-      <FieldLabel htmlFor={id}>{label}</FieldLabel>
-      <div className="relative">
-        <select
-          id={id}
-          className={selectClass}
-          value={value}
-          disabled={disabled}
-          autoFocus={autoFocus}
-          onChange={(e) => onChange(e.target.value)}
-        >
-          {children}
-        </select>
-        <ChevronDown
-          aria-hidden
-          className="text-muted-foreground pointer-events-none absolute top-1/2 right-2.5 size-4 -translate-y-1/2"
-        />
-      </div>
-      {hint ? (
-        <p className="text-muted-foreground text-2xs mt-1 font-mono">{hint}</p>
-      ) : null}
-    </div>
   );
 }
 
@@ -191,6 +142,22 @@ export function LaunchForm({
   const hasBranches = detectedWorktrees.some((w) => w.branch);
   /** Branch the launch resolves to: the picked worktree, else the checkout. */
   const branchLabel = pickedWorktree?.branch ?? detected?.branch ?? null;
+  /** Branch picker options: the dir's own checkout first, then its worktrees. */
+  const branchOptions = [
+    {
+      value: "",
+      label: detected?.branch
+        ? `Current checkout (${detected.branch})`
+        : "Current checkout",
+    },
+    ...detectedWorktrees
+      .filter((w) => w.branch)
+      .map((w) => ({
+        value: w.path,
+        label: w.branch ?? w.path,
+        detail: w.path,
+      })),
+  ];
   const scriptKey = newScripts.join(",");
 
   // A fresh inspection decides the valid scripts; pick one as soon as it
@@ -343,10 +310,18 @@ export function LaunchForm({
                 </p>
               ) : (
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-                  <SelectField
+                  <ComboboxField
                     id={`${fieldId}-project`}
                     label="Project"
-                    value={projectPath}
+                    value={selectedProject ?? null}
+                    options={projects.map((p) => ({
+                      value: p,
+                      label: p.name,
+                      detail: p.path,
+                      keywords: p.path,
+                    }))}
+                    placeholder="Select a project…"
+                    emptyLabel="No matching project"
                     disabled={isPending}
                     autoFocus={autoFocus}
                     hint={
@@ -354,58 +329,41 @@ export function LaunchForm({
                         ? "No worktree with scripts on this project."
                         : undefined
                     }
-                    onChange={(value) => {
-                      setProjectPath(value);
+                    onChange={(p) => {
+                      setProjectPath(p?.path ?? "");
                       setWorktreePath("");
                       setScript("");
                     }}
-                  >
-                    <option value="" disabled>
-                      Select a project…
-                    </option>
-                    {projects.map((p) => (
-                      <option key={p.path} value={p.path}>
-                        {p.name}
-                      </option>
-                    ))}
-                  </SelectField>
+                  />
 
-                  <SelectField
+                  <ComboboxField
                     id={`${fieldId}-worktree`}
                     label="Worktree / branch"
-                    value={worktreePath}
+                    value={selectedWorktree ?? null}
+                    options={launchable.map((w) => ({
+                      value: w,
+                      label: w.branch ?? basename(w.path),
+                      detail: w.path,
+                      keywords: w.path,
+                    }))}
+                    placeholder="Select a worktree…"
+                    emptyLabel="No matching worktree"
                     disabled={isPending || launchable.length === 0}
-                    onChange={(value) => {
-                      setWorktreePath(value);
+                    onChange={(w) => {
+                      setWorktreePath(w?.path ?? "");
                       setScript("");
                     }}
-                  >
-                    <option value="" disabled>
-                      Select a worktree…
-                    </option>
-                    {launchable.map((w) => (
-                      <option key={w.path} value={w.path}>
-                        {w.branch ?? basename(w.path)}
-                      </option>
-                    ))}
-                  </SelectField>
+                  />
 
-                  <SelectField
+                  <ComboboxField
                     id={`${fieldId}-known-script`}
                     label="Script"
-                    value={script}
+                    value={script || null}
+                    options={scripts.map((s) => ({ value: s, label: s }))}
+                    placeholder="Select a script…"
                     disabled={isPending || !selectedWorktree}
-                    onChange={setScript}
-                  >
-                    <option value="" disabled>
-                      Select a script…
-                    </option>
-                    {scripts.map((s) => (
-                      <option key={s} value={s}>
-                        {s}
-                      </option>
-                    ))}
-                  </SelectField>
+                    onChange={(s) => setScript(s ?? "")}
+                  />
                 </div>
               )}
 
@@ -498,51 +456,36 @@ export function LaunchForm({
                 hasBranches && "sm:grid-cols-2"
               )}
             >
-              <SelectField
+              <ComboboxField
                 id={`${fieldId}-new-script`}
                 label="Script"
-                value={newScript}
+                value={newScript || null}
+                options={newScripts.map((s) => ({ value: s, label: s }))}
+                placeholder={
+                  detected
+                    ? "Select a script…"
+                    : "Detected from the config dir…"
+                }
+                emptyLabel="No matching script"
                 disabled={isPending || newScripts.length === 0}
-                onChange={setNewScript}
+                onChange={(s) => setNewScript(s ?? "")}
                 hint={
                   detected && newScripts.length === 0
                     ? "No scripts in this config dir's fog.json."
                     : undefined
                 }
-              >
-                <option value="" disabled>
-                  {detected
-                    ? "Select a script…"
-                    : "Detected from the config dir…"}
-                </option>
-                {newScripts.map((s) => (
-                  <option key={s} value={s}>
-                    {s}
-                  </option>
-                ))}
-              </SelectField>
+              />
 
               {hasBranches ? (
-                <SelectField
+                <ComboboxField
                   id={`${fieldId}-new-branch`}
                   label="Branch"
                   value={newWorktreePath}
+                  options={branchOptions}
+                  emptyLabel="No matching branch"
                   disabled={isPending}
-                  onChange={setNewWorktreePath}
-                >
-                  <option value="">
-                    {detected?.branch
-                      ? `Current checkout (${detected.branch})`
-                      : "Current checkout"}
-                  </option>
-                  {detectedWorktrees
-                    .filter((w) => w.branch)
-                    .map((w) => (
-                      <option key={w.path} value={w.path}>
-                        {w.branch}
-                      </option>
-                    ))}
-                </SelectField>
+                  onChange={(path) => setNewWorktreePath(path ?? "")}
+                />
               ) : null}
             </div>
           </div>
