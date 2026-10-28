@@ -158,6 +158,15 @@ The same form opens from the services index (`/`) header **Start instance**
 button — a centered dialog on desktop, a bottom sheet on mobile — and closes
 once the instance has started.
 
+A branch script page (`/projects/{project}/{branch}/{script}`) has the same
+button in its header, and in its "no running services" card. There the form is
+scoped to that page's project: the project picker and **Browse** are gone, its
+worktree matching the page's branch and the page's script are preselected, so
+starting a second instance of the script showing is Start and nothing else.
+The project page and a branch's script list (`/projects/{project}`,
+`/projects/{project}/{branch}`) carry the same header button, scoped to that
+project and branch, so only the rest of the form is left to fill.
+
 A launch always spawns a new **detached** fog instance. Launching on a
 *different* branch uses the existing [concurrent/share/reuse machinery](/configuration#concurrent-mode--sharing-services) —
 different branches always run concurrently, so the freshly launched branch

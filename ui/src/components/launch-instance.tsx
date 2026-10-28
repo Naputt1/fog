@@ -103,9 +103,84 @@ function BrowsePopup({
 }
 
 /**
+ * The launch form in a popup: a centered dialog on desktop and a bottom sheet
+ * on mobile, the same split the branch script page uses for its service panel.
+ * Only one surface is ever mounted, so there is no duplicate focus trap.
+ */
+export function LaunchPopup({
+  open,
+  onOpenChange,
+  scope,
+  subtitle = "Launch a detached fog instance",
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  /** Pin the form to one project, e.g. on that project's script page. */
+  scope?: LaunchScope;
+  /** Second line under the title, e.g. which project the popup is scoped to. */
+  subtitle?: string;
+}) {
+  const isDesktop = useMediaQuery("(min-width: 1024px)");
+  const close = () => onOpenChange(false);
+  const header = (
+    <DialogHeader>
+      <div className="min-w-0">
+        <DialogTitle>Start instance</DialogTitle>
+        <p className="text-muted-foreground mt-0.5 text-xs">{subtitle}</p>
+      </div>
+    </DialogHeader>
+  );
+  const form = (
+    <LaunchForm onLaunched={close} onCancel={close} autoFocus scope={scope} />
+  );
+
+  if (isDesktop) {
+    return (
+      <Dialog open={open} onOpenChange={onOpenChange}>
+        <DialogContent spacing="none" className="max-h-[85dvh] max-w-xl">
+          {header}
+          <div className="flex min-h-0 flex-1 flex-col p-4">{form}</div>
+        </DialogContent>
+      </Dialog>
+    );
+  }
+
+  return (
+    <Sheet open={open} onOpenChange={onOpenChange}>
+      <SheetContent
+        side="bottom"
+        shape="roundedTop"
+        spacing="none"
+        className="max-h-[85dvh]"
+      >
+        <div
+          aria-hidden
+          className="bg-muted-foreground/30 mx-auto mt-2 h-1 w-10 shrink-0 rounded-full"
+        />
+        {header}
+        <div className="flex min-h-0 flex-1 flex-col px-4 pt-4 pb-4">
+          {form}
+        </div>
+        <div aria-hidden className="h-safe-bottom shrink-0" />
+      </SheetContent>
+    </Sheet>
+  );
+}
+
+/** What a scoped launch form is pinned and preselected to. */
+export type LaunchScope = {
+  /** Project name to lock the form to; its picker and Browse are hidden. */
+  project: string;
+  /** Branch of the page's instance, preselected when a worktree has it. */
+  branch?: string | null;
+  /** Script the page shows, preselected when its worktree has it. */
+  script?: string;
+};
+
+/**
  * Launch form: pick a project, then a worktree and a script. Shared by the
- * `/status` card and the services index's popup (dialog on desktop, bottom
- * sheet on mobile).
+ * `/status` card, the services index's popup and a project's script page, which
+ * passes a `scope` so the project is fixed to the page's own.
  *
  * There is one project list. Browsing to a folder with a `fog.json` adds it to
  * that list and selects it, so a config dir fog has never seen is two clicks
@@ -117,6 +192,7 @@ export function LaunchForm({
   onLaunched,
   onCancel,
   autoFocus = false,
+  scope,
 }: {
   /** Called with the new pid when a launch succeeds, so popups can close. */
   onLaunched?: (pid: number) => void;
@@ -124,24 +200,51 @@ export function LaunchForm({
   onCancel?: () => void;
   /** Focus the first control on mount (popups; the status card leaves focus). */
   autoFocus?: boolean;
+  /** Pin the form to one project, e.g. from that project's services page. */
+  scope?: LaunchScope;
 }) {
   const { data, isLoading, isError, error } = useLaunchTargets();
   const { mutate, isPending, data: result, error: launchError } = useLaunch();
   const fieldId = useId();
 
   const [browse, setBrowse] = useState(false);
-  const [projectPath, setProjectPath] = useState("");
+  const [pickedPath, setPickedPath] = useState("");
   const [worktreePath, setWorktreePath] = useState("");
   const [script, setScript] = useState("");
   /** A browsed dir that launch targets don't list (yet). */
   const [pendingPath, setPendingPath] = useState<string | null>(null);
 
   const projects = data?.projects ?? [];
+  /** The project a scope names, once the target list knows it. */
+  const scopedProject = scope
+    ? projects.find((p) => p.name.toLowerCase() === scope.project.toLowerCase())
+    : undefined;
+  const projectPath = scopedProject?.path ?? pickedPath;
   const selectedProject = projects.find((p) => p.path === projectPath);
   const launchable =
     selectedProject?.worktrees.filter((w) => w.scripts.length > 0) ?? [];
-  const selectedWorktree = launchable.find((w) => w.path === worktreePath);
+  /**
+   * A scoped form arrives knowing its branch, so start there; a project with a
+   * single worktree needs no choice at all.
+   */
+  const presetWorktree = !scope
+    ? undefined
+    : scope.branch
+      ? launchable.find((w) => w.branch === scope.branch)
+      : launchable.length === 1
+        ? launchable[0]
+        : undefined;
+  const selectedWorktree =
+    launchable.find((w) => w.path === worktreePath) ??
+    (worktreePath ? undefined : presetWorktree);
   const scripts = selectedWorktree?.scripts ?? [];
+  /** The picked script, or the page's own while it fits the worktree. */
+  const activeScript =
+    script && scripts.includes(script)
+      ? script
+      : scope?.script && scripts.includes(scope.script)
+        ? scope.script
+        : "";
 
   const registration = useRegisterProject();
   const registered = useRegisteredProjects();
@@ -156,7 +259,7 @@ export function LaunchForm({
         p.worktrees.some((w) => w.path === pendingPath)
     );
     if (!match) return;
-    setProjectPath(match.path);
+    setPickedPath(match.path);
     setWorktreePath("");
     setScript("");
     setPendingPath(null);
@@ -169,14 +272,15 @@ export function LaunchForm({
     ...projects.flatMap((p) => p.worktrees.map((w) => w.path)),
   ];
 
-  const ready = Boolean(projectPath && worktreePath && script) && !pendingPath;
+  const ready =
+    Boolean(projectPath && selectedWorktree && activeScript) && !pendingPath;
 
   const start = () => {
-    if (!selectedWorktree || !script) return;
+    if (!selectedWorktree || !activeScript) return;
     mutate(
       {
         configDir: selectedWorktree.path,
-        script,
+        script: activeScript,
         branch: selectedWorktree.branch,
       },
       { onSuccess: (r) => onSettled(r.ok, r.pid) }
@@ -209,7 +313,9 @@ export function LaunchForm({
             ? `Adding ${basename(pendingPath)}…`
             : ready
               ? "Runs detached in the background"
-              : "Pick a project, worktree and script";
+              : scopedProject
+                ? "Pick a worktree and script"
+                : "Pick a project, worktree and script";
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3">
@@ -244,43 +350,51 @@ export function LaunchForm({
               </p>
             ) : null}
 
-            <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2">
-              <ComboboxField
-                id={`${fieldId}-project`}
-                label="Project"
-                value={selectedProject ?? null}
-                options={projects.map((p) => ({
-                  value: p,
-                  label: p.name,
-                  detail: p.path,
-                  keywords: p.path,
-                }))}
-                placeholder="Select a project…"
-                emptyLabel="No matching project"
-                disabled={isPending}
-                autoFocus={autoFocus}
-                hint={
-                  selectedProject && launchable.length === 0
-                    ? "No worktree with scripts on this project."
-                    : undefined
-                }
-                onChange={(p) => {
-                  setProjectPath(p?.path ?? "");
-                  setWorktreePath("");
-                  setScript("");
-                }}
-              />
-              <Button
-                type="button"
-                variant="outline"
-                className="shrink-0"
-                disabled={isPending}
-                onClick={() => setBrowse(true)}
-              >
-                <FolderOpen aria-hidden />
-                Browse
-              </Button>
-            </div>
+            {scopedProject ? null : (
+              <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2">
+                <ComboboxField
+                  id={`${fieldId}-project`}
+                  label="Project"
+                  value={selectedProject ?? null}
+                  options={projects.map((p) => ({
+                    value: p,
+                    label: p.name,
+                    detail: p.path,
+                    keywords: p.path,
+                  }))}
+                  placeholder="Select a project…"
+                  emptyLabel="No matching project"
+                  disabled={isPending}
+                  autoFocus={autoFocus}
+                  hint={
+                    selectedProject && launchable.length === 0
+                      ? "No worktree with scripts on this project."
+                      : undefined
+                  }
+                  onChange={(p) => {
+                    setPickedPath(p?.path ?? "");
+                    setWorktreePath("");
+                    setScript("");
+                  }}
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="shrink-0"
+                  disabled={isPending}
+                  onClick={() => setBrowse(true)}
+                >
+                  <FolderOpen aria-hidden />
+                  Browse
+                </Button>
+              </div>
+            )}
+
+            {scopedProject && launchable.length === 0 ? (
+              <p className="text-muted-foreground font-mono text-xs">
+                No worktree with scripts in this project.
+              </p>
+            ) : null}
 
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <ComboboxField
@@ -305,7 +419,7 @@ export function LaunchForm({
               <ComboboxField
                 id={`${fieldId}-script`}
                 label="Script"
-                value={script || null}
+                value={activeScript || null}
                 options={scripts.map((s) => ({ value: s, label: s }))}
                 placeholder="Select a script…"
                 emptyLabel="No matching script"
