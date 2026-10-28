@@ -150,6 +150,7 @@ pub fn with_file_lock<T>(path: &Path, f: impl FnOnce() -> T) -> T {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(path)
     }) else {
         return f();
