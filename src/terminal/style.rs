@@ -2,15 +2,6 @@
 
 use ratatui::style::{Color, Modifier, Style};
 
-/// Total scrollback length of `screen` (the visible screen plus saved lines).
-pub(super) fn scrollback_len(screen: &mut vt100::Screen) -> usize {
-    let prev = screen.scrollback();
-    screen.set_scrollback(usize::MAX);
-    let n = screen.scrollback();
-    screen.set_scrollback(prev);
-    n
-}
-
 /// Builds the ratatui style for a single vt100 cell: foreground and background
 /// colors (default, indexed, or direct RGB) plus bold/italic/underline/inverse/dim.
 pub(super) fn cell_style(cell: &vt100::Cell) -> Style {

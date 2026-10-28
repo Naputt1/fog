@@ -10,6 +10,7 @@ use std::{
     cell::RefCell,
     fs,
     io::{self, Write},
+    num::NonZeroU16,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -28,9 +29,19 @@ use self::reader::spawn_reader_pty;
 #[cfg(unix)]
 use self::reader::{FdWriter, make_stop_pipe, spawn_reader};
 use self::reader::{LogTee, borrow_notice, shell_command, wait_reaped};
-use self::style::{cell_style, scrollback_len};
+use self::style::cell_style;
 
 const INITIAL_COLS: u16 = 256;
+
+/// Grid size the parser starts at, until the UI reports a real one.
+const DEFAULT_ROWS: NonZeroU16 = vt100::Parser::DEFAULT_ROWS;
+const DEFAULT_COLS: NonZeroU16 = vt100::Parser::DEFAULT_COLS;
+
+/// Clamps a terminal dimension to at least one cell: vt100 sizes its grids with
+/// `NonZeroU16`, since zero rows or columns cannot be represented.
+fn dim(v: u16) -> NonZeroU16 {
+    NonZeroU16::new(v.max(1)).expect("clamped to at least one cell")
+}
 
 /// How long a reused service may be unhealthy before fog starts it itself.
 const DEFAULT_REUSE_GRACE: Duration = Duration::from_secs(10);
@@ -243,7 +254,11 @@ impl Terminal {
             .take_writer()
             .map_err(|e| io::Error::other(e.to_string()))?;
 
-        let parser = Arc::new(Mutex::new(vt100::Parser::new(24, 80, scrollback)));
+        let parser = Arc::new(Mutex::new(vt100::Parser::new(
+            DEFAULT_ROWS,
+            DEFAULT_COLS,
+            scrollback,
+        )));
         let screen_generation = Arc::new(AtomicUsize::new(0));
         let raw_output = Arc::new(Mutex::new(std::collections::VecDeque::new()));
 
@@ -377,7 +392,11 @@ impl Terminal {
             handed_off: false,
             child_reaped: false,
             torn_down: false,
-            parser: Arc::new(Mutex::new(vt100::Parser::new(24, 80, scrollback))),
+            parser: Arc::new(Mutex::new(vt100::Parser::new(
+                DEFAULT_ROWS,
+                DEFAULT_COLS,
+                scrollback,
+            ))),
             health_status: Arc::new(Mutex::new(HealthStatus::Unknown)),
             health_stop: Arc::new(AtomicBool::new(false)),
             screen_generation: Arc::new(AtomicUsize::new(0)),
@@ -399,10 +418,13 @@ impl Terminal {
     /// * `name` - The display name for the terminal tab.
     /// * `error` - The error message to display in the terminal.
     pub fn spawn_error(name: String, error: String, scrollback: usize) -> Self {
-        let parser = Arc::new(Mutex::new(vt100::Parser::new(24, 80, scrollback)));
+        let parser = Arc::new(Mutex::new(vt100::Parser::new(
+            DEFAULT_ROWS,
+            DEFAULT_COLS,
+            scrollback,
+        )));
         {
             let mut p = parser.lock().expect("mutex poisoned");
-            p.screen_mut().set_size(24, 80);
             p.process(error.as_bytes());
         }
 
@@ -457,10 +479,13 @@ impl Terminal {
     /// * `deps` - Names of the dependencies this service is waiting for.
     pub fn spawn_pending(name: String, scrollback: usize, deps: &[String]) -> Self {
         let message = format!("⏳ waiting for: {}", deps.join(", "));
-        let parser = Arc::new(Mutex::new(vt100::Parser::new(24, 80, scrollback)));
+        let parser = Arc::new(Mutex::new(vt100::Parser::new(
+            DEFAULT_ROWS,
+            DEFAULT_COLS,
+            scrollback,
+        )));
         {
             let mut p = parser.lock().expect("mutex poisoned");
-            p.screen_mut().set_size(24, 80);
             p.process(message.as_bytes());
         }
 
@@ -518,10 +543,13 @@ impl Terminal {
     /// * `scrollback` - Number of scrollback lines.
     pub fn spawn_reused(name: String, path: String, cmd: String, scrollback: usize) -> Self {
         let message = borrow_notice(&name);
-        let parser = Arc::new(Mutex::new(vt100::Parser::new(24, 80, scrollback)));
+        let parser = Arc::new(Mutex::new(vt100::Parser::new(
+            DEFAULT_ROWS,
+            DEFAULT_COLS,
+            scrollback,
+        )));
         {
             let mut p = parser.lock().expect("mutex poisoned");
-            p.screen_mut().set_size(24, 80);
             p.process(message.as_bytes());
         }
 
@@ -614,11 +642,11 @@ impl Terminal {
         let (screen_rows, screen_cols) = if rows > 0 && cols > 0 {
             (rows, cols)
         } else {
-            (24, INITIAL_COLS)
+            (DEFAULT_ROWS.get(), INITIAL_COLS)
         };
         let parser = Arc::new(Mutex::new(vt100::Parser::new(
-            screen_rows,
-            screen_cols,
+            dim(screen_rows),
+            dim(screen_cols),
             scrollback,
         )));
         {
@@ -885,8 +913,8 @@ impl Terminal {
             .and_then(|dir| LogTee::create(dir, &self.name).ok());
 
         self.parser = Arc::new(Mutex::new(vt100::Parser::new(
-            24,
-            INITIAL_COLS,
+            DEFAULT_ROWS,
+            dim(INITIAL_COLS),
             self.scrollback,
         )));
         *self.line_cache.borrow_mut() = None;
@@ -966,7 +994,8 @@ impl Terminal {
     /// history to another instance at a matching size.
     pub fn screen_size(&self) -> (u16, u16) {
         let parser = self.parser.lock().expect("mutex poisoned");
-        parser.screen().size()
+        let (rows, cols) = parser.screen().size();
+        (rows.get(), cols.get())
     }
 
     /// Returns the total number of lines in both scrollback and visible area.
@@ -974,8 +1003,8 @@ impl Terminal {
         let mut parser = self.parser.lock().expect("mutex poisoned");
         let screen = parser.screen_mut();
         let (vis_rows, _) = screen.size();
-        let sb = scrollback_len(screen);
-        sb + vis_rows as usize
+        let sb = screen.scrollback_len();
+        sb + usize::from(vis_rows.get())
     }
 
     /// Returns a screenful of styled lines and the total line count.
@@ -1001,8 +1030,9 @@ impl Terminal {
         let mut parser = self.parser.lock().expect("mutex poisoned");
         let screen = parser.screen_mut();
         let (vis_rows, cols) = screen.size();
-        let sb = scrollback_len(screen);
-        let total = sb + vis_rows as usize;
+        let (vis_rows, cols) = (usize::from(vis_rows.get()), cols.get());
+        let sb = screen.scrollback_len();
+        let total = sb + vis_rows;
 
         if offset >= total.saturating_sub(1) {
             screen.set_scrollback(0);
@@ -1014,7 +1044,7 @@ impl Terminal {
         let scroll_off = offset.min(sb);
         screen.set_scrollback(scroll_off);
 
-        let rows_to_read = n.min(vis_rows as usize).min(total.saturating_sub(offset));
+        let rows_to_read = n.min(vis_rows).min(total.saturating_sub(offset));
 
         if rows_to_read == 0 {
             *self.line_cache.borrow_mut() = Some((offset, n, generation, vec![]));
@@ -1083,8 +1113,8 @@ impl Terminal {
         let mut parser = self.parser.lock().expect("mutex poisoned");
         let screen = parser.screen_mut();
         let (vis_rows, cols) = screen.size();
-        let sb = scrollback_len(screen);
-        let vis = vis_rows as usize;
+        let (vis, cols) = (usize::from(vis_rows.get()), cols.get());
+        let sb = screen.scrollback_len();
 
         let mut result = Vec::with_capacity(sb + vis);
 
@@ -1122,7 +1152,7 @@ impl Terminal {
         }
         let (row, col) = screen.cursor_position();
         let (rows, _) = screen.size();
-        if row >= rows {
+        if row >= rows.get() {
             return None;
         }
         Some((row, col))
@@ -1160,13 +1190,16 @@ impl Terminal {
         }
         let mut p = self.parser.lock().expect("mutex poisoned");
         let (cur_rows, cur_cols) = p.screen().size();
+        let (cur_rows, cur_cols) = (cur_rows.get(), cur_cols.get());
         // Grow-only width: shrinking the vt100 screen truncates every visible
         // and scrollback row irreversibly, so text cut at a narrow width never
         // comes back on re-expand. Keep the widest width seen. Height still
-        // tracks the visible area so bottom-anchored output stays on screen.
+        // tracks the visible area so bottom-anchored output stays on screen:
+        // rows that scroll off the top on shrink move into scrollback, and
+        // shrinking never discards output.
         let new_cols = cur_cols.max(cols);
         if new_cols != cur_cols || rows != cur_rows {
-            p.screen_mut().set_size(rows, new_cols);
+            p.screen_mut().set_size(dim(rows), dim(new_cols));
             changed = true;
         }
         drop(p);
@@ -2575,7 +2608,7 @@ mod tests {
 
     #[test]
     fn test_cell_style_default() {
-        let mut parser = vt100::Parser::new(24, 80, 100);
+        let mut parser = vt100::Parser::new(DEFAULT_ROWS, DEFAULT_COLS, 100);
         parser.process(b"X");
         let screen = parser.screen();
         let cell = screen.cell(0, 0).expect("cell should exist at (0,0)");
@@ -2585,7 +2618,7 @@ mod tests {
 
     #[test]
     fn test_cell_style_fg_color() {
-        let mut parser = vt100::Parser::new(24, 80, 100);
+        let mut parser = vt100::Parser::new(DEFAULT_ROWS, DEFAULT_COLS, 100);
         parser.process(b"\x1b[31mX");
         let screen = parser.screen();
         let cell = screen.cell(0, 0).expect("cell should exist at (0,0)");
@@ -2595,7 +2628,7 @@ mod tests {
 
     #[test]
     fn test_cell_style_bg_color() {
-        let mut parser = vt100::Parser::new(24, 80, 100);
+        let mut parser = vt100::Parser::new(DEFAULT_ROWS, DEFAULT_COLS, 100);
         parser.process(b"\x1b[42mX");
         let screen = parser.screen();
         let cell = screen.cell(0, 0).expect("cell should exist at (0,0)");
@@ -2605,7 +2638,7 @@ mod tests {
 
     #[test]
     fn test_cell_style_bold() {
-        let mut parser = vt100::Parser::new(24, 80, 100);
+        let mut parser = vt100::Parser::new(DEFAULT_ROWS, DEFAULT_COLS, 100);
         parser.process(b"\x1b[1mB");
         let screen = parser.screen();
         let cell = screen.cell(0, 0).expect("cell should exist at (0,0)");
@@ -2615,7 +2648,7 @@ mod tests {
 
     #[test]
     fn test_cell_style_italic() {
-        let mut parser = vt100::Parser::new(24, 80, 100);
+        let mut parser = vt100::Parser::new(DEFAULT_ROWS, DEFAULT_COLS, 100);
         parser.process(b"\x1b[3mI");
         let screen = parser.screen();
         let cell = screen.cell(0, 0).expect("cell should exist at (0,0)");
@@ -2625,7 +2658,7 @@ mod tests {
 
     #[test]
     fn test_cell_style_underline() {
-        let mut parser = vt100::Parser::new(24, 80, 100);
+        let mut parser = vt100::Parser::new(DEFAULT_ROWS, DEFAULT_COLS, 100);
         parser.process(b"\x1b[4mU");
         let screen = parser.screen();
         let cell = screen.cell(0, 0).expect("cell should exist at (0,0)");
@@ -2635,7 +2668,7 @@ mod tests {
 
     #[test]
     fn test_cell_style_inverse() {
-        let mut parser = vt100::Parser::new(24, 80, 100);
+        let mut parser = vt100::Parser::new(DEFAULT_ROWS, DEFAULT_COLS, 100);
         parser.process(b"\x1b[7mV");
         let screen = parser.screen();
         let cell = screen.cell(0, 0).expect("cell should exist at (0,0)");
@@ -2645,7 +2678,7 @@ mod tests {
 
     #[test]
     fn test_cell_style_dim() {
-        let mut parser = vt100::Parser::new(24, 80, 100);
+        let mut parser = vt100::Parser::new(DEFAULT_ROWS, DEFAULT_COLS, 100);
         parser.process(b"\x1b[2mD");
         let screen = parser.screen();
         let cell = screen.cell(0, 0).expect("cell should exist at (0,0)");
@@ -2655,7 +2688,7 @@ mod tests {
 
     #[test]
     fn test_cell_style_rgb() {
-        let mut parser = vt100::Parser::new(24, 80, 100);
+        let mut parser = vt100::Parser::new(DEFAULT_ROWS, DEFAULT_COLS, 100);
         parser.process(b"\x1b[38;2;255;128;0mO");
         let screen = parser.screen();
         let cell = screen.cell(0, 0).expect("cell should exist at (0,0)");
@@ -2665,7 +2698,7 @@ mod tests {
 
     #[test]
     fn test_cell_style_indexed() {
-        let mut parser = vt100::Parser::new(24, 80, 100);
+        let mut parser = vt100::Parser::new(DEFAULT_ROWS, DEFAULT_COLS, 100);
         parser.process(b"\x1b[38;5;42mC");
         let screen = parser.screen();
         let cell = screen.cell(0, 0).expect("cell should exist at (0,0)");
@@ -2675,7 +2708,7 @@ mod tests {
 
     #[test]
     fn test_cell_style_combined() {
-        let mut parser = vt100::Parser::new(24, 80, 100);
+        let mut parser = vt100::Parser::new(DEFAULT_ROWS, DEFAULT_COLS, 100);
         parser.process(b"\x1b[1;31;43mX");
         let screen = parser.screen();
         let cell = screen.cell(0, 0).expect("cell should exist at (0,0)");
@@ -2687,7 +2720,7 @@ mod tests {
 
     #[test]
     fn test_cell_style_reset() {
-        let mut parser = vt100::Parser::new(24, 80, 100);
+        let mut parser = vt100::Parser::new(DEFAULT_ROWS, DEFAULT_COLS, 100);
         parser.process(b"\x1b[31;1mX\x1b[0mY");
         let screen = parser.screen();
         let cell = screen.cell(0, 1).expect("cell should exist at (0,1)");
@@ -2728,13 +2761,52 @@ mod tests {
         let mut t = Terminal::spawn_reused("svc".into(), ".".into(), "true".into(), 100);
         t.resize(80, 30);
         let (rows, cols) = t.parser.lock().expect("mutex poisoned").screen().size();
-        assert_eq!(rows, 30);
-        assert_eq!(cols, 80);
+        assert_eq!(rows.get(), 30);
+        assert_eq!(cols.get(), 80);
 
         t.resize(50, 20);
         let (rows, cols) = t.parser.lock().expect("mutex poisoned").screen().size();
-        assert_eq!(rows, 20, "height must track the visible area");
-        assert_eq!(cols, 80, "width must never shrink");
+        assert_eq!(rows.get(), 20, "height must track the visible area");
+        assert_eq!(cols.get(), 80, "width must never shrink");
+    }
+
+    /// vt100 0.18 resizes with xterm semantics: shrinking the height pushes the
+    /// rows that scroll off the top into scrollback instead of dropping them,
+    /// and growing it pulls them back into view.
+    #[test]
+    fn test_resize_height_keeps_scrolled_off_lines() {
+        let mut t = Terminal::spawn_reused("svc".into(), ".".into(), "true".into(), 100);
+        {
+            let mut p = t.parser.lock().expect("mutex poisoned");
+            p.process(b"\x1b[2J\x1b[H");
+            for i in 0..10 {
+                p.process(format!("line {i}\r\n").as_bytes());
+            }
+        }
+        let has_all = |t: &Terminal| {
+            let lines = t.get_all_lines();
+            (0..10).all(|i| lines.iter().any(|l| l.contains(&format!("line {i}"))))
+        };
+        assert!(has_all(&t), "all lines fit on the 24-row screen");
+
+        // Shrink so only a few rows fit: the rest must survive in scrollback.
+        t.resize(80, 4);
+        let visible = t.parser.lock().expect("mutex poisoned").screen().contents();
+        assert!(
+            !visible.contains("line 0"),
+            "the oldest line has scrolled out of the 4-row view, got: {visible:?}"
+        );
+        assert!(
+            has_all(&t),
+            "shrinking the height must not drop output, got: {:?}",
+            t.get_all_lines()
+        );
+
+        // Growing back restores them to the visible area.
+        t.resize(80, 24);
+        assert!(has_all(&t), "re-expand must still show every line");
+        let (rows, _) = t.parser.lock().expect("mutex poisoned").screen().size();
+        assert_eq!(rows.get(), 24);
     }
 
     /// Regression: the shell terminal must expose the same `screen_generation`
@@ -2783,7 +2855,7 @@ mod tests {
         {
             let mut p = t.parser.lock().expect("mutex poisoned");
             // Screen is 21 cols; the render area is only 20 wide (scrollbar).
-            p.screen_mut().set_size(3, 21);
+            p.screen_mut().set_size(dim(3), dim(21));
             p.process(b"\x1b[2J\x1b[H");
             // Line 0 fills the screen (wraps over 2 rows); the last line is
             // short so it is the whole content of the bottom row.
