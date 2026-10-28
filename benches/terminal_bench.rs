@@ -1,5 +1,6 @@
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 use fog::terminal::Terminal;
+use std::hint::black_box;
 
 fn make_term(content_lines: usize) -> Terminal {
     let content = (0..content_lines)
