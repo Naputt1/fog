@@ -1,5 +1,6 @@
+import { useState } from "react";
 import { createFileRoute, Link, Navigate } from "@tanstack/react-router";
-import { ChevronRight, Terminal } from "lucide-react";
+import { ChevronRight, Plus, Terminal } from "lucide-react";
 
 import { useServices, useStatus } from "@/lib/hooks";
 import {
@@ -18,6 +19,8 @@ import {
 import { ErrorState, LoadingState, PageHeader } from "@/components/page-state";
 import { InstanceKillButton } from "@/components/instance-kill-button";
 import { InstanceKillingBadge } from "@/components/instance-killing-badge";
+import { LaunchPopup } from "@/components/launch-instance";
+import { Button } from "@/components/ui/button";
 import { useInstanceKillState } from "@/lib/hooks";
 import { cn } from "@/lib/utils";
 import { Card, CardContent } from "@/components/ui/card";
@@ -158,6 +161,20 @@ function BranchScriptsPage() {
   const scripts = groupByScript(instances);
   const label = (bucket?.worktree ?? legacy?.worktree) || DEFAULT_WORKTREE;
 
+  // Another instance of this project on this branch, started from here.
+  const [launchOpen, setLaunchOpen] = useState(false);
+
+  // Scoped to this branch, so only the script is left to pick. The route param
+  // can be a worktree token, so take the branch the instances report.
+  const launchPopup = (
+    <LaunchPopup
+      open={launchOpen}
+      onOpenChange={setLaunchOpen}
+      scope={{ project, branch: instances[0]?.branch ?? null }}
+      subtitle={`Another instance of ${project}`}
+    />
+  );
+
   if (isLoading || statusLoading) {
     return <LoadingState label="Loading branch…" />;
   }
@@ -167,25 +184,34 @@ function BranchScriptsPage() {
 
   if (instances.length === 0) {
     return (
-      <Card>
-        <CardContent variant="empty" className="text-center">
-          <p className="font-mono text-sm">
-            <span className="text-muted-foreground">branch </span>
-            <span className="text-foreground">{branch}</span>
-            <span className="text-muted-foreground">
-              {" "}
-              has no running services.
-            </span>
-          </p>
-          <Link
-            to="/projects/$project"
-            params={{ project }}
-            className="text-primary mt-3 inline-block font-mono text-xs underline-offset-4 hover:underline"
-          >
-            ← back to branches
-          </Link>
-        </CardContent>
-      </Card>
+      <div className="min-w-0 space-y-4">
+        <Card>
+          <CardContent variant="empty" className="text-center">
+            <p className="font-mono text-sm">
+              <span className="text-muted-foreground">branch </span>
+              <span className="text-foreground">{branch}</span>
+              <span className="text-muted-foreground">
+                {" "}
+                has no running services.
+              </span>
+            </p>
+            <div className="mt-3 flex flex-wrap items-center justify-center gap-3">
+              <Button size="sm" onClick={() => setLaunchOpen(true)}>
+                <Plus aria-hidden />
+                Start instance
+              </Button>
+              <Link
+                to="/projects/$project"
+                params={{ project }}
+                className="text-primary font-mono text-xs underline-offset-4 hover:underline"
+              >
+                ← back to branches
+              </Link>
+            </div>
+          </CardContent>
+        </Card>
+        {launchPopup}
+      </div>
     );
   }
 
@@ -202,7 +228,15 @@ function BranchScriptsPage() {
 
   return (
     <div className="space-y-4">
-      <PageHeader title={label} />
+      <PageHeader
+        title={label}
+        actions={
+          <Button size="sm" onClick={() => setLaunchOpen(true)}>
+            <Plus aria-hidden />
+            Start instance
+          </Button>
+        }
+      />
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         {scripts.map(([script, list]) => (
           <ScriptCard
@@ -214,6 +248,7 @@ function BranchScriptsPage() {
           />
         ))}
       </div>
+      {launchPopup}
     </div>
   );
 }

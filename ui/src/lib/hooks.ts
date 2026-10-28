@@ -21,12 +21,15 @@ import {
 } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
+  fetchDirectoryListing,
+  fetchRegisteredProjects,
   fetchServices,
   fetchStatus,
   fetchHealth,
   fetchLaunchTargets,
   postLaunch,
   postKillInstance,
+  postRegisteredProject,
   postServiceAction,
   type ServiceAction,
   type StatusSnapshot,
@@ -36,9 +39,7 @@ import {
   isInstanceKilling,
   type KillIntentState,
 } from "@/lib/action-cache";
-
-/** Poll cadence for status-ish endpoints. */
-const POLL_MS = 5_000;
+import { usePreference } from "@/lib/preferences";
 
 /** Stable mutation keys, used to derive shared in-flight state. */
 const SERVICE_ACTION_KEY = ["service-action"] as const;
@@ -71,7 +72,7 @@ const LAUNCH_TOAST_ID = "launch";
 
 /**
  * Whether a service control action is mid-flight. While one is, status-ish
- * polls are paused: otherwise the 5s refetch would clobber the optimistic
+ * polls are paused: otherwise the next refetch would clobber the optimistic
  * patch with the server's not-yet-updated value and the badge would flicker.
  * (Kill is deliberately excluded — polling must keep running to notice the
  * instance actually disappearing.)
@@ -80,36 +81,44 @@ function serviceActionInFlight(queryClient: QueryClient): boolean {
   return queryClient.isMutating({ mutationKey: SERVICE_ACTION_KEY }) > 0;
 }
 
+/** Refetch delay from the Settings preference, or `false` while paused/off. */
+function pollDelay(queryClient: QueryClient, pollMs: number) {
+  return () => {
+    if (serviceActionInFlight(queryClient)) return false;
+    return pollMs > 0 ? pollMs : false;
+  };
+}
+
 /** Live services list + status. */
 export function useServices(opts?: { withInternal?: boolean }) {
   const queryClient = useQueryClient();
+  const pollMs = usePreference("pollMs");
   return useQuery({
     queryKey: ["services", opts?.withInternal ? "withInternal" : "traefikOnly"],
     queryFn: () => fetchServices(opts),
-    refetchInterval: () =>
-      serviceActionInFlight(queryClient) ? false : POLL_MS,
+    refetchInterval: pollDelay(queryClient, pollMs),
   });
 }
 
 /** IPC status snapshot. */
 export function useStatus() {
   const queryClient = useQueryClient();
+  const pollMs = usePreference("pollMs");
   return useQuery({
     queryKey: ["status"],
     queryFn: fetchStatus,
-    refetchInterval: () =>
-      serviceActionInFlight(queryClient) ? false : POLL_MS,
+    refetchInterval: pollDelay(queryClient, pollMs),
   });
 }
 
 /** Per-service health results. */
 export function useHealth() {
   const queryClient = useQueryClient();
+  const pollMs = usePreference("pollMs");
   return useQuery({
     queryKey: ["health"],
     queryFn: fetchHealth,
-    refetchInterval: () =>
-      serviceActionInFlight(queryClient) ? false : POLL_MS,
+    refetchInterval: pollDelay(queryClient, pollMs),
   });
 }
 
@@ -219,11 +228,48 @@ export function useLaunchTargets() {
 }
 
 /**
+ * Subdirectories of one folder for the launch picker. `dir` may start with
+ * `~`; an empty string lists the home directory. No polling: a folder only
+ * changes when the user navigates.
+ */
+export function useDirectoryListing(dir: string) {
+  return useQuery({
+    queryKey: ["fs-list", dir],
+    queryFn: () => fetchDirectoryListing(dir),
+    staleTime: 10_000,
+    retry: false,
+  });
+}
+
+/** Config dirs the launch picker remembers, beyond what discovery sees. */
+export function useRegisteredProjects() {
+  return useQuery({
+    queryKey: ["projects-registry"],
+    queryFn: fetchRegisteredProjects,
+    staleTime: 30_000,
+  });
+}
+
+/** Remember a picked config dir and refresh the launch targets that list it. */
+export function useRegisterProject() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (path: string) => postRegisteredProject(path),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["launch-targets"] });
+      void queryClient.invalidateQueries({ queryKey: ["projects-registry"] });
+    },
+    onError: (error) => {
+      toast.error("Could not add project", { description: error.message });
+    },
+  });
+}
+
+/**
  * Launch mutation. Toasts through loading → success/error and invalidates
  * `status`/`health` on settle so the new instance appears. Callers read
  * `mutation.error` / `mutation.isPending` / `mutation.data` for inline state.
- */
-export function useLaunch() {
+ */ export function useLaunch() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationKey: LAUNCH_KEY,
@@ -260,6 +306,8 @@ export function useLaunch() {
     onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: ["status"] });
       void queryClient.invalidateQueries({ queryKey: ["health"] });
+      // The services index shows the launched project's services straight away.
+      void queryClient.invalidateQueries({ queryKey: ["services"] });
     },
   });
 }
