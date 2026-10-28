@@ -1,5 +1,6 @@
+import { useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { ChevronRight, GitBranch, Terminal } from "lucide-react";
+import { ChevronRight, GitBranch, Plus, Terminal } from "lucide-react";
 
 import { useServices, useStatus } from "@/lib/hooks";
 import {
@@ -21,6 +22,8 @@ import { useInstanceKillState } from "@/lib/hooks";
 import { PageHeader } from "@/components/page-state";
 import { InstanceKillButton } from "@/components/instance-kill-button";
 import { InstanceKillingBadge } from "@/components/instance-killing-badge";
+import { LaunchPopup } from "@/components/launch-instance";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 
@@ -255,6 +258,9 @@ function BranchesPage() {
   const { data: services } = useServices({ withInternal: true });
   const { data: status } = useStatus();
 
+  // Another instance of this project, started from here.
+  const [launchOpen, setLaunchOpen] = useState(false);
+
   const needle = project.toLowerCase();
   const projectBuckets = groupByBranch(
     buildInstanceViews(status?.instances ?? [], services ?? [])
@@ -267,11 +273,29 @@ function BranchesPage() {
       ? findProject(groupServices(services ?? []), project)
       : null;
 
+  // Scoped to this project: pick a worktree and a script, then Start.
+  const launchPopup = (
+    <LaunchPopup
+      open={launchOpen}
+      onOpenChange={setLaunchOpen}
+      scope={{ project }}
+      subtitle={`Another instance of ${project}`}
+    />
+  );
+
   if (projectBuckets.length === 0 && !legacy) return null;
 
   return (
     <div className="space-y-4">
-      <PageHeader title={project} />
+      <PageHeader
+        title={project}
+        actions={
+          <Button size="sm" onClick={() => setLaunchOpen(true)}>
+            <Plus aria-hidden />
+            Start instance
+          </Button>
+        }
+      />
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         {projectBuckets.length > 0
           ? projectBuckets.map((b) => (
@@ -285,6 +309,7 @@ function BranchesPage() {
               />
             ))}
       </div>
+      {launchPopup}
     </div>
   );
 }

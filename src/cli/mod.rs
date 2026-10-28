@@ -2243,6 +2243,10 @@ fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>) -> io::Res
         .unwrap_or_else(|| std::path::Path::new("."))
         .to_path_buf();
 
+    // Every start — TUI, daemon or worktree switch — keeps the project in the
+    // index's "known project" list after it stops.
+    crate::index::registry::remember(&config_dir);
+
     let project = crate::project::detect(&config_dir)
         .or_else(|| crate::project::fallback_identity(&config_dir));
     // Branch for instance identity: an explicit `--branch` wins; otherwise it

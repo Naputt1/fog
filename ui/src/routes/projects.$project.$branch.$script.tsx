@@ -1,6 +1,6 @@
-import { Fragment } from "react";
+import { Fragment, useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { ExternalLink, X } from "lucide-react";
+import { Plus, X } from "lucide-react";
 
 import { useInstanceKillState, useServices, useStatus } from "@/lib/hooks";
 import {
@@ -21,10 +21,13 @@ import { ErrorState, LoadingState, PageHeader } from "@/components/page-state";
 import { StatusBadge } from "@/components/status-badge";
 import { ServiceUrl } from "@/components/service-url";
 import { ServiceActions } from "@/components/service-actions";
+import { InstanceKillButton } from "@/components/instance-kill-button";
+import { LaunchPopup } from "@/components/launch-instance";
 import {
   ServiceTerminal,
   type TerminalMode,
 } from "@/components/terminal/ServiceTerminal";
+import { Button } from "@/components/ui/button";
 import { buttonVariants } from "@/components/ui/button-variants";
 import { Card, CardContent } from "@/components/ui/card";
 import {
@@ -43,6 +46,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { cn, toDisplayEndpointUrl } from "@/lib/utils";
+import { usePreference, setPreference } from "@/lib/preferences";
 import { useMediaQuery } from "@/lib/use-media-query";
 
 export const Route = createFileRoute("/projects/$project/$branch/$script")({
@@ -140,7 +144,6 @@ function ServicePanel({
   projectName,
   label,
   script,
-  view,
   mode,
   onModeChange,
   onClose,
@@ -149,7 +152,6 @@ function ServicePanel({
   projectName: string;
   label: string;
   script: string;
-  view?: TerminalMode;
   mode: TerminalMode;
   onModeChange: (mode: TerminalMode) => void;
   onClose: () => void;
@@ -169,22 +171,6 @@ function ServicePanel({
         </div>
         <div className="ml-auto flex shrink-0 flex-wrap items-center justify-end gap-1">
           <RowActions inst={inst} svc={svc} />
-          <Link
-            to="/logs"
-            search={{
-              project: projectName,
-              service: svc.service?.container ?? svc.name,
-              view,
-            }}
-            title="Open full-page terminal"
-            className={cn(
-              buttonVariants({ variant: "ghost", size: "sm" }),
-              "font-mono"
-            )}
-          >
-            <ExternalLink className="size-4" />
-            <span className="hidden sm:inline">Full page</span>
-          </Link>
           <button
             type="button"
             onClick={onClose}
@@ -249,6 +235,11 @@ function ScriptServicesPage() {
   const label = (bucket?.worktree ?? legacy?.worktree) || DEFAULT_WORKTREE;
   const projectName = bucket?.project ?? projectBucket?.project ?? project;
   const multi = scriptInstances.length > 1 || search.pid != null;
+  // Synthetic instances (pid <= 0) have no process to kill.
+  const killable = instances.filter((inst) => inst.pid > 0);
+
+  // Another instance of this project, started from here.
+  const [launchOpen, setLaunchOpen] = useState(false);
 
   const selected = search.service
     ? (instances
@@ -260,11 +251,28 @@ function ScriptServicesPage() {
         ) ?? null)
     : null;
 
-  const mode: TerminalMode = search.view ?? "logs";
+  const defaultLogView = usePreference("defaultLogView");
+  const mode: TerminalMode = search.view ?? defaultLogView;
   // Matches the table/card breakpoint below: `lg` renders the desktop table,
   // so the desktop surface should open a centered popup rather than a bottom
   // sheet.
   const isDesktop = useMediaQuery("(min-width: 1024px)");
+
+  // The launch form opens pinned to this page's project, with the branch and
+  // script already showing here preselected, so starting a second instance is
+  // one click plus Start.
+  const launchPopup = (
+    <LaunchPopup
+      open={launchOpen}
+      onOpenChange={setLaunchOpen}
+      scope={{
+        project: projectName,
+        branch: instances[0]?.branch ?? null,
+        script,
+      }}
+      subtitle={`Another instance of ${projectName}`}
+    />
+  );
 
   const openService = (pid: number, name: string) => {
     void navigate({
@@ -281,6 +289,7 @@ function ScriptServicesPage() {
   };
 
   const setMode = (next: TerminalMode) => {
+    setPreference("defaultLogView", next);
     void navigate({
       search: (prev) => ({
         ...prev,
@@ -299,31 +308,61 @@ function ScriptServicesPage() {
 
   if (scriptInstances.length === 0) {
     return (
-      <Card>
-        <CardContent variant="empty" className="text-center">
-          <p className="font-mono text-sm">
-            <span className="text-muted-foreground">script </span>
-            <span className="text-foreground">{script}</span>
-            <span className="text-muted-foreground">
-              {" "}
-              has no running services.
-            </span>
-          </p>
-          <Link
-            to="/projects/$project/$branch"
-            params={{ project, branch }}
-            className="text-primary mt-3 inline-block font-mono text-xs underline-offset-4 hover:underline"
-          >
-            ← back to scripts
-          </Link>
-        </CardContent>
-      </Card>
+      <div className="min-w-0 space-y-4">
+        <Card>
+          <CardContent variant="empty" className="text-center">
+            <p className="font-mono text-sm">
+              <span className="text-muted-foreground">script </span>
+              <span className="text-foreground">{script}</span>
+              <span className="text-muted-foreground">
+                {" "}
+                has no running services.
+              </span>
+            </p>
+            <div className="mt-3 flex flex-wrap items-center justify-center gap-3">
+              <Button size="sm" onClick={() => setLaunchOpen(true)}>
+                <Plus aria-hidden />
+                Start instance
+              </Button>
+              <Link
+                to="/projects/$project/$branch"
+                params={{ project, branch }}
+                className="text-primary font-mono text-xs underline-offset-4 hover:underline"
+              >
+                ← back to scripts
+              </Link>
+            </div>
+          </CardContent>
+        </Card>
+        {launchPopup}
+      </div>
     );
   }
 
   return (
     <div className="min-w-0 space-y-4">
-      <PageHeader title={script} />
+      <PageHeader
+        title={script}
+        actions={
+          <>
+            <Button size="sm" onClick={() => setLaunchOpen(true)}>
+              <Plus aria-hidden />
+              Start instance
+            </Button>
+            {killable.map((inst) => (
+              <InstanceKillButton
+                key={inst.pid}
+                pid={inst.pid}
+                script={inst.script}
+                project={inst.project}
+                branch={inst.branch}
+                label={multi ? `Kill pid ${inst.pid}` : "Kill"}
+                size="sm"
+              />
+            ))}
+          </>
+        }
+      />
 
       {multi ? (
         <div className="flex flex-wrap gap-1.5">
@@ -556,7 +595,6 @@ function ScriptServicesPage() {
                 projectName={projectName}
                 label={label}
                 script={script}
-                view={search.view}
                 mode={mode}
                 onModeChange={setMode}
                 onClose={closeDrawer}
@@ -589,7 +627,6 @@ function ScriptServicesPage() {
                   projectName={projectName}
                   label={label}
                   script={script}
-                  view={search.view}
                   mode={mode}
                   onModeChange={setMode}
                   onClose={closeDrawer}
@@ -599,6 +636,8 @@ function ScriptServicesPage() {
           </SheetContent>
         </Sheet>
       )}
+
+      {launchPopup}
     </div>
   );
 }

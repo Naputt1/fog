@@ -12,9 +12,11 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 mod assets;
+mod browse;
 mod icons;
 mod launch;
 mod logs;
+pub(crate) mod registry;
 use self::icons::project_icons;
 mod api;
 mod http;
@@ -792,6 +794,19 @@ fn query_param(query: Option<&str>, name: &str) -> Option<String> {
     })
 }
 
+/// Like [`query_param`], but percent-decoded, which is what a value carries
+/// when it is a filesystem path (`%2F` → `/`, `+` → space).
+fn query_param_decoded(query: Option<&str>, name: &str) -> Option<String> {
+    let raw = query_param(query, name)?;
+    // `form_urlencoded` parses `key=value` pairs, so wrap the bare value in one.
+    Some(
+        url::form_urlencoded::parse(format!("v={raw}").as_bytes())
+            .map(|(_, value)| value.into_owned())
+            .next()
+            .unwrap_or(raw),
+    )
+}
+
 /// Resolves a `?service=<name>` attach target to a working-directory shell.
 ///
 /// This is a *working-directory* attach (pattern B), not a live PTY attach:
@@ -859,6 +874,7 @@ fn parse_query(query: &str) -> std::collections::HashMap<String, String> {
 mod tests {
     use super::api::{api_service_from, entry_url};
     use super::assets::{accepts_encoding, asset_response};
+    use super::browse::list_dirs;
     use super::discovery::{
         derive_group, docker_host_port, extract_hosts, git_project_for, infra_branch,
         reachable_entries_from,
@@ -871,12 +887,14 @@ mod tests {
         resolve_icon_file, resolve_project_icon, serve_icon_file,
     };
     use super::launch::{
-        api_launch_targets_method, build_launch_targets, handle_launch_request, launch_project_for,
+        api_launch_inspect_method, api_launch_targets_method, build_launch_targets,
+        handle_launch_request, inspect_launch_target, launch_project_for,
     };
     use super::logs::{
         is_valid_container, is_valid_service_name, parse_docker_timestamp, slice_log_window,
         split_docker_log_line, sse_event,
     };
+    use super::registry::{add_to, forget_from, load_existing_from, load_from, remember_in};
     use super::*;
     use std::thread;
 
@@ -1110,6 +1128,24 @@ mod tests {
         assert_eq!(query_param(Some("service="), "service"), Some("".into()));
         assert_eq!(query_param(Some("x=1"), "service"), None);
         assert_eq!(query_param(None, "service"), None);
+    }
+
+    #[test]
+    fn test_query_param_decoded_unescapes_paths() {
+        // The launch picker sends paths percent-encoded, so `/` arrives as %2F.
+        assert_eq!(
+            query_param_decoded(Some("dir=%2FUsers%2Fme%2Fcode"), "dir"),
+            Some("/Users/me/code".into())
+        );
+        assert_eq!(
+            query_param_decoded(Some("path=%7E%2Fcode&x=1"), "path"),
+            Some("~/code".into())
+        );
+        assert_eq!(
+            query_param_decoded(Some("dir=plain"), "dir"),
+            Some("plain".into())
+        );
+        assert_eq!(query_param_decoded(None, "dir"), None);
     }
 
     #[test]
@@ -1887,6 +1923,149 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_inspect_launch_target_reports_scripts_and_rejects_bad_paths() {
+        // A config dir with a fog.json reports its scripts and (outside git) no
+        // branch, which is what the new-project form shows once a path is typed.
+        let dir = test_dir("inspect");
+        std::fs::write(dir.join("fog.json"), r#"{"scripts":{"dev":{},"lint":{}}}"#).unwrap();
+
+        let inspect = inspect_launch_target(dir.to_str().unwrap()).unwrap();
+        assert_eq!(inspect.scripts, vec!["dev", "lint"], "scripts are sorted");
+        assert_eq!(inspect.branch, None, "temp dirs are not git worktrees");
+        assert_eq!(inspect.worktrees.len(), 1, "non-git fallback");
+        assert_eq!(inspect.worktrees[0].scripts, vec!["dev", "lint"]);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Missing path and a dir without a fog.json are rejected with messages
+        // the form can show inline.
+        let err = inspect_launch_target("/nonexistent/zz/does-not-exist").unwrap_err();
+        assert!(err.contains("config directory not found"), "{err}");
+
+        let empty = test_dir("inspect-empty");
+        let err = inspect_launch_target(empty.to_str().unwrap()).unwrap_err();
+        assert!(err.contains("no fog.json with scripts"), "{err}");
+        let _ = std::fs::remove_dir_all(&empty);
+
+        // The route needs a path and treats other methods as unknown.
+        assert_eq!(
+            api_launch_inspect_method(&hyper::Method::GET, None).status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            api_launch_inspect_method(&hyper::Method::POST, Some("path=%2Ftmp")).status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[test]
+    fn test_fs_list_marks_git_and_fog_dirs() {
+        // The picker lists directories only, marks git repos and launchable
+        // dirs (a `fog.json`), and hides dot-dirs and files.
+        let base = test_dir("browse");
+        let repo = base.join("repo");
+        let plain = base.join("plain");
+        let hidden = base.join(".hidden");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(&plain).unwrap();
+        std::fs::create_dir_all(&hidden).unwrap();
+        std::fs::write(repo.join("fog.json"), "{}").unwrap();
+        std::fs::write(base.join("notes.txt"), "").unwrap();
+
+        let listing = list_dirs(base.to_str().unwrap()).unwrap();
+        let names: Vec<&str> = listing.entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["plain", "repo"],
+            "hidden dirs and plain files are skipped, entries sorted"
+        );
+        let repo_entry = listing.entries.iter().find(|e| e.name == "repo").unwrap();
+        assert!(repo_entry.git, "a .git dir marks a repository");
+        assert!(repo_entry.fog, "a fog.json marks a launchable dir");
+        let plain_entry = listing.entries.iter().find(|e| e.name == "plain").unwrap();
+        assert!(!plain_entry.git && !plain_entry.fog);
+        assert!(!listing.fog, "the listed dir itself has no fog.json");
+        assert_eq!(
+            listing.path,
+            base.canonicalize().unwrap().to_string_lossy(),
+            "the listing reports the canonical dir"
+        );
+
+        // Errors the picker shows inline.
+        let missing = list_dirs(&base.join("nope").to_string_lossy()).unwrap_err();
+        assert!(missing.contains("directory not found"), "{missing}");
+        let relative = list_dirs("relative/dir").unwrap_err();
+        assert!(relative.contains("path must be absolute"), "{relative}");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_registry_add_dedupes_refuses_unlaunchable_dirs_and_forgets() {
+        let base = test_dir("registry");
+        let registry = base.join("state").join("projects.json");
+        let project = base.join("red-fox");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("fog.json"), r#"{"scripts":{"dev":{}}}"#).unwrap();
+
+        let first = add_to(&registry, project.to_str().unwrap()).unwrap();
+        assert!(first.path.ends_with("/red-fox"), "{}", first.path);
+        let again = add_to(&registry, project.to_str().unwrap()).unwrap();
+        assert_eq!(first, again, "adding the same dir twice keeps one entry");
+        assert_eq!(load_from(&registry).len(), 1);
+
+        // A dir without a fog.json could never launch, so it is refused.
+        let plain = base.join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        let err = add_to(&registry, plain.to_str().unwrap()).unwrap_err();
+        assert!(err.contains("no fog.json"), "{err}");
+
+        forget_from(&registry, project.to_str().unwrap()).unwrap();
+        assert!(load_from(&registry).is_empty());
+        let err = forget_from(&registry, project.to_str().unwrap()).unwrap_err();
+        assert!(err.contains("not registered"), "{err}");
+
+        // A remembered dir that later disappears is not offered any more, even
+        // though the file still records it until the next write.
+        assert!(remember_in(&registry, &project).is_some());
+        std::fs::remove_dir_all(&project).unwrap();
+        assert_eq!(load_from(&registry).len(), 1, "still on disk");
+        assert!(
+            load_existing_from(&registry).is_empty(),
+            "missing dirs are filtered out of the picker"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_registry_remember_keeps_concurrent_entries() {
+        // Launches happen in parallel: without the registry lock the last write
+        // would keep only its own entry.
+        let base = test_dir("registry-race");
+        let registry = base.join("state").join("projects.json");
+        let mut dirs = Vec::new();
+        for i in 0..8 {
+            let dir = base.join(format!("project-{i}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            dirs.push(dir);
+        }
+        let threads: Vec<_> = dirs
+            .iter()
+            .map(|dir| {
+                let registry = registry.clone();
+                let dir = dir.clone();
+                std::thread::spawn(move || remember_in(&registry, &dir))
+            })
+            .collect();
+        for thread in threads {
+            assert!(thread.join().unwrap().is_some());
+        }
+        assert_eq!(load_from(&registry).len(), dirs.len());
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

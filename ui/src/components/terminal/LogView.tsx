@@ -12,12 +12,11 @@ import { ChevronDown, ChevronUp } from "lucide-react";
 import "@xterm/xterm/css/xterm.css";
 
 import { subscribeLogs, fetchLogHistory } from "@/lib/api";
+import { usePreference } from "@/lib/preferences";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import type { TerminalHandle } from "@/components/terminal/terminal-handle";
 
-/** Initial backfill for the live SSE stream (also the server default scale). */
-const INITIAL_TAIL = 500;
 /** Lines fetched per scroll-up history page. */
 const HISTORY_PAGE = 500;
 /** Hard in-memory cap: oldest lines are dropped past this (xterm trims too). */
@@ -63,6 +62,11 @@ export function LogView({
   const elRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
+  const fontSize = usePreference("terminalFontSize");
+  const initialTail = usePreference("initialLogLines");
+  // Size at mount; later changes are applied in place by the effect below so
+  // the buffer is never rebuilt just to grow or shrink the text.
+  const initialFontSizeRef = useRef(fontSize);
   const [connected, setConnected] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(true);
@@ -256,7 +260,7 @@ export function LogView({
       scrollback: 5000,
       fontFamily:
         '"JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace',
-      fontSize: 13,
+      fontSize: initialFontSizeRef.current,
       lineHeight: 1.25,
       theme: TERMINAL_THEME,
     });
@@ -302,6 +306,14 @@ export function LogView({
     };
   }, [fit, loadMore, handleTouchStart, handleTouchMove, handleTouchEnd]);
 
+  // Apply a font-size change in place and refit; keeps scrollback intact.
+  useEffect(() => {
+    const term = termRef.current;
+    if (!term || term.options.fontSize === fontSize) return;
+    term.options.fontSize = fontSize;
+    fit();
+  }, [fontSize, fit]);
+
   useEffect(() => {
     const term = termRef.current;
     if (!term) return;
@@ -329,7 +341,7 @@ export function LogView({
     );
     const unsub = subscribeLogs(logService, {
       pid,
-      tail: INITIAL_TAIL,
+      tail: initialTail,
       onOpen: () => {
         setConnected(true);
         term.writeln("\x1b[32m[log] connected\x1b[0m");
@@ -358,7 +370,7 @@ export function LogView({
       unsub();
       setConnected(false);
     };
-  }, [container, pid, service, bumpCount]);
+  }, [container, pid, service, initialTail, bumpCount]);
 
   const handleClear = useCallback(() => {
     const term = termRef.current;

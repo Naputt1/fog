@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 
 /** Elements a swipe must never hijack (text entry, terminals, opted-out). */
-const DEFAULT_IGNORE =
+const IGNORE_SELECTOR =
   ".xterm, input, textarea, select, [contenteditable], [data-no-swipe]";
 
 /** Minimum horizontal travel (px) for a swipe to count without velocity. */
@@ -38,19 +38,15 @@ function hasHorizontalScrollAncestor(
  * Returns a ref to spread onto the swipe target. A gesture only counts when it
  * is clearly horizontal (never fights vertical scrolling), starts outside the
  * ignore list and any horizontally-scrollable child, and clears either a
- * distance or velocity threshold. Gestures starting in an opt-out scope
- * (`ignore`) are left to that scope's own hook.
+ * distance or velocity threshold.
  */
 export function useSwipeNavigation({
   onPrev,
   onNext,
-  ignoreScope = "",
   enabled = true,
 }: {
   onPrev: () => void;
   onNext: () => void;
-  /** Extra selector whose subtree this hook should not handle. */
-  ignoreScope?: string;
   enabled?: boolean;
 }): React.RefObject<HTMLDivElement | null> {
   const ref = useRef<HTMLDivElement>(null);
@@ -66,9 +62,6 @@ export function useSwipeNavigation({
     const surface = ref.current;
     if (!surface || !enabled) return;
 
-    const ignoreSelector = ignoreScope
-      ? `${DEFAULT_IGNORE}, ${ignoreScope}`
-      : DEFAULT_IGNORE;
     let start: Point | null = null;
     let axis: "undecided" | "horizontal" | "vertical" = "undecided";
 
@@ -80,7 +73,7 @@ export function useSwipeNavigation({
     const onTouchStart = (e: TouchEvent) => {
       if (e.touches.length !== 1) return;
       const target = e.target as Element | null;
-      if (target?.closest?.(ignoreSelector)) {
+      if (target?.closest?.(IGNORE_SELECTOR)) {
         reset();
         return;
       }
@@ -129,7 +122,7 @@ export function useSwipeNavigation({
       surface.removeEventListener("touchend", onTouchEnd);
       surface.removeEventListener("touchcancel", reset);
     };
-  }, [enabled, ignoreScope]);
+  }, [enabled]);
 
   return ref;
 }
