@@ -2011,7 +2011,11 @@ mod tests {
         std::fs::write(project.join("fog.json"), r#"{"scripts":{"dev":{}}}"#).unwrap();
 
         let first = add_to(&registry, project.to_str().unwrap()).unwrap();
-        assert!(first.path.ends_with("/red-fox"), "{}", first.path);
+        assert!(
+            std::path::Path::new(&first.path).ends_with("red-fox"),
+            "{}",
+            first.path
+        );
         let again = add_to(&registry, project.to_str().unwrap()).unwrap();
         assert_eq!(first, again, "adding the same dir twice keeps one entry");
         assert_eq!(load_from(&registry).len(), 1);
