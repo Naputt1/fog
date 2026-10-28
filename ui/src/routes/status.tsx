@@ -215,16 +215,7 @@ function StatusPage() {
 
   return (
     <div className="space-y-6">
-      <PageHeader
-        title="Status"
-        description="IPC status snapshot of the running fog instances and their services."
-        actions={
-          <span className="border-border bg-card text-muted-foreground text-2xs flex items-center gap-1.5 rounded-full border px-2.5 py-1 font-mono">
-            <span className="bg-primary size-1.5 animate-pulse rounded-full" />
-            poll 5s
-          </span>
-        }
-      />
+      <PageHeader title="Status" />
 
       <LaunchCard />
 

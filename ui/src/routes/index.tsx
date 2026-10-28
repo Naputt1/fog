@@ -122,9 +122,6 @@ function ServicesPage() {
                 # no services running
               </span>
             </div>
-            <p className="text-muted-foreground/70 mt-2 text-xs">
-              Start a script to see its services appear here.
-            </p>
             <Button
               variant="outline"
               size="sm"

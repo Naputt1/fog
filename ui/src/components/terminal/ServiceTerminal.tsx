@@ -112,19 +112,26 @@ export function ServiceTerminal({
               Terminal (PTY)
             </Button>
           </div>
-          <span className="text-muted-foreground font-mono text-xs">
-            {showTerminal
-              ? `interactive shell${active ? ` — ${active.service} workdir` : " — ephemeral"}`
-              : "read-only stream from docker/fog"}
+          <span
+            title={
+              showTerminal
+                ? `Interactive PTY shell${active ? ` in the ${active.service} workdir` : " (ephemeral)"}`
+                : "Read-only stream from docker/fog"
+            }
+            className="text-muted-foreground font-mono text-xs"
+          >
+            {showTerminal ? "interactive" : "read-only"}
           </span>
         </div>
       ) : null}
       {isDocker && showModeToggle ? (
         <div className="text-muted-foreground flex shrink-0 items-center gap-2 font-mono text-xs">
-          <span className="bg-warning/20 text-warning rounded-full px-2 py-0.5">
+          <span
+            title="PTY not available for docker containers"
+            className="bg-warning/20 text-warning rounded-full px-2 py-0.5"
+          >
             docker logs — read-only
           </span>
-          <span>PTY not available for container — streaming `docker logs`</span>
         </div>
       ) : (
         showTerminal && (
@@ -136,9 +143,11 @@ export function ServiceTerminal({
               disabled={!active}
               className="rounded"
             />
-            <span className={active ? "" : "text-muted-foreground"}>
-              Live — same PTY as TUI (mirror service, bidirectional). Unchecked
-              = fresh shell in service workdir.
+            <span
+              className={active ? "" : "text-muted-foreground"}
+              title="Mirror the service PTY (bidirectional). Unchecked: a fresh shell in the service workdir."
+            >
+              Live
             </span>
           </label>
         )

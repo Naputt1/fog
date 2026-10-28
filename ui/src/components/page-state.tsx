@@ -4,11 +4,9 @@ import { Skeleton } from "@/components/ui/skeleton";
 
 export function PageHeader({
   title,
-  description,
   actions,
 }: {
   title: string;
-  description?: string;
   actions?: React.ReactNode;
 }) {
   return (
@@ -17,11 +15,6 @@ export function PageHeader({
         <h1 className="font-mono text-xl font-semibold tracking-tight">
           {title}
         </h1>
-        {description ? (
-          <p className="text-muted-foreground mt-1 max-w-2xl text-sm">
-            {description}
-          </p>
-        ) : null}
       </div>
       {actions ? (
         <div className="flex flex-wrap items-center gap-2">{actions}</div>

@@ -39,20 +39,17 @@ const VIEW_CHOICES = [
 
 function SettingGroup({
   title,
-  description,
   children,
 }: {
   title: string;
-  description: string;
   children: React.ReactNode;
 }) {
   return (
     <Card padding="none" spacing="none">
-      <div className="border-border border-b px-4 py-4 sm:px-6">
+      <div className="border-border border-b px-4 py-3 sm:px-6">
         <div className="font-mono text-sm leading-none font-semibold">
           {title}
         </div>
-        <p className="text-muted-foreground mt-2 text-xs">{description}</p>
       </div>
       <div className="divide-border divide-y">{children}</div>
     </Card>
@@ -61,12 +58,10 @@ function SettingGroup({
 
 function SettingRow({
   label,
-  hint,
   htmlFor,
   children,
 }: {
   label: string;
-  hint: string;
   htmlFor?: string;
   children: React.ReactNode;
 }) {
@@ -80,7 +75,6 @@ function SettingRow({
         ) : (
           <div className="text-sm font-medium">{label}</div>
         )}
-        <p className="text-muted-foreground mt-0.5 text-xs">{hint}</p>
       </div>
       <div className="flex shrink-0 flex-wrap items-center gap-2">
         {children}
@@ -178,7 +172,6 @@ function SettingsPage() {
     <div className="min-w-0 space-y-4">
       <PageHeader
         title="Settings"
-        description="Dashboard preferences for this browser. They stay on this device and never change the fog instance."
         actions={
           <Button
             variant="outline"
@@ -193,14 +186,8 @@ function SettingsPage() {
         }
       />
 
-      <SettingGroup
-        title="Refresh"
-        description="How often the dashboard asks the server for new data."
-      >
-        <SettingRow
-          label="Polling interval"
-          hint="Applies to Services, Status and Health. Off stops automatic refresh."
-        >
+      <SettingGroup title="Refresh">
+        <SettingRow label="Polling interval">
           <Segmented
             label="Polling interval"
             value={preferences.pollMs}
@@ -210,14 +197,8 @@ function SettingsPage() {
         </SettingRow>
       </SettingGroup>
 
-      <SettingGroup
-        title="Terminal & logs"
-        description="Defaults for every log and PTY view."
-      >
-        <SettingRow
-          label="Default view"
-          hint="Which pane opens when you select a service."
-        >
+      <SettingGroup title="Terminal & logs">
+        <SettingRow label="Default view">
           <Segmented
             label="Default view"
             value={preferences.defaultLogView}
@@ -225,10 +206,7 @@ function SettingsPage() {
             onChange={(value) => setPreference("defaultLogView", value)}
           />
         </SettingRow>
-        <SettingRow
-          label="Initial log lines"
-          hint="History backfilled before the live stream continues."
-        >
+        <SettingRow label="Initial log lines">
           <Segmented
             label="Initial log lines"
             value={preferences.initialLogLines}
@@ -236,18 +214,14 @@ function SettingsPage() {
             onChange={(value) => setPreference("initialLogLines", value)}
           />
         </SettingRow>
-        <SettingRow
-          label="Font size"
-          hint="Text size in terminals and log panes."
-        >
+        <SettingRow label="Font size">
           <FontSizeControl value={preferences.terminalFontSize} />
         </SettingRow>
       </SettingGroup>
 
-      <SettingGroup title="Navigation" description="Gestures on touch screens.">
+      <SettingGroup title="Navigation">
         <SettingRow
           label="Swipe between pages"
-          hint="Swipe left or right outside a terminal to change tabs."
           htmlFor="preference-swipe-navigation"
         >
           <Switch

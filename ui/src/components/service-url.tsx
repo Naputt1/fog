@@ -112,7 +112,7 @@ export function ServiceUrl({
       <CopyUrlButton url={displayUrl} />
       {dnsOnly ? (
         <span
-          title="Traefik-only, no host port published — reachable via DNS (*.gems/*.red-fox) or add ports: [8080] in compose"
+          title="No host port — reachable through Traefik DNS"
           className="border-warning/30 bg-warning/10 text-warning text-4xs shrink-0 rounded-full border px-1.5 py-0.5 font-mono tracking-wide uppercase"
         >
           DNS

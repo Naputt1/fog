@@ -61,10 +61,6 @@ function BrowsePopup({
     <DialogHeader>
       <div className="min-w-0">
         <DialogTitle>Browse folders</DialogTitle>
-        <p className="text-muted-foreground mt-0.5 text-xs">
-          Pick a folder holding a fog.json. Type a name to filter, or a path to
-          complete it.
-        </p>
       </div>
     </DialogHeader>
   );
@@ -111,7 +107,7 @@ export function LaunchPopup({
   open,
   onOpenChange,
   scope,
-  subtitle = "Launch a detached fog instance",
+  subtitle,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -126,7 +122,9 @@ export function LaunchPopup({
     <DialogHeader>
       <div className="min-w-0">
         <DialogTitle>Start instance</DialogTitle>
-        <p className="text-muted-foreground mt-0.5 text-xs">{subtitle}</p>
+        {subtitle ? (
+          <p className="text-muted-foreground mt-0.5 text-xs">{subtitle}</p>
+        ) : null}
       </div>
     </DialogHeader>
   );
@@ -311,11 +309,7 @@ export function LaunchForm({
           ? (registration.error?.message ?? "Could not add this project.")
           : pendingPath
             ? `Adding ${basename(pendingPath)}…`
-            : ready
-              ? "Runs detached in the background"
-              : scopedProject
-                ? "Pick a worktree and script"
-                : "Pick a project, worktree and script";
+            : "";
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3">
@@ -346,7 +340,7 @@ export function LaunchForm({
           <>
             {projects.length === 0 ? (
               <p className="text-muted-foreground font-mono text-xs">
-                No projects yet. Browse to a folder with a fog.json.
+                No projects yet.
               </p>
             ) : null}
 
@@ -368,7 +362,7 @@ export function LaunchForm({
                   autoFocus={autoFocus}
                   hint={
                     selectedProject && launchable.length === 0
-                      ? "No worktree with scripts on this project."
+                      ? "No scripts on this project."
                       : undefined
                   }
                   onChange={(p) => {
@@ -392,7 +386,7 @@ export function LaunchForm({
 
             {scopedProject && launchable.length === 0 ? (
               <p className="text-muted-foreground font-mono text-xs">
-                No worktree with scripts in this project.
+                No scripts on this project.
               </p>
             ) : null}
 

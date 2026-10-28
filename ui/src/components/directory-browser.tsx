@@ -221,7 +221,7 @@ export function DirectoryBrowser({
           ? "Pick a folder below to open it."
           : pickTarget?.fog
             ? alreadyAdded.has(pickTarget.path)
-              ? "Already in the project list — picking it selects it."
+              ? "Already added."
               : "This folder can be launched."
             : "No fog.json here — keep looking.";
 

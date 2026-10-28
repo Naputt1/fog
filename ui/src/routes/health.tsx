@@ -119,16 +119,7 @@ function HealthPage() {
 
   return (
     <div className="min-w-0 space-y-6">
-      <PageHeader
-        title="Health"
-        description="Per-service health check results across all fog instances."
-        actions={
-          <span className="border-border bg-card text-muted-foreground text-2xs flex items-center gap-1.5 rounded-full border px-2.5 py-1 font-mono">
-            <span className="bg-primary size-1.5 animate-pulse rounded-full" />
-            poll 5s
-          </span>
-        }
-      />
+      <PageHeader title="Health" />
 
       {isLoading ? (
         <LoadingState label="Running health checks…" />
