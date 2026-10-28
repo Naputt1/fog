@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { InstanceStatus, Service } from "@/lib/api";
+import type { InstanceServiceView } from "./services";
 import {
   branchStats,
   buildInstanceViews,
@@ -13,6 +14,7 @@ import {
   projectServices,
   projectStats,
   endpointViews,
+  servicePid,
   worktreeFromBranch,
   worktreeFromParam,
   worktreeParam,
@@ -288,5 +290,36 @@ describe("endpointViews", () => {
       service: svc({ service: "api" }),
     };
     expect(endpointViews(view)).toEqual([]);
+  });
+});
+
+describe("servicePid", () => {
+  const view = (
+    overrides: Partial<InstanceServiceView> = {}
+  ): InstanceServiceView => ({
+    name: "frontend",
+    running: true,
+    health: "healthy",
+    service: null,
+    endpoints: [],
+    ...overrides,
+  });
+
+  it("uses the directory pid of a native service", () => {
+    const svcView = view({ service: svc({ pid: 4321 }) });
+    expect(servicePid(svcView, 4321)).toBe(4321);
+  });
+
+  it("keeps a docker service container-addressed", () => {
+    // A docker row carries no pid, so the pane must stream `docker logs`.
+    expect(servicePid(view({ service: svc({}) }), 100)).toBeNull();
+  });
+
+  it("falls back to the owning instance when the directory lags", () => {
+    expect(servicePid(view({ service: null }), 4321)).toBe(4321);
+  });
+
+  it("stays container-addressed for a synthetic branch bucket", () => {
+    expect(servicePid(view({ service: null }), 0)).toBeNull();
   });
 });

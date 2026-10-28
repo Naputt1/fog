@@ -50,8 +50,13 @@ pub(super) struct ApiService {
     service: String,
     /// Docker container name (e.g. `redfox-main-api-1`). `/logs/stream`
     /// streams a container's logs by this name, so the picker must pass it
-    /// rather than the compose service name.
+    /// rather than the compose service name. Native services carry the
+    /// pseudo-name `fog-<pid>-<name>`, which `/logs/stream` resolves back to
+    /// the owning instance (see `pid`).
     container: String,
+    /// `running` for a live container or service; `stopped` for a fog instance
+    /// service that is not running right now. Docker discovery only sees live
+    /// containers, so rows derived from it are always `running`.
     status: String,
     url: String,
     ports: Vec<String>,
@@ -242,9 +247,13 @@ fn suppress_declared_docker(
         .collect()
 }
 
-/// Adds top-level rows for an instance's running native routes. Endpoint routes
-/// are skipped here — they are nested under their parent by
+/// Adds top-level rows for an instance's native routes. Endpoint routes are
+/// skipped here — they are nested under their parent by
 /// [`attach_declared_endpoints`].
+///
+/// Routes of a stopped service are listed too: the row keeps the fog `pid`, so
+/// the UI keeps addressing the service's captured log over IPC instead of
+/// falling back to a docker container that was never created.
 fn synthesize_native_routes(
     list: &mut Vec<ApiService>,
     inst: &FogInstance,
@@ -266,9 +275,6 @@ fn synthesize_native_routes(
         let Some(svc_status) = inst.services.iter().find(|s| s.name == route.service) else {
             continue;
         };
-        if !svc_status.running {
-            continue;
-        }
         // Resolve host and port templates with this instance's PortMap+branch.
         let host = match crate::ports::resolve_template(
             &route.host,
@@ -309,7 +315,7 @@ fn synthesize_native_routes(
             worktree: worktree.to_string(),
             service: route.service.clone(),
             container: format!("fog-{}-{}", inst.pid, route.service),
-            status: "running".to_string(),
+            status: service_status(svc_status.running).to_string(),
             url,
             ports: vec![format!("0.0.0.0:{}->{}/tcp", port, port)],
             health: health.to_string(),
@@ -322,9 +328,12 @@ fn synthesize_native_routes(
 
 /// Attaches declared endpoints to their parent service's entry, creating the
 /// parent entry when docker/native discovery did not list it (e.g. a
-/// compose-stack launcher that is not itself a container). Also adds running
-/// native services that have no native route so they still appear in the
-/// directory.
+/// compose-stack launcher that is not itself a container). Also adds native
+/// services that have no native route so they still appear in the directory.
+///
+/// Services that are not running are listed as well (with `status` `stopped`),
+/// so a stopped service keeps its fog `pid`: the UI can still show its captured
+/// log instead of asking docker for a `fog-<pid>-<name>` container.
 fn attach_declared_endpoints(
     list: &mut Vec<ApiService>,
     inst: &FogInstance,
@@ -334,9 +343,7 @@ fn attach_declared_endpoints(
     docker_entries: &[IndexEntry],
 ) {
     for svc in &inst.services {
-        if !svc.running {
-            continue;
-        }
+        let status = service_status(svc.running).to_string();
         let subs = api_endpoints_for(inst, &svc.name, all_docker, project, worktree);
         if !subs.is_empty() {
             if let Some(existing) = list
@@ -352,7 +359,7 @@ fn attach_declared_endpoints(
                     worktree: worktree.to_string(),
                     service: svc.name.clone(),
                     container: format!("fog-{}-{}", inst.pid, svc.name),
-                    status: "running".to_string(),
+                    status,
                     url: String::new(),
                     ports: Vec::new(),
                     health: svc.health.clone(),
@@ -367,14 +374,15 @@ fn attach_declared_endpoints(
         if inst.native_routes.iter().any(|r| r.service == svc.name) {
             continue;
         }
-        // Show running native services not already listed.
+        // Show native services not already listed.
         let already = list
             .iter()
             .any(|e| e.service == svc.name && e.worktree == worktree && e.project == project);
         if already {
             continue;
         }
-        // A service that docker already reported is listed by docker, not here.
+        // A running service that docker already reported is listed by docker,
+        // not here.
         let is_docker = docker_entries
             .iter()
             .any(|e| e.service == svc.name && e.worktree == worktree);
@@ -386,7 +394,7 @@ fn attach_declared_endpoints(
             worktree: worktree.to_string(),
             service: svc.name.clone(),
             container: format!("fog-{}-{}", inst.pid, svc.name),
-            status: "running".to_string(),
+            status,
             url: String::new(),
             ports: Vec::new(),
             health: svc.health.clone(),
@@ -397,10 +405,17 @@ fn attach_declared_endpoints(
     }
 }
 
-/// `GET /api/services`: every running compose service as JSON, so the SPA logs
+/// The `status` string for a row derived from a fog instance service.
+fn service_status(running: bool) -> &'static str {
+    if running { "running" } else { "stopped" }
+}
+
+/// `GET /api/services`: every live compose service as JSON, so the SPA logs
 /// picker can stream logs from any container. Native (non-docker) services
 /// started via `ports` + `native_routes` are synthesized from fog instances so
-/// they appear alongside docker services in the Services UI.
+/// they appear alongside docker services in the Services UI — including when
+/// they are stopped, so a stopped service keeps its `pid` and the UI never has
+/// to address it as a docker container.
 ///
 /// Query `?withInternal=1` (or `?internal=1`) opts into non-Traefik compose
 /// services (e.g. `postgres`) so the logs picker can still see them. Default
@@ -563,5 +578,95 @@ pub fn load_runtime_config() -> crate::config::Config {
         router: None,
         index: None,
         project: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FogInstance, attach_declared_endpoints, synthesize_native_routes};
+    use crate::ipc::{NativeRouteInfo, ServiceStatus};
+
+    fn instance(services: Vec<ServiceStatus>, routes: Vec<NativeRouteInfo>) -> FogInstance {
+        FogInstance {
+            pid: 4321,
+            script: "dev".to_string(),
+            services,
+            config_dir: None,
+            project: Some("red-fox".to_string()),
+            branch: Some("feat-x".to_string()),
+            ports: crate::ipc::PortMap::new(),
+            native_routes: routes,
+        }
+    }
+
+    fn svc(name: &str, running: bool) -> ServiceStatus {
+        ServiceStatus {
+            name: name.to_string(),
+            running,
+            health: "unknown".to_string(),
+            endpoints: Vec::new(),
+            shutdown_cmd: None,
+        }
+    }
+
+    #[test]
+    fn stopped_service_without_a_route_stays_listed() {
+        let inst = instance(vec![svc("frontend", false)], Vec::new());
+        let mut list = Vec::new();
+        synthesize_native_routes(&mut list, &inst, "red-fox", "feat-x");
+        attach_declared_endpoints(&mut list, &inst, "red-fox", "feat-x", &[], &[]);
+
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].service, "frontend");
+        assert_eq!(list[0].status, "stopped");
+        assert_eq!(list[0].pid, Some(4321));
+        assert_eq!(list[0].container, "fog-4321-frontend");
+    }
+
+    #[test]
+    fn stopped_service_keeps_its_declared_endpoints() {
+        let inst = instance(
+            vec![svc("frontend", false)],
+            vec![NativeRouteInfo {
+                host: String::new(),
+                service: "frontend".to_string(),
+                port: String::new(),
+                path_prefix: None,
+                endpoint: Some("web".to_string()),
+            }],
+        );
+        let mut list = Vec::new();
+        synthesize_native_routes(&mut list, &inst, "red-fox", "feat-x");
+        attach_declared_endpoints(&mut list, &inst, "red-fox", "feat-x", &[], &[]);
+
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].status, "stopped");
+        assert_eq!(list[0].pid, Some(4321));
+        assert_eq!(list[0].endpoints.len(), 1);
+        assert_eq!(list[0].endpoints[0].name, "web");
+    }
+
+    #[test]
+    fn stopped_routed_service_is_listed_by_its_route() {
+        let mut inst = instance(
+            vec![svc("api", false)],
+            vec![NativeRouteInfo {
+                host: "${branch}.red-fox".to_string(),
+                service: "api".to_string(),
+                port: "${ports.api}".to_string(),
+                path_prefix: None,
+                endpoint: None,
+            }],
+        );
+        inst.ports.insert("api".to_string(), 50379);
+        let mut list = Vec::new();
+        synthesize_native_routes(&mut list, &inst, "red-fox", "feat-x");
+        attach_declared_endpoints(&mut list, &inst, "red-fox", "feat-x", &[], &[]);
+
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].service, "api");
+        assert_eq!(list[0].status, "stopped");
+        assert_eq!(list[0].url, "https://feat-x.red-fox/");
+        assert_eq!(list[0].pid, Some(4321));
     }
 }

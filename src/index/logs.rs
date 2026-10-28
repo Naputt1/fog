@@ -45,6 +45,15 @@ pub(super) async fn serve_logs_stream(req: &Request<Incoming>) -> Response<RespB
     if !is_valid_container(container) {
         return sse_single("error: missing or invalid service (container) name");
     }
+    // A stale client (or a link built while a native service was starting) can
+    // arrive with the `fog-<pid>-<name>` pseudo-container the UI uses for fog
+    // services. Resolve it back to its instance instead of asking docker for a
+    // container that never existed.
+    if let Some((pid, name)) = parse_fog_container(container)
+        && crate::ipc::socket_path(pid).exists()
+    {
+        return serve_fog_logs_stream(pid, name, tail).await;
+    }
     // EventSource resumes with `Last-Event-ID` (unix seconds); a `since` query
     // parameter is also accepted so curl/CLI debugging can skip the backfill.
     let since = req
@@ -192,31 +201,7 @@ pub(super) async fn serve_logs_history(req: &Request<Incoming>) -> Response<Resp
     let need = (tail.saturating_add(offset).saturating_add(1)).clamp(1, MAX_LOG_TAIL);
 
     if let Some(pid) = params.get("pid").and_then(|p| p.parse::<u32>().ok()) {
-        if !is_valid_service_name(service) {
-            return api_error(StatusCode::BAD_REQUEST, "missing or invalid service name");
-        }
-        let sock = crate::ipc::socket_path(pid);
-        let svc = service.to_string();
-        let fetched =
-            tokio::task::spawn_blocking(move || crate::ipc::query_logs(&sock, &svc, need)).await;
-        match fetched {
-            Ok(Ok(lines)) => {
-                let (window, has_more) = slice_log_window(lines, tail, offset);
-                return json_response(&serde_json::json!({
-                    "lines": window,
-                    "has_more": has_more,
-                }));
-            }
-            Ok(Err(e)) => {
-                return api_error(StatusCode::NOT_FOUND, &format!("no such fog instance: {e}"));
-            }
-            Err(e) => {
-                return api_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("history lookup failed: {e}"),
-                );
-            }
-        }
+        return fog_log_history(pid, service, tail, offset, need).await;
     }
 
     if !is_valid_container(service) {
@@ -224,6 +209,14 @@ pub(super) async fn serve_logs_history(req: &Request<Incoming>) -> Response<Resp
             StatusCode::BAD_REQUEST,
             "missing or invalid service (container) name",
         );
+    }
+    // `fog-<pid>-<name>` is the pseudo-container the UI uses for native
+    // services; answer from that instance's captured log, as the live stream
+    // does, rather than reporting a container that never existed.
+    if let Some((pid, name)) = parse_fog_container(service)
+        && crate::ipc::socket_path(pid).exists()
+    {
+        return fog_log_history(pid, name, tail, offset, need).await;
     }
     if !docker_container_exists(service).await {
         return api_error(
@@ -242,6 +235,36 @@ pub(super) async fn serve_logs_history(req: &Request<Incoming>) -> Response<Resp
         Err(e) => api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             &format!("could not read docker logs: {e}"),
+        ),
+    }
+}
+
+/// One history window of a fog instance's captured service log.
+async fn fog_log_history(
+    pid: u32,
+    service: &str,
+    tail: usize,
+    offset: usize,
+    need: usize,
+) -> Response<RespBody> {
+    if !is_valid_service_name(service) {
+        return api_error(StatusCode::BAD_REQUEST, "missing or invalid service name");
+    }
+    let sock = crate::ipc::socket_path(pid);
+    let svc = service.to_string();
+    let fetched = tokio::task::spawn_blocking(move || crate::ipc::query_logs(&sock, &svc, need)).await;
+    match fetched {
+        Ok(Ok(lines)) => {
+            let (window, has_more) = slice_log_window(lines, tail, offset);
+            json_response(&serde_json::json!({
+                "lines": window,
+                "has_more": has_more,
+            }))
+        }
+        Ok(Err(e)) => api_error(StatusCode::NOT_FOUND, &format!("no such fog instance: {e}")),
+        Err(e) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("history lookup failed: {e}"),
         ),
     }
 }
@@ -501,6 +524,15 @@ pub(super) fn is_valid_service_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '_' | '.' | '-' | ':' | '@'))
 }
 
+/// Splits the UI's fog-service pseudo-container `fog-<pid>-<name>` into the
+/// instance pid and the service name. Anything else (a real container name,
+/// `fog-router-<repo>`) returns `None`.
+fn parse_fog_container(name: &str) -> Option<(u32, &str)> {
+    let (pid, service) = name.strip_prefix("fog-")?.split_once('-')?;
+    let pid = pid.parse::<u32>().ok()?;
+    (!service.is_empty() && is_valid_service_name(service)).then_some((pid, service))
+}
+
 /// Whether a container with `name` currently exists (running or stopped).
 async fn docker_container_exists(container: &str) -> bool {
     tokio::process::Command::new("docker")
@@ -511,4 +543,30 @@ async fn docker_container_exists(container: &str) -> bool {
         .await
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_fog_container;
+
+    #[test]
+    fn parses_pseudo_containers_of_fog_services() {
+        assert_eq!(
+            parse_fog_container("fog-4321-frontend"),
+            Some((4321, "frontend"))
+        );
+        assert_eq!(
+            parse_fog_container("fog-4321-api-worker"),
+            Some((4321, "api-worker"))
+        );
+    }
+
+    #[test]
+    fn ignores_real_container_names() {
+        assert_eq!(parse_fog_container("redfox-main-api-1"), None);
+        assert_eq!(parse_fog_container("fog-router-redfox"), None);
+        assert_eq!(parse_fog_container("fog-frontend"), None);
+        assert_eq!(parse_fog_container("fog-4321-"), None);
+        assert_eq!(parse_fog_container("nginx"), None);
+    }
 }

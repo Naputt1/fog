@@ -81,6 +81,14 @@ Matching `/api/status` services report the same names with their live health
 under `services[].endpoints[]`. The UI nests endpoints under their parent
 service row on the project/branch and status pages.
 
+Services of a fog instance are listed with `status` `running` or `stopped`, so a
+stopped service keeps its directory row (URL, endpoints, and the `pid` of the
+instance that owns it). Docker-discovered services are always `running`, since
+`docker ps` only reports live containers. A fog service's `container` is the
+pseudo-name `fog-<pid>-<service>`; `/logs/stream` and `/api/logs/history` accept
+it and answer from that instance's captured service log instead of asking docker
+for a container that does not exist.
+
 Each service also carries an optional `icon` field on `GET /api/services`, taken
 from the owning project's `fog.json` (`project.icon` — see
 [Project metadata](/configuration#project-metadata)). For a URL/data URI it is
@@ -106,7 +114,7 @@ Start, **Stop** and **Restart** buttons appear on each service row of:
 
 The branch views are driven by `GET /api/status` (so **stopped** services are
 still listed and can be restarted) and enriched with `GET /api/services` for the
-URL/ports/container of running services. When several scripts (or several
+URL/ports/container of each service. When several scripts (or several
 instances of the same script) serve one branch, the branch list splits them per
 instance, and each instance has a **Kill** button. The branch script page
 carries a **Kill** in its header for the instance it shows — one per instance

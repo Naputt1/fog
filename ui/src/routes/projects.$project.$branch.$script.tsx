@@ -14,6 +14,7 @@ import {
   findWorktree,
   groupByBranch,
   groupServices,
+  servicePid,
   type InstanceServiceView,
   type InstanceView,
 } from "@/lib/services";
@@ -189,11 +190,11 @@ function ServicePanel({
           active={{
             container: containerOf(svc, inst.pid),
             service: svc.name,
-            pid: svc.service?.pid ?? null,
+            pid: servicePid(svc, inst.pid),
           }}
           mode={mode}
           onModeChange={onModeChange}
-          showModeToggle={svc.service?.pid != null}
+          showModeToggle={servicePid(svc, inst.pid) != null}
         />
       </div>
     </>

@@ -152,11 +152,31 @@ export interface InstanceServiceView {
   health: string | null;
   /**
    * Matching `/api/services` directory entry (URL/ports/container), or null
-   * for a stopped/native-less service that docker discovery does not list.
+   * when the directory has no row for it yet (a snapshot that has not caught
+   * up). Native services keep their row while stopped.
    */
   service: Service | null;
   /** Declared endpoints and their health, from the IPC status snapshot. */
   endpoints: EndpointStatus[];
+}
+
+/**
+ * The pid to address a service's logs/PTY with: the owning fog instance for a
+ * native service, or `null` for a docker container (which has no fog PTY and is
+ * streamed with `docker logs`).
+ *
+ * The directory entry is authoritative when present — a docker row carries no
+ * pid. When the entry is missing (a snapshot that has not caught up), the
+ * instance still owns the service, so its pid is used instead of falling back
+ * to docker: the `fog-<pid>-<name>` container the UI fabricates does not exist,
+ * and asking docker for it only yields "no such container".
+ */
+export function servicePid(
+  svc: InstanceServiceView,
+  pid: number
+): number | null {
+  if (svc.service) return svc.service.pid ?? null;
+  return pid > SYNTHETIC_PID ? pid : null;
 }
 
 /**
