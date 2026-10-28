@@ -56,6 +56,7 @@ function DirectoryRow({
   name,
   git,
   fog,
+  added = false,
   icon,
   query = "",
   onClick,
@@ -63,6 +64,8 @@ function DirectoryRow({
   name: string;
   git?: boolean;
   fog?: boolean;
+  /** Already in the project list, so there is nothing to add. */
+  added?: boolean;
   icon: "folder" | "up";
   /** Filter text to highlight inside the name. */
   query?: string;
@@ -72,8 +75,14 @@ function DirectoryRow({
   return (
     <button
       type="button"
+      disabled={added}
       onClick={onClick}
-      className="hover:bg-accent focus-visible:bg-accent flex w-full items-center gap-2 px-3 py-2 text-left text-sm outline-none"
+      className={cn(
+        "flex w-full items-center gap-2 px-3 py-2 text-left text-sm outline-none",
+        added
+          ? "cursor-not-allowed opacity-50"
+          : "hover:bg-accent focus-visible:bg-accent"
+      )}
     >
       <Icon className="text-muted-foreground size-4 shrink-0" aria-hidden />
       <span className="min-w-0 flex-1 truncate font-mono">
@@ -87,6 +96,11 @@ function DirectoryRow({
       {fog ? (
         <span className="text-primary border-primary/40 text-3xs rounded border px-1 font-mono uppercase">
           fog.json
+        </span>
+      ) : null}
+      {added ? (
+        <span className="text-muted-foreground border-border text-3xs rounded border px-1 font-mono uppercase">
+          added
         </span>
       ) : null}
       {icon === "folder" ? (
@@ -104,8 +118,9 @@ function DirectoryRow({
  * the bottom sheet and the `/status` card without stacking modals).
  *
  * Only a directory that holds a `fog.json` can be picked, because that is what
- * fog launches; every row shows which subfolders are git repos and which are
- * launchable.
+ * fog launches; every row shows which subfolders are git repos, which are
+ * launchable, and which are already in the project list (those are disabled:
+ * they are one pick away in the form, not something to add again).
  *
  * The field does shell-style completion: a folder *name* (`red`) filters the
  * open folder, while a *path* (`~/code/r`, `/Users/me/c`) lists the folders in
@@ -114,17 +129,21 @@ function DirectoryRow({
  */
 export function DirectoryBrowser({
   startDir,
+  added,
   onPick,
   onCancel,
 }: {
   /** Directory to open; an empty string opens the home directory. */
   startDir?: string;
+  /** Config dirs already in the project list, shown as added and not clickable. */
+  added?: readonly string[];
   /** Called with the canonical path of the chosen config dir. */
   onPick: (path: string) => void;
   onCancel: () => void;
 }) {
   const [dir, setDir] = useState(startDir?.trim() ?? "");
   const [typed, setTyped] = useState(startDir?.trim() ?? "");
+  const alreadyAdded = new Set(added ?? []);
   const inputRef = useRef<HTMLInputElement>(null);
   // Bumped whenever a folder is opened, so the caret lands at the end of the
   // completed path once React has rendered it.
@@ -201,16 +220,13 @@ export function DirectoryBrowser({
         : partial && !exact
           ? "Pick a folder below to open it."
           : pickTarget?.fog
-            ? "This folder can be launched."
+            ? alreadyAdded.has(pickTarget.path)
+              ? "Already in the project list — picking it selects it."
+              : "This folder can be launched."
             : "No fog.json here — keep looking.";
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3">
-      <p className="text-muted-foreground text-xs">
-        Pick the config dir — the folder holding a <code>fog.json</code>. Type a
-        folder name to filter, or a path to complete it.
-      </p>
-
       <form
         className="flex items-center gap-2"
         onSubmit={(event) => {
@@ -296,6 +312,7 @@ export function DirectoryBrowser({
                   name={entry.name}
                   git={entry.git}
                   fog={entry.fog}
+                  added={alreadyAdded.has(entry.path)}
                   icon="folder"
                   query={filter}
                   onClick={() => openDir(entry.path)}

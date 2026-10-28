@@ -130,40 +130,41 @@ instance yields `404`.
 
 ### Start instances
 
-The `/status` page includes a **Start instance** card with two modes:
+The `/status` page includes a **Start instance** card:
 
-1. **Known project** — pick a project, then a branch/worktree, then one of
-   the scripts that worktree's `fog.json` defines, and press **Start**. Every
-   picker is searchable: click it and type to narrow the list, which matches a
-   project or worktree by name *and* path.
-2. **New project** — enter an absolute config directory path, or press
-   **Browse** to walk the filesystem (`GET /api/fs/list` marks the folders that
-   are git repos and the ones holding a `fog.json`). The server inspects the
-   chosen dir (`GET /api/launch/inspect`), so the script list comes from that
-   dir's `fog.json` and a branch can be picked from the repo's worktrees; then
-   press **Start**.
+1. Pick a project, then a branch/worktree, then one of the scripts that
+   worktree's `fog.json` defines, and press **Start**. Every picker is
+   searchable: click it and type to narrow the list, which matches a project or
+   worktree by name *and* path.
+2. A folder fog has never seen is one **Browse** away: the button beside the
+   project picker walks the filesystem (`GET /api/fs/list` marks the folders that
+   are git repos and the ones holding a `fog.json`), and picking one adds it to
+   the project list and selects it, ready for a worktree and script. Folders
+   already in the list show an `added` chip and cannot be picked again.
 
-Either mode's **Browse** only lets you pick a folder that holds a `fog.json`.
-Its field completes as you type: a folder *name* (`red`) filters the open
-folder, while a *path* (`~/code/r`, `/Users/me/c`) lists the folders in its
-parent that match the last segment, ones starting with it first. Picking a
-folder keeps its path in the field with a trailing `/`, ready for the next
-name. A folder launched from the browser is remembered in
-`$XDG_STATE_HOME/fog/projects.json` (`GET`/`POST`/`DELETE /api/launch/projects`)
-with every config dir a `fog` run is started from, so it stays in **Known
-project** after its instance stops, even when nothing is running to discover it
-from; **Forget this project** drops it again.
+**Browse** only lets you pick a folder that holds a `fog.json` — a worktree of a
+known repo included, which adds that worktree as its own entry. Its field
+completes as you type: a folder *name* (`red`) filters the open folder, while a
+*path* (`~/code/r`, `/Users/me/c`) lists the folders in its parent that match the
+last segment, ones starting with it first. Picking a folder keeps its path in the
+field with a trailing `/`, ready for the next name. Every config dir a `fog` run
+is started from — and every browsed folder — is remembered in
+`$XDG_STATE_HOME/fog/projects.json` (`GET`/`POST`/`DELETE /api/launch/projects`),
+so it stays in the project picker after its instance stops, even when nothing is
+running to discover it from. A wrong entry is dropped with
+`DELETE /api/launch/projects?path=/abs/dir`.
 
 The same form opens from the services index (`/`) header **Start instance**
 button — a centered dialog on desktop, a bottom sheet on mobile — and closes
 once the instance has started.
 
-Either mode spawns a new **detached** fog instance. Launching on a *different*
-branch uses the existing [concurrent/share/reuse machinery](/configuration#concurrent-mode--sharing-services) —
+A launch always spawns a new **detached** fog instance. Launching on a
+*different* branch uses the existing [concurrent/share/reuse machinery](/configuration#concurrent-mode--sharing-services) —
 different branches always run concurrently, so the freshly launched branch
 instance runs side by side with any already-running ones.
 
-The UI is backed by these endpoints (besides `GET /api/launch/inspect`):
+The UI is backed by these endpoints (`GET /api/launch/inspect?path=/abs/dir`
+still reports one dir's scripts, branch and worktrees for scripts and tools):
 
 - `GET /api/launch/targets` — returns
   `{"projects":[{"path","name","worktrees":[{"path","branch","scripts":[...]}]}]}`,

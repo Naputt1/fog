@@ -21,13 +21,11 @@ import {
 } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
-  deleteRegisteredProject,
   fetchDirectoryListing,
   fetchRegisteredProjects,
   fetchServices,
   fetchStatus,
   fetchHealth,
-  fetchLaunchInspect,
   fetchLaunchTargets,
   postLaunch,
   postKillInstance,
@@ -224,21 +222,6 @@ export function useLaunchTargets() {
 }
 
 /**
- * Scripts/branch/worktrees of a config dir typed into the launch form. Only
- * runs once a path is set; callers debounce so typing doesn't inspect per key.
- * A 400 (bad path, no fog.json) is final — no retries.
- */
-export function useLaunchInspect(path: string) {
-  return useQuery({
-    queryKey: ["launch-inspect", path],
-    queryFn: () => fetchLaunchInspect(path),
-    enabled: path.length > 0,
-    staleTime: 30_000,
-    retry: false,
-  });
-}
-
-/**
  * Subdirectories of one folder for the launch picker. `dir` may start with
  * `~`; an empty string lists the home directory. No polling: a folder only
  * changes when the user navigates.
@@ -272,22 +255,6 @@ export function useRegisterProject() {
     },
     onError: (error) => {
       toast.error("Could not add project", { description: error.message });
-    },
-  });
-}
-
-/** Drop a remembered config dir from the known-project list. */
-export function useForgetProject() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (path: string) => deleteRegisteredProject(path),
-    onSuccess: () => {
-      toast.success("Project forgotten");
-      void queryClient.invalidateQueries({ queryKey: ["launch-targets"] });
-      void queryClient.invalidateQueries({ queryKey: ["projects-registry"] });
-    },
-    onError: (error) => {
-      toast.error("Could not forget project", { description: error.message });
     },
   });
 }

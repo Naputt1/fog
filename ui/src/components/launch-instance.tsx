@@ -2,9 +2,7 @@ import { useEffect, useId, useState } from "react";
 import { FolderOpen } from "lucide-react";
 
 import {
-  useForgetProject,
   useLaunch,
-  useLaunchInspect,
   useLaunchTargets,
   useRegisterProject,
   useRegisteredProjects,
@@ -13,54 +11,107 @@ import { DirectoryBrowser } from "@/components/directory-browser";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ComboboxField } from "@/components/ui/combobox";
-import { Input } from "@/components/ui/input";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Sheet, SheetContent } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useMediaQuery } from "@/lib/use-media-query";
 import { cn } from "@/lib/utils";
-
-/** Tiny stacked field label above a select/input, wired to its control id. */
-function FieldLabel({
-  htmlFor,
-  children,
-}: {
-  htmlFor: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <label
-      htmlFor={htmlFor}
-      className="text-muted-foreground text-2xs mb-1 block font-mono tracking-wide uppercase"
-    >
-      {children}
-    </label>
-  );
-}
-
-type Mode = "known" | "new";
 
 /** Last path segment, used when a worktree has no branch name. */
 function basename(p: string) {
   return p.split("/").filter(Boolean).pop() ?? p;
 }
 
-/** Trailing-edge debounce, so inspecting a typed path doesn't run per key. */
-function useDebounced<T>(value: T, ms: number): T {
-  const [debounced, setDebounced] = useState(value);
-  useEffect(() => {
-    const timer = setTimeout(() => setDebounced(value), ms);
-    return () => clearTimeout(timer);
-  }, [value, ms]);
-  return debounced;
+/**
+ * The folder browser on its own surface, layered over the form it was opened
+ * from: a centered dialog on desktop, a bottom sheet on mobile. Picking a
+ * folder therefore never hides the project/worktree/script choices, and
+ * dismissing it leaves the form exactly as it was.
+ */
+function BrowsePopup({
+  open,
+  startDir,
+  added,
+  onPick,
+  onOpenChange,
+}: {
+  open: boolean;
+  /** Folder to open in; the current selection's dir, when there is one. */
+  startDir: string;
+  /** Folders the project list already covers, marked and disabled. */
+  added: readonly string[];
+  onPick: (path: string) => void;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const isDesktop = useMediaQuery("(min-width: 1024px)");
+  const browser = (
+    <DirectoryBrowser
+      startDir={startDir}
+      added={added}
+      onPick={onPick}
+      onCancel={() => onOpenChange(false)}
+    />
+  );
+  const header = (
+    <DialogHeader>
+      <div className="min-w-0">
+        <DialogTitle>Browse folders</DialogTitle>
+        <p className="text-muted-foreground mt-0.5 text-xs">
+          Pick a folder holding a fog.json. Type a name to filter, or a path to
+          complete it.
+        </p>
+      </div>
+    </DialogHeader>
+  );
+
+  if (isDesktop) {
+    return (
+      <Dialog open={open} onOpenChange={onOpenChange}>
+        <DialogContent spacing="none" className="max-h-[80dvh] max-w-lg">
+          {header}
+          <div className="flex min-h-0 flex-1 flex-col p-4">{browser}</div>
+        </DialogContent>
+      </Dialog>
+    );
+  }
+
+  return (
+    <Sheet open={open} onOpenChange={onOpenChange}>
+      <SheetContent
+        side="bottom"
+        shape="roundedTop"
+        spacing="none"
+        className="max-h-[85dvh]"
+      >
+        <div
+          aria-hidden
+          className="bg-muted-foreground/30 mx-auto mt-2 h-1 w-10 shrink-0 rounded-full"
+        />
+        {header}
+        <div className="flex min-h-0 flex-1 flex-col px-4 pt-4 pb-4">
+          {browser}
+        </div>
+        <div aria-hidden className="h-safe-bottom shrink-0" />
+      </SheetContent>
+    </Sheet>
+  );
 }
 
 /**
- * Launch form: a fog instance on a known project/worktree, or on an entirely
- * new config dir. Shared by the `/status` card and the services index's popup
- * (dialog on desktop, bottom sheet on mobile).
+ * Launch form: pick a project, then a worktree and a script. Shared by the
+ * `/status` card and the services index's popup (dialog on desktop, bottom
+ * sheet on mobile).
  *
- * One mode is shown at a time; both modes keep their own state, so switching
- * back and forth never loses what was typed. The form is a flex column whose
- * body scrolls and whose actions stay put, which is what keeps the popup's
- * Start reachable on a short window or a phone.
+ * There is one project list. Browsing to a folder with a `fog.json` adds it to
+ * that list and selects it, so a config dir fog has never seen is two clicks
+ * away instead of a second mode's path field. The form is a flex column whose
+ * body scrolls and whose actions stay put, which keeps the popup's Start
+ * reachable on a short window or a phone.
  */
 export function LaunchForm({
   onLaunched,
@@ -78,22 +129,12 @@ export function LaunchForm({
   const { mutate, isPending, data: result, error: launchError } = useLaunch();
   const fieldId = useId();
 
-  const [mode, setMode] = useState<Mode>("known");
-  /** Which mode's folder browser is open, if any. */
-  const [browse, setBrowse] = useState<Mode | null>(null);
-
-  // Known-project mode state.
+  const [browse, setBrowse] = useState(false);
   const [projectPath, setProjectPath] = useState("");
   const [worktreePath, setWorktreePath] = useState("");
   const [script, setScript] = useState("");
   /** A browsed dir that launch targets don't list (yet). */
   const [pendingPath, setPendingPath] = useState<string | null>(null);
-
-  // New-project mode state.
-  const [newPath, setNewPath] = useState("");
-  const [newScript, setNewScript] = useState("");
-  /** Worktree picked for a new-project launch; "" means the typed dir itself. */
-  const [newWorktreePath, setNewWorktreePath] = useState("");
 
   const projects = data?.projects ?? [];
   const selectedProject = projects.find((p) => p.path === projectPath);
@@ -103,11 +144,10 @@ export function LaunchForm({
   const scripts = selectedWorktree?.scripts ?? [];
 
   const registration = useRegisterProject();
-  const { mutate: forgetProject, isPending: isForgetting } = useForgetProject();
   const registered = useRegisteredProjects();
 
   // A browsed folder becomes selectable once the launch targets list it, which
-  // remembering it does; until then the form waits on that refetch.
+  // adding it to the registry does; until then the form waits on that refetch.
   useEffect(() => {
     if (!pendingPath) return;
     const match = projects.find(
@@ -122,65 +162,16 @@ export function LaunchForm({
     setPendingPath(null);
   }, [pendingPath, projects]);
 
-  /** Remembered config dir behind the current selection, if any. */
-  const registeredPath = registered.data?.projects.find(
-    (p) =>
-      p.path === projectPath ||
-      selectedProject?.worktrees.some((w) => w.path === p.path)
-  )?.path;
-
-  // New-project mode: the backend inspects the typed dir for its scripts, its
-  // branch and its repo's worktrees, so nothing has to be typed blind.
-  const debouncedPath = useDebounced(newPath.trim(), 300);
-  const inspect = useLaunchInspect(debouncedPath);
-  const detected = inspect.data;
-  const detectedWorktrees = detected?.worktrees ?? [];
-  const pickedWorktree = detectedWorktrees.find(
-    (w) => w.path === newWorktreePath
-  );
-  const newScripts = pickedWorktree?.scripts ?? detected?.scripts ?? [];
-  const hasBranches = detectedWorktrees.some((w) => w.branch);
-  /** Branch the launch resolves to: the picked worktree, else the checkout. */
-  const branchLabel = pickedWorktree?.branch ?? detected?.branch ?? null;
-  /** Branch picker options: the dir's own checkout first, then its worktrees. */
-  const branchOptions = [
-    {
-      value: "",
-      label: detected?.branch
-        ? `Current checkout (${detected.branch})`
-        : "Current checkout",
-    },
-    ...detectedWorktrees
-      .filter((w) => w.branch)
-      .map((w) => ({
-        value: w.path,
-        label: w.branch ?? w.path,
-        detail: w.path,
-      })),
+  /** Folders the project list already covers, so the browser can mark them. */
+  const addedPaths = [
+    ...(registered.data?.projects ?? []).map((p) => p.path),
+    ...projects.map((p) => p.path),
+    ...projects.flatMap((p) => p.worktrees.map((w) => w.path)),
   ];
-  const scriptKey = newScripts.join(",");
 
-  // A fresh inspection decides the valid scripts; pick one as soon as it
-  // arrives and keep the choice valid when the branch changes.
-  useEffect(() => {
-    if (!detected) return;
-    setNewScript((current) =>
-      newScripts.includes(current) ? current : (newScripts[0] ?? "")
-    );
-    // newScripts is derived from detected + newWorktreePath (see scriptKey).
-  }, [detected, scriptKey]);
+  const ready = Boolean(projectPath && worktreePath && script) && !pendingPath;
 
-  // A different dir means a different repo: drop a worktree picked for the old
-  // one so its scripts can't leak into the new launch.
-  useEffect(() => {
-    setNewWorktreePath("");
-  }, [detected?.path]);
-
-  const knownReady = Boolean(projectPath && worktreePath && script);
-  const newReady = Boolean(detected?.path && newScript);
-  const ready = mode === "known" ? knownReady && !pendingPath : newReady;
-
-  const startKnown = () => {
+  const start = () => {
     if (!selectedWorktree || !script) return;
     mutate(
       {
@@ -192,35 +183,14 @@ export function LaunchForm({
     );
   };
 
-  const startNew = () => {
-    if (!newReady) return;
-    mutate(
-      {
-        configDir: detected?.path ?? newPath.trim(),
-        script: newScript,
-        branch: pickedWorktree?.branch ?? null,
-      },
-      { onSuccess: (r) => onSettled(r.ok, r.pid) }
-    );
-  };
-
   /** Close popup surfaces once the instance actually started. */
   const onSettled = (ok: boolean, pid?: number) => {
     if (ok && pid != null) onLaunched?.(pid);
   };
 
-  /**
-   * A browsed folder: a new project takes the path as-is (the inspect endpoint
-   * fills in its scripts and branch), a known one is remembered so discovery
-   * lists it, then picked once the refetch brings it in.
-   */
+  /** Add a browsed folder to the project list and select it once it lands. */
   const pickDirectory = (path: string) => {
-    const target = browse;
-    setBrowse(null);
-    if (target === "new") {
-      setNewPath(path);
-      return;
-    }
+    setBrowse(false);
     registration.reset();
     setPendingPath(path);
     registration.mutate(path);
@@ -239,256 +209,111 @@ export function LaunchForm({
             ? `Adding ${basename(pendingPath)}…`
             : ready
               ? "Runs detached in the background"
-              : mode === "known"
-                ? "Pick a project, worktree and script"
-                : !newPath.trim()
-                  ? "Enter a config dir to detect its scripts"
-                  : inspect.isFetching
-                    ? "Inspecting config dir…"
-                    : detected && !newScript
-                      ? "That config dir has no scripts"
-                      : "Pick a script";
-
-  if (browse) {
-    return (
-      <DirectoryBrowser
-        startDir={
-          browse === "known" ? (selectedProject?.path ?? "") : newPath.trim()
-        }
-        onPick={pickDirectory}
-        onCancel={() => setBrowse(null)}
-      />
-    );
-  }
+              : "Pick a project, worktree and script";
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3">
-      <div className="min-h-0 flex-1 space-y-4 overflow-y-auto">
-        <div
-          role="group"
-          aria-label="Launch mode"
-          className="bg-background border-border flex gap-0.5 rounded-md border p-0.5"
-        >
-          {(["known", "new"] as const).map((value) => (
-            <button
-              key={value}
-              type="button"
-              aria-pressed={mode === value}
-              disabled={isPending}
-              onClick={() => setMode(value)}
-              className={cn(
-                "flex-1 rounded-sm border px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-50",
-                mode === value
-                  ? "border-border bg-muted text-foreground shadow-sm"
-                  : "text-muted-foreground hover:text-foreground border-transparent"
-              )}
-            >
-              {value === "known" ? "Known project" : "New project"}
-            </button>
-          ))}
-        </div>
-
-        {mode === "known" ? (
-          isLoading ? (
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-              {[0, 1, 2].map((i) => (
+      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto">
+        {isLoading ? (
+          <div className="space-y-3">
+            <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2">
+              <div className="space-y-1.5">
+                <Skeleton className="h-2.5 w-16" />
+                <Skeleton className="h-9 w-full" />
+              </div>
+              <Skeleton className="h-9 w-24" />
+            </div>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              {[0, 1].map((i) => (
                 <div key={i} className="space-y-1.5">
-                  <Skeleton className="h-2.5 w-16" />
+                  <Skeleton className="h-2.5 w-20" />
                   <Skeleton className="h-9 w-full" />
                 </div>
               ))}
             </div>
-          ) : isError ? (
-            <p className="text-destructive font-mono text-xs">
-              {error?.message ?? "Failed to load launch targets."}
-            </p>
-          ) : (
-            <div className="space-y-3">
-              {projects.length === 0 ? (
-                <p className="text-muted-foreground font-mono text-xs">
-                  No known projects yet. Browse to a folder with a fog.json.
-                </p>
-              ) : (
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-                  <ComboboxField
-                    id={`${fieldId}-project`}
-                    label="Project"
-                    value={selectedProject ?? null}
-                    options={projects.map((p) => ({
-                      value: p,
-                      label: p.name,
-                      detail: p.path,
-                      keywords: p.path,
-                    }))}
-                    placeholder="Select a project…"
-                    emptyLabel="No matching project"
-                    disabled={isPending}
-                    autoFocus={autoFocus}
-                    hint={
-                      selectedProject && launchable.length === 0
-                        ? "No worktree with scripts on this project."
-                        : undefined
-                    }
-                    onChange={(p) => {
-                      setProjectPath(p?.path ?? "");
-                      setWorktreePath("");
-                      setScript("");
-                    }}
-                  />
-
-                  <ComboboxField
-                    id={`${fieldId}-worktree`}
-                    label="Worktree / branch"
-                    value={selectedWorktree ?? null}
-                    options={launchable.map((w) => ({
-                      value: w,
-                      label: w.branch ?? basename(w.path),
-                      detail: w.path,
-                      keywords: w.path,
-                    }))}
-                    placeholder="Select a worktree…"
-                    emptyLabel="No matching worktree"
-                    disabled={isPending || launchable.length === 0}
-                    onChange={(w) => {
-                      setWorktreePath(w?.path ?? "");
-                      setScript("");
-                    }}
-                  />
-
-                  <ComboboxField
-                    id={`${fieldId}-known-script`}
-                    label="Script"
-                    value={script || null}
-                    options={scripts.map((s) => ({ value: s, label: s }))}
-                    placeholder="Select a script…"
-                    disabled={isPending || !selectedWorktree}
-                    onChange={(s) => setScript(s ?? "")}
-                  />
-                </div>
-              )}
-
-              <div className="flex flex-wrap items-center gap-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={isPending}
-                  onClick={() => setBrowse("known")}
-                >
-                  <FolderOpen aria-hidden />
-                  Browse folders
-                </Button>
-                {registeredPath ? (
-                  <Button
-                    variant="muted"
-                    size="sm"
-                    loading={isForgetting}
-                    disabled={isPending}
-                    onClick={() =>
-                      forgetProject(registeredPath, {
-                        onSuccess: () => {
-                          setProjectPath("");
-                          setWorktreePath("");
-                          setScript("");
-                        },
-                      })
-                    }
-                  >
-                    Forget this project
-                  </Button>
-                ) : null}
-              </div>
-            </div>
-          )
+          </div>
+        ) : isError ? (
+          <p className="text-destructive font-mono text-xs">
+            {error?.message ?? "Failed to load launch targets."}
+          </p>
         ) : (
-          <div className="space-y-3">
-            <div>
-              <FieldLabel htmlFor={`${fieldId}-new-path`}>
-                Config dir (absolute)
-              </FieldLabel>
-              <div className="flex items-center gap-2">
-                <div className="min-w-0 flex-1">
-                  <Input
-                    id={`${fieldId}-new-path`}
-                    value={newPath}
-                    placeholder="/abs/path/to/project"
-                    font="mono"
-                    autoFocus={autoFocus}
-                    disabled={isPending}
-                    aria-invalid={inspect.isError}
-                    onChange={(e) => setNewPath(e.target.value)}
-                  />
-                </div>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="shrink-0"
-                  disabled={isPending}
-                  onClick={() => setBrowse("new")}
-                >
-                  <FolderOpen aria-hidden />
-                  Browse
-                </Button>
-              </div>
-              <p
-                className={cn(
-                  "text-2xs mt-1 truncate font-mono",
-                  inspect.isError ? "text-destructive" : "text-muted-foreground"
-                )}
-                title={detected?.path}
-              >
-                {inspect.isError
-                  ? (inspect.error?.message ??
-                    "Could not inspect this config dir.")
-                  : inspect.isFetching
-                    ? "Inspecting…"
-                    : detected
-                      ? `${detected.path} · ${newScripts.length} ${
-                          newScripts.length === 1 ? "script" : "scripts"
-                        }${branchLabel ? ` · on ${branchLabel}` : ""}`
-                      : "A directory with a fog.json, anywhere on this machine."}
+          <>
+            {projects.length === 0 ? (
+              <p className="text-muted-foreground font-mono text-xs">
+                No projects yet. Browse to a folder with a fog.json.
               </p>
-            </div>
+            ) : null}
 
-            <div
-              className={cn(
-                "grid grid-cols-1 gap-3",
-                hasBranches && "sm:grid-cols-2"
-              )}
-            >
+            <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2">
               <ComboboxField
-                id={`${fieldId}-new-script`}
-                label="Script"
-                value={newScript || null}
-                options={newScripts.map((s) => ({ value: s, label: s }))}
-                placeholder={
-                  detected
-                    ? "Select a script…"
-                    : "Detected from the config dir…"
-                }
-                emptyLabel="No matching script"
-                disabled={isPending || newScripts.length === 0}
-                onChange={(s) => setNewScript(s ?? "")}
+                id={`${fieldId}-project`}
+                label="Project"
+                value={selectedProject ?? null}
+                options={projects.map((p) => ({
+                  value: p,
+                  label: p.name,
+                  detail: p.path,
+                  keywords: p.path,
+                }))}
+                placeholder="Select a project…"
+                emptyLabel="No matching project"
+                disabled={isPending}
+                autoFocus={autoFocus}
                 hint={
-                  detected && newScripts.length === 0
-                    ? "No scripts in this config dir's fog.json."
+                  selectedProject && launchable.length === 0
+                    ? "No worktree with scripts on this project."
                     : undefined
                 }
+                onChange={(p) => {
+                  setProjectPath(p?.path ?? "");
+                  setWorktreePath("");
+                  setScript("");
+                }}
+              />
+              <Button
+                type="button"
+                variant="outline"
+                className="shrink-0"
+                disabled={isPending}
+                onClick={() => setBrowse(true)}
+              >
+                <FolderOpen aria-hidden />
+                Browse
+              </Button>
+            </div>
+
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <ComboboxField
+                id={`${fieldId}-worktree`}
+                label="Worktree / branch"
+                value={selectedWorktree ?? null}
+                options={launchable.map((w) => ({
+                  value: w,
+                  label: w.branch ?? basename(w.path),
+                  detail: w.path,
+                  keywords: w.path,
+                }))}
+                placeholder="Select a worktree…"
+                emptyLabel="No matching worktree"
+                disabled={isPending || launchable.length === 0}
+                onChange={(w) => {
+                  setWorktreePath(w?.path ?? "");
+                  setScript("");
+                }}
               />
 
-              {hasBranches ? (
-                <ComboboxField
-                  id={`${fieldId}-new-branch`}
-                  label="Branch"
-                  value={newWorktreePath}
-                  options={branchOptions}
-                  emptyLabel="No matching branch"
-                  disabled={isPending}
-                  onChange={(path) => setNewWorktreePath(path ?? "")}
-                />
-              ) : null}
+              <ComboboxField
+                id={`${fieldId}-script`}
+                label="Script"
+                value={script || null}
+                options={scripts.map((s) => ({ value: s, label: s }))}
+                placeholder="Select a script…"
+                emptyLabel="No matching script"
+                disabled={isPending || !selectedWorktree}
+                onChange={(s) => setScript(s ?? "")}
+              />
             </div>
-          </div>
+          </>
         )}
       </div>
 
@@ -518,12 +343,20 @@ export function LaunchForm({
             loading={isPending}
             loadingLabel="Starting…"
             disabled={!ready}
-            onClick={() => (mode === "known" ? startKnown() : startNew())}
+            onClick={start}
           >
             Start instance
           </Button>
         </div>
       </div>
+
+      <BrowsePopup
+        open={browse}
+        startDir={selectedProject?.path ?? ""}
+        added={addedPaths}
+        onPick={pickDirectory}
+        onOpenChange={setBrowse}
+      />
     </div>
   );
 }
