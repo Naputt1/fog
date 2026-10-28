@@ -34,3 +34,5 @@ docs/.vitepress/dist
 
 # Node.js dependencies
 docs/node_modules/
+
+.openchamber

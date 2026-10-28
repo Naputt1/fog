@@ -2,7 +2,7 @@ import {
   Activity,
   Boxes,
   HeartPulse,
-  SquareTerminal,
+  Settings2,
   type LucideIcon,
 } from "lucide-react";
 
@@ -16,9 +16,9 @@ export interface NavItem {
 
 export const NAV_ITEMS: NavItem[] = [
   { to: "/", label: "Services", icon: Boxes, match: "" },
-  { to: "/logs", label: "Terminal", icon: SquareTerminal, match: "/logs" },
   { to: "/health", label: "Health", icon: HeartPulse, match: "/health" },
   { to: "/status", label: "Status", icon: Activity, match: "/status" },
+  { to: "/settings", label: "Settings", icon: Settings2, match: "/settings" },
 ];
 
 /**

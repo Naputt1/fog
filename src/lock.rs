@@ -130,6 +130,48 @@ fn unlock(file: &File) -> io::Result<()> {
     }
 }
 
+/// Runs `f` while holding an exclusive lock on `path` (created if missing),
+/// so a read-modify-write of a small shared state file cannot interleave with
+/// another process doing the same.
+///
+/// Best-effort by design: an unavailable lock file or an unsupported platform
+/// still runs `f` (after a short wait), because losing the update beats
+/// blocking a launch on a locking problem.
+pub fn with_file_lock<T>(path: &Path, f: impl FnOnce() -> T) -> T {
+    const WAIT_STEP_MS: u64 = 5;
+    const WAIT_STEPS: u32 = 400;
+    let Ok(file) = ({
+        // The sidecar may live in a state dir that does not exist yet; opening
+        // the lock must not depend on the payload's own write creating it.
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(path)
+    }) else {
+        return f();
+    };
+    let mut held = false;
+    for _ in 0..WAIT_STEPS {
+        match try_lock_exclusive(&file) {
+            Ok(true) => {
+                held = true;
+                break;
+            }
+            Ok(false) => std::thread::sleep(Duration::from_millis(WAIT_STEP_MS)),
+            Err(_) => break,
+        }
+    }
+    let out = f();
+    if held {
+        let _ = unlock(&file);
+    }
+    out
+}
+
 /// FNV-1a 64-bit hash of the `(project, script, branch)` identity, hex-encoded.
 ///
 /// Deterministic across processes so two fog instances derive the same lock

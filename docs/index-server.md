@@ -130,19 +130,50 @@ instance yields `404`.
 
 ### Start instances
 
-The `/status` page includes a **Start instance** card with two modes:
+The `/status` page includes a **Start instance** card:
 
-1. **Known project** — pick a project, then a branch/worktree, then one of
-   the scripts that worktree's `fog.json` defines, and press **Start**.
-2. **New project** — enter an absolute config directory path and a script
-   name (optionally a branch), and press **Start**.
+1. Pick a project, then a branch/worktree, then one of the scripts that
+   worktree's `fog.json` defines, and press **Start**. Every picker is
+   searchable: click it and type to narrow the list, which matches a project or
+   worktree by name *and* path.
+2. A folder fog has never seen is one **Browse** away: the button beside the
+   project picker walks the filesystem (`GET /api/fs/list` marks the folders that
+   are git repos and the ones holding a `fog.json`), and picking one adds it to
+   the project list and selects it, ready for a worktree and script. Folders
+   already in the list show an `added` chip and cannot be picked again.
 
-Either mode spawns a new **detached** fog instance. Launching on a *different*
-branch uses the existing [concurrent/share/reuse machinery](/configuration#concurrent-mode--sharing-services) —
+**Browse** only lets you pick a folder that holds a `fog.json` — a worktree of a
+known repo included, which adds that worktree as its own entry. Its field
+completes as you type: a folder *name* (`red`) filters the open folder, while a
+*path* (`~/code/r`, `/Users/me/c`) lists the folders in its parent that match the
+last segment, ones starting with it first. Picking a folder keeps its path in the
+field with a trailing `/`, ready for the next name. Every config dir a `fog` run
+is started from — and every browsed folder — is remembered in
+`$XDG_STATE_HOME/fog/projects.json` (`GET`/`POST`/`DELETE /api/launch/projects`),
+so it stays in the project picker after its instance stops, even when nothing is
+running to discover it from. A wrong entry is dropped with
+`DELETE /api/launch/projects?path=/abs/dir`.
+
+The same form opens from the services index (`/`) header **Start instance**
+button — a centered dialog on desktop, a bottom sheet on mobile — and closes
+once the instance has started.
+
+A branch script page (`/projects/{project}/{branch}/{script}`) has the same
+button in its header, and in its "no running services" card. There the form is
+scoped to that page's project: the project picker and **Browse** are gone, its
+worktree matching the page's branch and the page's script are preselected, so
+starting a second instance of the script showing is Start and nothing else.
+The project page and a branch's script list (`/projects/{project}`,
+`/projects/{project}/{branch}`) carry the same header button, scoped to that
+project and branch, so only the rest of the form is left to fill.
+
+A launch always spawns a new **detached** fog instance. Launching on a
+*different* branch uses the existing [concurrent/share/reuse machinery](/configuration#concurrent-mode--sharing-services) —
 different branches always run concurrently, so the freshly launched branch
 instance runs side by side with any already-running ones.
 
-The UI is backed by two endpoints:
+The UI is backed by these endpoints (`GET /api/launch/inspect?path=/abs/dir`
+still reports one dir's scripts, branch and worktrees for scripts and tools):
 
 - `GET /api/launch/targets` — returns
   `{"projects":[{"path","name","worktrees":[{"path","branch","scripts":[...]}]}]}`,
@@ -155,6 +186,12 @@ The UI is backed by two endpoints:
   `{"config_dir":"/abs/path","script":"dev","branch":"feature-x"|null}`; spawns
   a detached fog daemon and waits until its IPC socket serves status, replying
   `{"ok":true,"pid":1234}` on success or `400`/`500 {"error":"..."}` on failure.
+- `GET /api/fs/list?dir=/abs/path` — one folder's subdirectories for the browse
+  picker: `{"path","parent","fog","entries":[{"name","path","git","fog"}]}`;
+  `dir` may start with `~` and defaults to the home directory.
+- `GET|POST|DELETE /api/launch/projects` — the remembered config dirs. `POST`
+  takes `{"path":"/abs/path"}` (400 without a `fog.json`), `DELETE` takes
+  `?path=`, and the registry file lives under the fog state dir.
 
 Like the service-action endpoint, this is a **localhost-only write path** — the
 index server binds to `127.0.0.1` only, so any local process could start fog

@@ -1,5 +1,5 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { Boxes, ChevronRight } from "lucide-react";
+import { Boxes, ChevronRight, Plus } from "lucide-react";
 import { useState } from "react";
 
 import { useServices } from "@/lib/hooks";
@@ -9,6 +9,8 @@ import {
   type ProjectBucket,
 } from "@/lib/services";
 import { PageHeader, LoadingState, ErrorState } from "@/components/page-state";
+import { LaunchPopup } from "@/components/launch-instance";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 
 export const Route = createFileRoute("/")({
@@ -82,6 +84,7 @@ function ServicesPage() {
   const { data, isLoading, isError, error } = useServices({
     withInternal: true,
   });
+  const [launchOpen, setLaunchOpen] = useState(false);
   const groups = groupServices(data ?? []);
   const running = data?.filter((s) => s.status === "running").length ?? 0;
 
@@ -90,12 +93,18 @@ function ServicesPage() {
       <PageHeader
         title="Services"
         actions={
-          data && data.length > 0 ? (
-            <div className="border-primary/30 bg-primary/10 text-primary flex items-center gap-1.5 rounded-full border px-3 py-1 font-mono text-xs whitespace-nowrap">
-              <span className="bg-primary size-1.5 shrink-0 animate-pulse rounded-full" />
-              {running}/{data.length} running
-            </div>
-          ) : undefined
+          <>
+            {data && data.length > 0 ? (
+              <div className="border-primary/30 bg-primary/10 text-primary flex items-center gap-1.5 rounded-full border px-3 py-1 font-mono text-xs whitespace-nowrap">
+                <span className="bg-primary size-1.5 shrink-0 animate-pulse rounded-full" />
+                {running}/{data.length} running
+              </div>
+            ) : null}
+            <Button size="sm" onClick={() => setLaunchOpen(true)}>
+              <Plus aria-hidden />
+              Start instance
+            </Button>
+          </>
         }
       />
 
@@ -116,6 +125,15 @@ function ServicesPage() {
             <p className="text-muted-foreground/70 mt-2 text-xs">
               Start a script to see its services appear here.
             </p>
+            <Button
+              variant="outline"
+              size="sm"
+              className="mt-4"
+              onClick={() => setLaunchOpen(true)}
+            >
+              <Plus aria-hidden />
+              Start instance
+            </Button>
           </CardContent>
         </Card>
       ) : (
@@ -125,6 +143,8 @@ function ServicesPage() {
           ))}
         </div>
       )}
+
+      <LaunchPopup open={launchOpen} onOpenChange={setLaunchOpen} />
     </div>
   );
 }
