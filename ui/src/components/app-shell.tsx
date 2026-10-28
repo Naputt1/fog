@@ -9,15 +9,13 @@ import { PanelRight, Cog, ChevronRight } from "lucide-react";
 
 import { RightSidebarContext } from "@/lib/right-sidebar-context";
 import { NAV_ITEMS, isNavActive, navIndexForPath } from "@/lib/nav";
+import { usePreference } from "@/lib/preferences";
 import { useSwipeNavigation } from "@/lib/use-swipe-navigation";
 
 import { cn, getHostLabel } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { BottomNav } from "@/components/bottom-nav";
 import { BrandCloud } from "@/components/brand-cloud";
-
-/** Swipe surface that owns its own gesture; the shell must not also react. */
-const SERVICE_SWIPE_SCOPE = '[data-swipe-scope="services"]';
 
 function Brand() {
   return (
@@ -169,6 +167,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     branch?: string;
     script?: string;
   };
+  const swipeNavigation = usePreference("swipeNavigation");
   const index = navIndexForPath(location.pathname);
   const current = NAV_ITEMS[index] ?? NAV_ITEMS[0];
 
@@ -179,9 +178,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   };
 
   const swipeRef = useSwipeNavigation({
+    enabled: swipeNavigation,
     onPrev: () => goTo(index <= 0 ? NAV_ITEMS.length - 1 : index - 1),
     onNext: () => goTo((index + 1) % NAV_ITEMS.length),
-    ignoreScope: SERVICE_SWIPE_SCOPE,
   });
 
   return (

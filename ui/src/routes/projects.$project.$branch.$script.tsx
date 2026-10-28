@@ -1,6 +1,6 @@
 import { Fragment, useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { ExternalLink, Plus, X } from "lucide-react";
+import { Plus, X } from "lucide-react";
 
 import { useInstanceKillState, useServices, useStatus } from "@/lib/hooks";
 import {
@@ -46,6 +46,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { cn, toDisplayEndpointUrl } from "@/lib/utils";
+import { usePreference, setPreference } from "@/lib/preferences";
 import { useMediaQuery } from "@/lib/use-media-query";
 
 export const Route = createFileRoute("/projects/$project/$branch/$script")({
@@ -143,7 +144,6 @@ function ServicePanel({
   projectName,
   label,
   script,
-  view,
   mode,
   onModeChange,
   onClose,
@@ -152,7 +152,6 @@ function ServicePanel({
   projectName: string;
   label: string;
   script: string;
-  view?: TerminalMode;
   mode: TerminalMode;
   onModeChange: (mode: TerminalMode) => void;
   onClose: () => void;
@@ -172,22 +171,6 @@ function ServicePanel({
         </div>
         <div className="ml-auto flex shrink-0 flex-wrap items-center justify-end gap-1">
           <RowActions inst={inst} svc={svc} />
-          <Link
-            to="/logs"
-            search={{
-              project: projectName,
-              service: svc.service?.container ?? svc.name,
-              view,
-            }}
-            title="Open full-page terminal"
-            className={cn(
-              buttonVariants({ variant: "ghost", size: "sm" }),
-              "font-mono"
-            )}
-          >
-            <ExternalLink className="size-4" />
-            <span className="hidden sm:inline">Full page</span>
-          </Link>
           <button
             type="button"
             onClick={onClose}
@@ -268,7 +251,8 @@ function ScriptServicesPage() {
         ) ?? null)
     : null;
 
-  const mode: TerminalMode = search.view ?? "logs";
+  const defaultLogView = usePreference("defaultLogView");
+  const mode: TerminalMode = search.view ?? defaultLogView;
   // Matches the table/card breakpoint below: `lg` renders the desktop table,
   // so the desktop surface should open a centered popup rather than a bottom
   // sheet.
@@ -305,6 +289,7 @@ function ScriptServicesPage() {
   };
 
   const setMode = (next: TerminalMode) => {
+    setPreference("defaultLogView", next);
     void navigate({
       search: (prev) => ({
         ...prev,
@@ -610,7 +595,6 @@ function ScriptServicesPage() {
                 projectName={projectName}
                 label={label}
                 script={script}
-                view={search.view}
                 mode={mode}
                 onModeChange={setMode}
                 onClose={closeDrawer}
@@ -643,7 +627,6 @@ function ScriptServicesPage() {
                   projectName={projectName}
                   label={label}
                   script={script}
-                  view={search.view}
                   mode={mode}
                   onModeChange={setMode}
                   onClose={closeDrawer}

@@ -33,8 +33,7 @@ export interface TerminalTarget {
 
 /**
  * Logs (SSE) / Terminal (PTY) pane with its mode toggle, live checkbox and the
- * mobile keypad. Shared by the `/logs` page and the per-service bottom drawer,
- * which only differ in how they select the target and persist the mode.
+ * mobile keypad. Used by the per-service popup on a project's script page.
  */
 export function ServiceTerminal({
   active,

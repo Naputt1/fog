@@ -1,5 +1,6 @@
 import {
   useCallback,
+  useEffect,
   useImperativeHandle,
   useLayoutEffect,
   useRef,
@@ -13,6 +14,7 @@ import { ChevronDown, ChevronUp } from "lucide-react";
 import "@xterm/xterm/css/xterm.css";
 
 import { Button } from "@/components/ui/button";
+import { usePreference } from "@/lib/preferences";
 import { cn } from "@/lib/utils";
 import type { TerminalHandle } from "@/components/terminal/terminal-handle";
 
@@ -72,6 +74,9 @@ export function TerminalView({
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
+  const fontSize = usePreference("terminalFontSize");
+  // Size at mount; later changes are applied in place below.
+  const initialFontSizeRef = useRef(fontSize);
   const wsRef = useRef<WebSocket | null>(null);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
   const reconnectAttemptRef = useRef(0);
@@ -223,7 +228,7 @@ export function TerminalView({
       scrollback: 5_000,
       fontFamily:
         '"JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace',
-      fontSize: 13,
+      fontSize: initialFontSizeRef.current,
       lineHeight: 1.25,
       theme: TERMINAL_THEME,
     });
@@ -352,6 +357,14 @@ export function TerminalView({
     handleTouchMove,
     handleTouchEnd,
   ]);
+
+  // Apply a font-size change in place and refit, preserving scrollback.
+  useEffect(() => {
+    const term = termRef.current;
+    if (!term || term.options.fontSize === fontSize) return;
+    term.options.fontSize = fontSize;
+    fitImmediate();
+  }, [fontSize, fitImmediate]);
 
   // Manual reconnect: reset the backoff budget and force a fresh mount.
   const handleReconnect = useCallback(() => {

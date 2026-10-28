@@ -39,9 +39,7 @@ import {
   isInstanceKilling,
   type KillIntentState,
 } from "@/lib/action-cache";
-
-/** Poll cadence for status-ish endpoints. */
-const POLL_MS = 5_000;
+import { usePreference } from "@/lib/preferences";
 
 /** Stable mutation keys, used to derive shared in-flight state. */
 const SERVICE_ACTION_KEY = ["service-action"] as const;
@@ -74,7 +72,7 @@ const LAUNCH_TOAST_ID = "launch";
 
 /**
  * Whether a service control action is mid-flight. While one is, status-ish
- * polls are paused: otherwise the 5s refetch would clobber the optimistic
+ * polls are paused: otherwise the next refetch would clobber the optimistic
  * patch with the server's not-yet-updated value and the badge would flicker.
  * (Kill is deliberately excluded — polling must keep running to notice the
  * instance actually disappearing.)
@@ -83,36 +81,44 @@ function serviceActionInFlight(queryClient: QueryClient): boolean {
   return queryClient.isMutating({ mutationKey: SERVICE_ACTION_KEY }) > 0;
 }
 
+/** Refetch delay from the Settings preference, or `false` while paused/off. */
+function pollDelay(queryClient: QueryClient, pollMs: number) {
+  return () => {
+    if (serviceActionInFlight(queryClient)) return false;
+    return pollMs > 0 ? pollMs : false;
+  };
+}
+
 /** Live services list + status. */
 export function useServices(opts?: { withInternal?: boolean }) {
   const queryClient = useQueryClient();
+  const pollMs = usePreference("pollMs");
   return useQuery({
     queryKey: ["services", opts?.withInternal ? "withInternal" : "traefikOnly"],
     queryFn: () => fetchServices(opts),
-    refetchInterval: () =>
-      serviceActionInFlight(queryClient) ? false : POLL_MS,
+    refetchInterval: pollDelay(queryClient, pollMs),
   });
 }
 
 /** IPC status snapshot. */
 export function useStatus() {
   const queryClient = useQueryClient();
+  const pollMs = usePreference("pollMs");
   return useQuery({
     queryKey: ["status"],
     queryFn: fetchStatus,
-    refetchInterval: () =>
-      serviceActionInFlight(queryClient) ? false : POLL_MS,
+    refetchInterval: pollDelay(queryClient, pollMs),
   });
 }
 
 /** Per-service health results. */
 export function useHealth() {
   const queryClient = useQueryClient();
+  const pollMs = usePreference("pollMs");
   return useQuery({
     queryKey: ["health"],
     queryFn: fetchHealth,
-    refetchInterval: () =>
-      serviceActionInFlight(queryClient) ? false : POLL_MS,
+    refetchInterval: pollDelay(queryClient, pollMs),
   });
 }
 
