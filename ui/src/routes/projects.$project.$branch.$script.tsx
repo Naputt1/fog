@@ -460,7 +460,7 @@ function ScriptServicesPage() {
                         status={svc.running ? "running" : "stopped"}
                       />
                     </div>
-                    {svc.service ? (
+                    {svc.service?.url ? (
                       <div className="mt-2">
                         <ServiceUrl
                           svc={svc.service}
@@ -535,7 +535,7 @@ function ScriptServicesPage() {
                                 />
                               </TableCell>
                               <TableCell>
-                                {svc.service ? (
+                                {svc.service?.url ? (
                                   <ServiceUrl svc={svc.service} />
                                 ) : (
                                   "—"

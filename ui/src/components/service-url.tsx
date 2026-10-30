@@ -73,6 +73,9 @@ export function CopyUrlButton({ url }: { url: string }) {
  * Host-aware service URL with a copy button and a DNS-only badge. Clicks on the
  * link/button stop propagation so a parent row's "open logs" handler does not
  * also fire.
+ *
+ * Renders nothing when the service has no URL of its own: a native service with
+ * only declared endpoints has `url: ""` and shows those endpoint links instead.
  */
 export function ServiceUrl({
   svc,
@@ -83,13 +86,7 @@ export function ServiceUrl({
   className?: string;
   linkClassName?: string;
 }) {
-  if (!svc.url) {
-    return (
-      <span className={cn("text-muted-foreground font-mono", className)}>
-        —
-      </span>
-    );
-  }
+  if (!svc.url) return null;
   const displayUrl = toDisplayUrl(svc.url, svc.ports);
   const dnsOnly =
     isDnsOnly(svc.url, svc.ports) && !isLocalHost(getRequestHostname());
