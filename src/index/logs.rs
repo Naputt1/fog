@@ -252,7 +252,8 @@ async fn fog_log_history(
     }
     let sock = crate::ipc::socket_path(pid);
     let svc = service.to_string();
-    let fetched = tokio::task::spawn_blocking(move || crate::ipc::query_logs(&sock, &svc, need)).await;
+    let fetched =
+        tokio::task::spawn_blocking(move || crate::ipc::query_logs(&sock, &svc, need)).await;
     match fetched {
         Ok(Ok(lines)) => {
             let (window, has_more) = slice_log_window(lines, tail, offset);
