@@ -44,11 +44,17 @@
   --warning: oklch(0.8 0.15 85);
   --info: oklch(0.7 0.12 230);
 
-  /* Terminal surfaces (xterm/log panes) and the brand logo gradient. */
+  /* Terminal surfaces (xterm/log panes) and the brand logo gradient. The
+     mark is a mint-teal stack, so the brand ramp follows `--primary` rather
+     than introducing a second accent hue. */
   --terminal: #0d1117;
-  --brand-1: #c4b5fd;
-  --brand-2: #a78bfa;
-  --brand-3: #7c3aed;
+  --brand-1: #e6fff7;
+  --brand-2: #8bf2d6;
+  --brand-3: #25cbb8;
+  --brand-side-1: #12a496;
+  --brand-side-2: #073f3a;
+  --brand-side-3: #0d8579;
+  --brand-side-4: #05302c;
 
   --border: oklch(0.27 0.02 165);
   --input: oklch(0.27 0.02 165);
@@ -96,6 +102,10 @@
   --color-brand-1: var(--brand-1);
   --color-brand-2: var(--brand-2);
   --color-brand-3: var(--brand-3);
+  --color-brand-side-1: var(--brand-side-1);
+  --color-brand-side-2: var(--brand-side-2);
+  --color-brand-side-3: var(--brand-side-3);
+  --color-brand-side-4: var(--brand-side-4);
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);

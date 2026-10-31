@@ -13,6 +13,7 @@
     "lint:fix": "oxlint --fix",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
+    "icons": "bun scripts/build-icons.mjs",
     "check": "bun run format:check && bun run lint && bun run typecheck && bun run build",
     "fix": "bun run format && bun run lint:fix",
     "preview": "vite preview"

@@ -15,13 +15,13 @@ import { useSwipeNavigation } from "@/lib/use-swipe-navigation";
 import { cn, getHostLabel } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { BottomNav } from "@/components/bottom-nav";
-import { BrandCloud } from "@/components/brand-cloud";
+import { BrandMark } from "@/components/brand-mark";
 
 function Brand() {
   return (
     <div className="flex items-center gap-2 px-2">
-      <div className="border-primary/40 bg-primary/10 text-primary flex size-7 items-center justify-center rounded border">
-        <BrandCloud className="size-5" />
+      <div className="border-border bg-card flex size-7 items-center justify-center rounded border">
+        <BrandMark className="size-[22px]" />
       </div>
       <div className="leading-tight">
         <div className="font-mono text-sm font-semibold tracking-tight">

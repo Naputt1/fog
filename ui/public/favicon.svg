@@ -1,1 +1,37 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="48" height="46" fill="none" viewBox="0 0 48 46"><defs><linearGradient id="fog-grad" x1="24" y1="10" x2="24" y2="40" gradientUnits="userSpaceOnUse"><stop stop-color="#c4b5fd"/><stop offset=".45" stop-color="#a78bfa"/><stop offset="1" stop-color="#7c3aed"/></linearGradient></defs><path fill="url(#fog-grad)" d="M8 10 H40 C40 18 38 24 34 26 C30 28 26 36 24 36 C22 36 18 28 14 26 C10 24 8 18 8 10 Z"/></svg>
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" fill="none">
+  <defs>
+    <linearGradient id="fog-face" x1="32" y1="6" x2="32" y2="40" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#e6fff7"/>
+      <stop offset=".48" stop-color="#8bf2d6"/>
+      <stop offset="1" stop-color="#25cbb8"/>
+    </linearGradient>
+    <linearGradient id="fog-side-l" x1="11" y1="30" x2="32" y2="57" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#12a496"/>
+      <stop offset="1" stop-color="#073f3a"/>
+    </linearGradient>
+    <linearGradient id="fog-side-r" x1="32" y1="33" x2="53" y2="57" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0d8579"/>
+      <stop offset="1" stop-color="#05302c"/>
+    </linearGradient>
+  </defs>
+  <g opacity="0.2">
+    <path fill="url(#fog-side-l)" d="M20.6 12.7 L32 19.21 L32 22.61 L20.6 16.1 Z"/>
+    <path fill="url(#fog-side-r)" d="M32 19.21 L43.4 12.7 L43.4 16.1 L32 22.61 Z"/>
+    <path fill="url(#fog-face)" d="M32 6.19 L43.4 12.7 L32 19.21 L20.6 12.7 Z"/>
+  </g>
+  <g opacity="0.46">
+    <path fill="url(#fog-side-l)" d="M16.8 22.7 L32 31.39 L32 35.59 L16.8 26.9 Z"/>
+    <path fill="url(#fog-side-r)" d="M32 31.39 L47.2 22.7 L47.2 26.9 L32 35.59 Z"/>
+    <path fill="url(#fog-face)" d="M32 14.01 L47.2 22.7 L32 31.39 L16.8 22.7 Z"/>
+  </g>
+  <g opacity="0.72">
+    <path fill="url(#fog-side-l)" d="M13 31.5 L32 42.36 L32 47.36 L13 36.5 Z"/>
+    <path fill="url(#fog-side-r)" d="M32 42.36 L51 31.5 L51 36.5 L32 47.36 Z"/>
+    <path fill="url(#fog-face)" d="M32 20.64 L51 31.5 L32 42.36 L13 31.5 Z"/>
+  </g>
+  <g opacity="1.0">
+    <path fill="url(#fog-side-l)" d="M10.5 39.5 L32 51.79 L32 57.59 L10.5 45.3 Z"/>
+    <path fill="url(#fog-side-r)" d="M32 51.79 L53.5 39.5 L53.5 45.3 L32 57.59 Z"/>
+    <path fill="url(#fog-face)" d="M32 27.21 L53.5 39.5 L32 51.79 L10.5 39.5 Z"/>
+  </g>
+</svg>
