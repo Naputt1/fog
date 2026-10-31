@@ -204,3 +204,22 @@ still reports one dir's scripts, branch and worktrees for scripts and tools):
 Like the service-action endpoint, this is a **localhost-only write path** — the
 index server binds to `127.0.0.1` only, so any local process could start fog
 instances. Do not expose the index port (`18080`) externally.
+
+### Settings
+
+The `/settings` page holds **browser-local** preferences:
+
+- **Polling interval** — how often services, status and health refetch
+  (`2s`, `5s`, `10s`, `30s`, or off);
+- **Default view** — the pane a service opens on, `Logs (SSE)` or
+  `Terminal (PTY)`;
+- **Initial log lines** — how much log is backfilled before the live stream
+  starts (`100`–`2000`);
+- **Font size** — the xterm font size (`11`–`18 px`);
+- **Swipe between pages** — move between the primary destinations with a
+  horizontal swipe on touch devices.
+
+They tune this browser's dashboard, never the running instance, so they live in
+`localStorage` under `fog:ui:preferences` rather than `fog.json`. Stored values
+from an older version are validated on read and fall back to their defaults, and
+**Reset** restores every default.

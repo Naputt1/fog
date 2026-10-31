@@ -118,9 +118,9 @@ For the full index server and launch API, see [Index Server](/index-server).
 
 1. On laptop, `tailscale ip -4` → e.g. `100.86.26.45`. Ensure a `fog dev` is running — the index server at `127.0.0.1:18080` is exposed on `:80` via Traefik's catch-all.
 2. On phone (same tailnet, no DNS config), open `http://<tailnet IP>`. The directory lists every running service with `http://<tailnet IP>:<port>` links (raw exposed port), grouped by project/worktree — tap to open or copy. `*.acme` wildcard hostnames resolve only on the laptop; phone must use the IP:port links.
-3. Live logs: `Logs` → pick service → streams with ANSI colors, follow/copy/clear.
+3. Live logs: open a project → branch → script page and tap a service row. Its drawer opens on `Logs (SSE)` — the stream keeps ANSI colors and offers follow/copy/clear — and the toggle switches it to `Terminal (PTY)` for an interactive shell.
 
-Launching via phone (`Status → Start instance`) works but the layout is tight — prefer desktop for launch; phone is best for view/logs/copy.
+Launching via phone (`Status` → **Start instance**, or the **Start instance** button on the services index) works but the layout is tight — prefer desktop for launch; phone is best for view/logs/copy.
 
 ## Troubleshooting for agentic use
 
