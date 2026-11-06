@@ -13,15 +13,26 @@ and the [configuration docs](https://naputt1.github.io/fog/configuration).
 | `reuse: true` | Hand over a live service across single-instance re-runs. Requires a `health_check`. Honored only when `concurrent: false`. |
 | `health_check` | `kind` (`tcp` / `http` / `docker`) + `target`. Gates `depends_on` and the `share` / `reuse` probe. Adaptive: fast `start_interval_ms` until healthy, then `interval_ms`. |
 | `depends_on` | Hold this service until the named ones are healthy. |
-| `ports: { name: 0 }` | Allocate a random free port per instance. Reference it as `${ports.name}` in `cmd`, `env`, `health_check.target`, `proxy.upstream`, or an endpoint `port`. |
+| `ports: { name: 0 }` | Allocate a random free port per instance. Reference it as `${ports.name}` in `cmd`, `env`, `health_check.target`, `proxy.upstream`, or an endpoint `port`. Use `${ports.name@repo:branch[:script]}` to read a port from another fog instance (see [configuration](https://naputt1.github.io/fog/configuration#cross-instance-ports)). |
 | `shutdown_cmd` | Runs on teardown — including when the last instance releases a shared resource. |
 | `endpoint` | A multi-port service (e.g. a compose stack) declares one entry per exposed endpoint; each gets its own health and optional generated route. |
 | `concurrent` | Script-level. `true` (default) runs alongside; `false` reclaims the previous same-branch instance. |
 
 Templates: `${ports.*}`; `${branch}` / `${FOG_BRANCH}` (DNS-safe slug, `feat/book` →
 `feat-book`); `${branch_raw}` / `${FOG_BRANCH_RAW}` (raw name — display only, never a
-`Host()` or DNS name). `FOG_BRANCH`, `FOG_BRANCH_RAW`, and `FOG_BRANCH_SLUG` are injected
-into every service process.
+`Host()` or DNS name). Cross-instance ports use
+`${ports.<name>@<repo>:<branch>[:<script>]}`: repo is the index/UI project name (matched
+case-insensitively), branch accepts the raw name, its slug, the index worktree segment
+(`release/1.2` → `release-1`), `${branch}` for the referencing branch, or `?` for the
+target's main worktree. Port names may not contain `@` or `:`. Values resolve once at
+startup against live instances and are logged (`resolved … = PORT (pid N)`); add `:script`
+to let fog start that project+branch+script when it is stopped (it must be in the project
+registry, have a worktree on the branch, and declare the port), waiting until the target
+reports every service started.
+`--port <name>@<repo>:<branch>[:<script>]=PORT` pins one (fixed port only — `=0` is
+rejected) and skips auto-start.
+`FOG_BRANCH`, `FOG_BRANCH_RAW`, and `FOG_BRANCH_SLUG` are injected into every service
+process.
 
 ## Logs and remote view
 
@@ -42,6 +53,13 @@ into every service process.
   anyway. Add a `tcp` or `docker` probe.
 - **`share: true` with `ports: {x: 0}`** gives each instance a different port for the same
   shared resource. Give anything shared a fixed port.
+- **Cross-instance ports fail fast.** If `${ports.api@other-repo:main}` has no live
+  `other-repo` instance on that branch, startup aborts. Start the owner first, add a
+  `:script` segment so fog can start it, use `?`/`${branch}` to pick the branch,
+  pin it with `--port`, or drop the reference. A failed cold start reports the child's
+  last `error:` line from `daemon.log` inline. Cold-started instances record their
+  parent: `fog ls` shows a `started-by` column, `fog kill <parent>` warns about
+  survivors, and `--with-dependents` stops them too.
 - **Only theme and proxy settings hot-reload.** Service add/remove/edit needs
   `fog restart <pid>` (or `fog kill` plus `fog dev -d`).
 - **The proxy is HTTP/1.1 only** — no HTTP/2.

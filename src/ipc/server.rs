@@ -107,6 +107,8 @@ pub(crate) fn handle_connection(mut stream: Stream, state: Arc<IpcState>) {
                 ports,
                 native_routes,
                 no_share: state.no_share,
+                autostarted_by: state.autostarted_by,
+                autostarted_by_label: state.autostarted_by_label.clone(),
                 started: state.startup_complete.load(Ordering::SeqCst),
             })
             .unwrap_or_default();

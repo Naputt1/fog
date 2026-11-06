@@ -28,7 +28,7 @@
                 },
                 "env": {
                   "type": "object",
-                  "description": "Environment variables injected into the service process. Values may contain ${ports.<name>} and ${branch}/${FOG_BRANCH} (DNS-safe slug, '/' → '-') or ${branch_raw}/${FOG_BRANCH_RAW} (raw) templates, e.g. {\"PORT\": \"${ports.api}\"}",
+                  "description": "Environment variables injected into the service process. Values may contain ${ports.<name>} and ${branch}/${FOG_BRANCH} (DNS-safe slug, '/' → '-') or ${branch_raw}/${FOG_BRANCH_RAW} (raw) templates, e.g. {\"PORT\": \"${ports.api}\"}. ${ports.<name>@<repo>:<branch>} reads a port from a running instance of another repo/branch; the branch may itself be ${branch} (the referencing branch) or ? (the target repo's main worktree). Add an optional :<script> segment (${ports.<name>@<repo>:<branch>:<script>}) to let fog start that instance when it is stopped.",
                   "additionalProperties": { "type": "string" }
                 },
                 "reuse": {
@@ -161,7 +161,7 @@
     },
     "ports": {
       "type": "object",
-      "description": "Allocatable ports for native services. Key is a symbolic name, value 0 = random free port, 1-65535 = fixed. Referenced as ${ports.<name>} in service env/cmd/health_check/proxy/native_routes. Every referenced name must exist here.",
+      "description": "Allocatable ports for native services. Key is a symbolic name (no '@' or ':' — those mark cross-instance references), value 0 = random free port, 1-65535 = fixed. Referenced as ${ports.<name>} in service env/cmd/health_check/proxy/native_routes. Every referenced name must exist here. A cross-instance reference ${ports.<name>@<repo>:<branch>} reads a port from another running instance (repo is the index project name, matched case-insensitively; branch accepts the raw name, its slug, the index worktree segment, ${branch} for the referencing branch, or ? for the target's main worktree) and needs no entry here. Add an optional :<script> segment to let fog start that project+branch+script when it is stopped.",
       "additionalProperties": {
         "type": "integer",
         "minimum": 0,
@@ -177,7 +177,7 @@
         "properties": {
           "host": { "type": "string", "description": "Host rule, may contain ${branch} / ${FOG_BRANCH} (DNS-safe slug, '/' → '-', e.g. \"${branch}.acme\") or ${branch_raw} / ${FOG_BRANCH_RAW} (raw)" },
           "service": { "type": "string", "description": "Service name this route points to" },
-          "port": { "type": "string", "description": "Port template, must be ${ports.<name>} or literal port (e.g. \"${ports.api}\" or \"3000\")" },
+          "port": { "type": "string", "description": "Port template, must be ${ports.<name>} (optionally ${ports.<name>@<repo>:<branch>} or ${ports.<name>@<repo>:<branch>:<script>}; branch may be ${branch} or ?) or literal port (e.g. \"${ports.api}\" or \"3000\")" },
           "path_prefix": { "type": "string", "description": "Optional PathPrefix to combine with host (e.g. \"/api\")" }
         }
       }
@@ -383,7 +383,7 @@
         },
         "port": {
           "type": "string",
-          "description": "Host-published port template (e.g. \"${ports.web}\") or literal port. Generated routes target host.docker.internal:<port>."
+          "description": "Host-published port template (e.g. \"${ports.web}\", or \"${ports.web@my-repo:main}\" / \"${ports.web@my-repo:main:dev}\" for another instance; branch may be ${branch} or ?) or literal port. Generated routes target host.docker.internal:<port>."
         },
         "path_prefix": {
           "type": "string",

@@ -19,6 +19,19 @@ pub fn allocate_ports(specs: &HashMap<String, u16>) -> Result<PortMap, String> {
     let mut names: Vec<&String> = specs.keys().collect();
     names.sort();
 
+    // `@` and `:` split cross-instance references, so a plain port name may not
+    // contain them (a `ports` key like `api@repo` would otherwise be read as a
+    // reference).
+    if let Some(name) = names
+        .iter()
+        .find(|name| name.contains('@') || name.contains(':'))
+    {
+        return Err(format!(
+            "port name '{name}' must not contain '@' or ':' (reserved for cross-instance \
+             references like ${{ports.api@my-repo:main}})"
+        ));
+    }
+
     for name in names {
         let spec = specs[name];
         if spec == 0 {
@@ -86,7 +99,8 @@ pub fn allocate_ports(specs: &HashMap<String, u16>) -> Result<PortMap, String> {
 /// is unambiguous. Returns a human-readable error string on malformed input.
 ///
 /// The result is merged onto the config's `ports` map before allocation; a
-/// name absent from the config defines a new port for this run.
+/// name absent from the config defines a new port for this run. A
+/// cross-instance key (`api@repo:branch`) pins that reference.
 pub fn parse_port_overrides(raw: &[String]) -> Result<HashMap<String, u16>, String> {
     let mut out = HashMap::new();
     for item in raw {
@@ -99,15 +113,178 @@ pub fn parse_port_overrides(raw: &[String]) -> Result<HashMap<String, u16>, Stri
         if name.is_empty() {
             return Err(format!("invalid --port '{item}': port name is empty"));
         }
+        if let Some(parsed) = parse_external_port_key(name)
+            && let Err(e) = parsed
+        {
+            return Err(format!("invalid --port '{item}': {e}"));
+        }
         let value = value.trim();
         let port = value.parse::<u16>().map_err(|_| {
             format!("invalid --port '{item}': '{value}' is not a valid port (0-65535)")
         })?;
+        // A parent cannot allocate or re-randomize a port it does not own: a
+        // live target keeps its value and a cold-started target allocates its
+        // own. Only a fixed value is meaningful for an external reference.
+        if port == 0 && parse_external_port_key(name).is_some() {
+            return Err(format!(
+                "invalid --port '{item}': a cross-instance port needs a fixed value (1-65535); \
+                 the owning instance allocates its own port"
+            ));
+        }
         if out.insert(name.to_string(), port).is_some() {
             return Err(format!("duplicate --port override for '{name}'"));
         }
     }
     Ok(out)
+}
+
+/// A cross-instance port reference:
+/// `${ports.<name>@<repo>:<branch>[:<script>]}`.
+///
+/// `<repo>` is the repository directory name (the project name `fog ls` and
+/// the index show), matched case-insensitively, or the exact git-common-dir
+/// identity. `<branch>` matches a live instance's raw branch, its branch slug,
+/// or the index's worktree segment, so `feat/login`, `feat-login` and the
+/// truncated label the UI shows all resolve. The optional `<script>` narrows
+/// the reference to one script of that project+branch; it also allows fog to
+/// start that script when no matching instance is running.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalPortRef {
+    /// Symbolic port name declared by the target instance.
+    pub name: String,
+    /// Repository (project) name to look up.
+    pub project: String,
+    /// Branch to look up (raw, slug, or index worktree segment).
+    pub branch: String,
+    /// Optional script name of the target instance.
+    pub script: Option<String>,
+}
+
+impl ExternalPortRef {
+    /// Map key the resolved port is stored under (the atom without `ports.`).
+    pub fn key(&self) -> String {
+        match &self.script {
+            Some(script) => format!("{}@{}:{}:{}", self.name, self.project, self.branch, script),
+            None => format!("{}@{}:{}", self.name, self.project, self.branch),
+        }
+    }
+
+    /// Full template atom, for error messages.
+    pub fn atom(&self) -> String {
+        format!("ports.{}", self.key())
+    }
+
+    /// Human-readable target identity, e.g. `cinema_ticket:main:dev`.
+    pub fn target(&self) -> String {
+        match &self.script {
+            Some(script) => format!("{}:{}:{}", self.project, self.branch, script),
+            None => format!("{}:{}", self.project, self.branch),
+        }
+    }
+}
+
+/// Parses the part of a `${ports.…}` atom after `ports.`.
+///
+/// Returns `None` for a local name (`api`), `Some(Ok(..))` for a well-formed
+/// cross-instance reference (`api@cinema_ticket:main` or
+/// `api@cinema_ticket:main:dev`), and `Some(Err(..))` when the atom looks
+/// cross-instance but is malformed.
+pub fn parse_external_port_key(key: &str) -> Option<Result<ExternalPortRef, String>> {
+    const EXPECTED: &str = "expected '${ports.<name>@<repo>:<branch>}' or \
+                            '${ports.<name>@<repo>:<branch>:<script>}'";
+    let (name, rest) = key.split_once('@')?;
+    let parts: Vec<&str> = rest.split(':').collect();
+    if !(2..=3).contains(&parts.len()) {
+        return Some(Err(format!(
+            "invalid cross-instance port reference '${{ports.{key}}}' ({EXPECTED}, e.g. \
+             '${{ports.api@my-repo:main}}' or '${{ports.api@my-repo:main:dev}}')"
+        )));
+    }
+    let name = name.trim();
+    let project = parts[0].trim();
+    let branch = parts[1].trim();
+    let script = parts.get(2).map(|part| part.trim());
+    if name.is_empty()
+        || project.is_empty()
+        || branch.is_empty()
+        || script.is_some_and(str::is_empty)
+    {
+        return Some(Err(format!(
+            "invalid cross-instance port reference '${{ports.{key}}}': name, repo, branch and \
+             script must all be non-empty ({EXPECTED})"
+        )));
+    }
+    // `?` (the target's main worktree) and branch atoms such as `${branch}` are
+    // resolved later against the referencing instance, so they cannot be
+    // slug-checked here.
+    if branch != "?"
+        && !branch.contains("${")
+        && let Err(e) = branch_slug(branch)
+    {
+        return Some(Err(format!(
+            "invalid branch in cross-instance port reference '${{ports.{key}}}': {e}"
+        )));
+    }
+    Some(Ok(ExternalPortRef {
+        name: name.to_string(),
+        project: project.to_string(),
+        branch: branch.to_string(),
+        script: script.map(str::to_string),
+    }))
+}
+
+/// Whether a live branch matches a reference's branch token: the raw name, its
+/// slug, or the index's worktree segment (`sanitize_hostname` truncated at the
+/// first dot, e.g. `release/1.2` → `release-1`).
+pub fn branch_matches(branch: &str, token: &str) -> bool {
+    if branch.eq_ignore_ascii_case(token) {
+        return true;
+    }
+    if let (Ok(a), Ok(b)) = (branch_slug(branch), branch_slug(token))
+        && a == b
+    {
+        return true;
+    }
+    let ui = sanitize_hostname(branch);
+    let ui = ui.split('.').next().unwrap_or("");
+    !ui.is_empty() && token.eq_ignore_ascii_case(ui)
+}
+
+/// Expands branch atoms inside a cross-instance branch token using the
+/// referencing instance's branch: `${branch}` / `${FOG_BRANCH}` /
+/// `${FOG_BRANCH_SLUG}` become its slug, `${branch_raw}` / `${FOG_BRANCH_RAW}`
+/// its raw name. Returns `None` when the token needs a branch and the calling
+/// instance has none (detached HEAD).
+pub fn expand_branch_token(token: &str, owner_branch: Option<&str>) -> Option<String> {
+    const SLUG_ATOMS: [&str; 3] = ["${branch}", "${FOG_BRANCH}", "${FOG_BRANCH_SLUG}"];
+    const RAW_ATOMS: [&str; 2] = ["${branch_raw}", "${FOG_BRANCH_RAW}"];
+    let uses_slug = SLUG_ATOMS.iter().any(|atom| token.contains(atom));
+    let uses_raw = RAW_ATOMS.iter().any(|atom| token.contains(atom));
+    if !uses_slug && !uses_raw {
+        return Some(token.to_string());
+    }
+    let branch = owner_branch?;
+    let mut out = token.to_string();
+    if uses_slug {
+        let slug = branch_slug(branch).ok()?;
+        for atom in SLUG_ATOMS {
+            out = out.replace(atom, &slug);
+        }
+    }
+    if uses_raw {
+        for atom in RAW_ATOMS {
+            out = out.replace(atom, branch);
+        }
+    }
+    Some(out)
+}
+
+/// Whether a project identity (`git rev-parse --git-common-dir`) or its
+/// directory name matches a reference's project token. The directory-name
+/// comparison is case-insensitive so the lowercased name the index and UI show
+/// resolves too.
+pub fn project_matches(identity: &str, token: &str) -> bool {
+    identity == token || crate::project::display_name(identity).eq_ignore_ascii_case(token)
 }
 
 /// Lowercases `input`, replaces every non-`[a-z0-9-]` character with `-`,
@@ -212,6 +389,7 @@ pub fn sanitize_hostname(host: &str) -> String {
 ///
 /// Supported atoms inside `${...}`:
 /// - `ports.<name>` → allocated port number
+/// - `ports.<name>@<repo>:<branch>` → a port owned by another live instance
 /// - `branch` / `FOG_BRANCH` → sanitized branch name (DNS-safe, `/` → `-`)
 /// - `branch_raw` / `FOG_BRANCH_RAW` → raw branch name (when Some)
 ///
@@ -224,9 +402,8 @@ pub fn resolve_template(s: &str, ports: &PortMap, branch: Option<&str>) -> Resul
     while i < bytes.len() {
         if bytes[i] == b'$' && i + 1 < bytes.len() && bytes[i + 1] == b'{' {
             let start = i + 2;
-            let end = s[start..]
-                .find('}')
-                .ok_or_else(|| format!("unclosed template in '{}'", s))?;
+            let end =
+                template_end(s, start).ok_or_else(|| format!("unclosed template in '{}'", s))?;
             let key = &s[start..start + end];
             let repl = resolve_atom(key.trim(), ports, branch)?;
             out.push_str(&repl);
@@ -246,6 +423,32 @@ fn resolve_atom(atom: &str, ports: &PortMap, branch: Option<&str>) -> Result<Str
     if let Some(name) = atom.strip_prefix("ports.") {
         if name.is_empty() {
             return Err(format!("empty port name in '${{{}}}'", atom));
+        }
+        if let Some(parsed) = parse_external_port_key(name) {
+            let reference = parsed?;
+            let port = ports.get(&reference.key()).ok_or_else(|| {
+                let hint = if reference.script.is_some() {
+                    format!(
+                        "start the '{}' instance directly, or pass --port {}=PORT",
+                        reference.target(),
+                        reference.key()
+                    )
+                } else {
+                    format!(
+                        "start it first, add ':script' (e.g. '${{ports.{}@{}:{}:<script>}}') so fog \
+                         can start it, or pass --port {}=PORT",
+                        reference.name,
+                        reference.project,
+                        reference.branch,
+                        reference.key()
+                    )
+                };
+                format!(
+                    "cross-instance port '${{{}}}' was not resolved ({hint})",
+                    atom
+                )
+            })?;
+            return Ok(port.to_string());
         }
         let port = ports.get(name).ok_or_else(|| {
             format!(
@@ -298,25 +501,77 @@ pub fn has_template(s: &str) -> bool {
     PREFIXES.iter().any(|p| s.contains(p))
 }
 
-/// Collects every `${ports.<name>}` name referenced by `s` into `out`.
-///
-/// Used to decide which allocated ports a borrowing instance must adopt from
-/// the sibling that already owns a shared resource, so dependent services point
-/// at the live container instead of a freshly allocated port.
-pub fn referenced_port_names(s: &str, out: &mut std::collections::BTreeSet<String>) {
+/// Whether `s` contains a *local* `${ports.<name>}` atom, i.e. one that needs a
+/// top-level `ports` map. Cross-instance references
+/// (`${ports.<name>@<repo>:<branch>}`) are resolved from live instances and do
+/// not require one.
+pub fn has_local_port_template(s: &str) -> bool {
+    let mut found = false;
+    let _ = scan_port_atoms(s, &mut |atom| {
+        if parse_external_port_key(atom).is_none() {
+            found = true;
+        }
+        Ok(())
+    });
+    found
+}
+
+/// Calls `f` with every `${ports.<atom>}` atom in `s` (the part after
+/// `ports.`), so callers can classify local names and cross-instance
+/// references identically.
+fn scan_port_atoms(s: &str, f: &mut dyn FnMut(&str) -> Result<(), String>) -> Result<(), String> {
     const PREFIX: &str = "${ports.";
     let mut rest = s;
     while let Some(start) = rest.find(PREFIX) {
-        let after = &rest[start + PREFIX.len()..];
-        let Some(end) = after.find('}') else {
+        let atom_start = start + PREFIX.len();
+        let Some(end) = template_end(rest, atom_start) else {
             break;
         };
-        let name = after[..end].trim();
-        if !name.is_empty() {
+        let atom = rest[atom_start..atom_start + end].trim();
+        if !atom.is_empty() {
+            f(atom)?;
+        }
+        rest = &rest[atom_start + end + 1..];
+    }
+    Ok(())
+}
+
+/// Offset of the `}` closing the template whose content starts at `atom_start`,
+/// skipping nested atoms such as `${branch}` inside a cross-instance port key.
+fn template_end(s: &str, atom_start: usize) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut depth = 0usize;
+    let mut i = atom_start;
+    while i < bytes.len() {
+        if bytes[i] == b'$' && i + 1 < bytes.len() && bytes[i + 1] == b'{' {
+            depth += 1;
+            i += 2;
+        } else if bytes[i] == b'}' {
+            if depth == 0 {
+                return Some(i - atom_start);
+            }
+            depth -= 1;
+            i += 1;
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
+
+/// Collects every local `${ports.<name>}` name referenced by `s` into `out`.
+///
+/// Used to decide which allocated ports a borrowing instance must adopt from
+/// the sibling that already owns a shared resource, so dependent services point
+/// at the live container instead of a freshly allocated port. Cross-instance
+/// references are skipped: they are not allocated by this instance.
+pub fn referenced_port_names(s: &str, out: &mut std::collections::BTreeSet<String>) {
+    let _ = scan_port_atoms(s, &mut |name| {
+        if parse_external_port_key(name).is_none() {
             out.insert(name.to_string());
         }
-        rest = &after[end + 1..];
-    }
+        Ok(())
+    });
 }
 
 /// Collects every `${ports.<name>}` referenced by a service entry: its `cmd`,
@@ -367,6 +622,343 @@ fn collect_health_check_ports(
     }
 }
 
+/// Calls `f` with every template-bearing string in `script` and its native
+/// routes: service `cmd`/`shutdown_cmd`/`env`, health checks (including
+/// endpoint health checks and compose files), endpoint host/port/path, proxy
+/// upstream/host, and native route host/port.
+fn for_each_script_string(
+    script: &crate::config::ScriptConfig,
+    native_routes: Option<&Vec<crate::config::NativeRouteConfig>>,
+    f: &mut dyn FnMut(&str) -> Result<(), String>,
+) -> Result<(), String> {
+    if let Some(entries) = &script.service {
+        for entry in entries {
+            f(&entry.cmd)?;
+            if let Some(cmd) = &entry.shutdown_cmd {
+                f(cmd)?;
+            }
+            if let Some(env) = &entry.env {
+                for value in env.values() {
+                    f(value)?;
+                }
+            }
+            for_each_health_check_string(entry.health_check.as_ref(), f)?;
+            if let Some(endpoints) = &entry.endpoint {
+                for endpoint in endpoints {
+                    for value in [
+                        endpoint.host.as_deref(),
+                        endpoint.port.as_deref(),
+                        endpoint.path_prefix.as_deref(),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    {
+                        f(value)?;
+                    }
+                    for_each_health_check_string(endpoint.health_check.as_ref(), f)?;
+                }
+            }
+        }
+    }
+    if let Some(proxy) = &script.proxy {
+        for route in &proxy.routes {
+            f(&route.upstream)?;
+            if let Some(host) = &route.host {
+                f(host)?;
+            }
+        }
+    }
+    if let Some(routes) = native_routes {
+        for route in routes {
+            f(&route.host)?;
+            f(&route.port)?;
+        }
+    }
+    Ok(())
+}
+
+fn for_each_health_check_string(
+    spec: Option<&crate::config::HealthCheckSpec>,
+    f: &mut dyn FnMut(&str) -> Result<(), String>,
+) -> Result<(), String> {
+    let mut one = |check: &crate::config::HealthCheckConfig| -> Result<(), String> {
+        f(&check.target)?;
+        if let Some(file) = &check.compose_file {
+            f(file)?;
+        }
+        Ok(())
+    };
+    match spec {
+        Some(crate::config::HealthCheckSpec::Single(c)) => one(c),
+        Some(crate::config::HealthCheckSpec::Multiple(v)) => {
+            for c in v {
+                one(c)?;
+            }
+            Ok(())
+        }
+        None => Ok(()),
+    }
+}
+
+/// Collects every cross-instance `${ports.<name>@<repo>:<branch>[:<script>]}`
+/// reference in the script and its native routes, keyed by
+/// [`ExternalPortRef::key`].
+pub fn collect_external_port_refs(
+    script: &crate::config::ScriptConfig,
+    native_routes: Option<&Vec<crate::config::NativeRouteConfig>>,
+) -> Result<Vec<ExternalPortRef>, String> {
+    let mut refs: std::collections::BTreeMap<String, ExternalPortRef> =
+        std::collections::BTreeMap::new();
+    for_each_script_string(script, native_routes, &mut |s| {
+        scan_port_atoms(s, &mut |atom| {
+            if let Some(parsed) = parse_external_port_key(atom) {
+                let reference = parsed?;
+                refs.entry(reference.key()).or_insert(reference);
+            }
+            Ok(())
+        })
+    })?;
+    Ok(refs.into_values().collect())
+}
+
+/// Local `${ports.<name>}` names referenced by `script` and its native routes.
+/// Cross-instance references are excluded; they resolve to their own map keys.
+pub fn referenced_local_port_names(
+    script: &crate::config::ScriptConfig,
+    native_routes: Option<&Vec<crate::config::NativeRouteConfig>>,
+) -> std::collections::BTreeSet<String> {
+    let mut names = std::collections::BTreeSet::new();
+    let mut collect = |s: &str| -> Result<(), String> {
+        scan_port_atoms(s, &mut |atom| {
+            if parse_external_port_key(atom).is_none() {
+                names.insert(atom.to_string());
+            }
+            Ok(())
+        })
+    };
+    let _ = for_each_script_string(script, native_routes, &mut collect);
+    names
+}
+
+/// Port snapshot of one live fog instance, used to resolve cross-instance
+/// port references.
+#[derive(Debug, Clone)]
+pub struct LiveInstance {
+    pub pid: u32,
+    pub script: String,
+    pub project: Option<String>,
+    pub branch: Option<String>,
+    pub ports: PortMap,
+}
+
+/// Queries every live fog instance except this process.
+pub fn live_instances() -> Vec<LiveInstance> {
+    let self_pid = std::process::id();
+    let Ok(paths) = crate::ipc::find_instances() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (pid, path) in paths {
+        if pid == self_pid {
+            continue;
+        }
+        match crate::ipc::query_status(&path) {
+            Ok(status) => out.push(LiveInstance {
+                pid,
+                script: status.script,
+                project: status.project,
+                branch: status.branch,
+                ports: status.ports,
+            }),
+            Err(_) => {
+                if !crate::process::is_pid_alive(pid) {
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
+        }
+    }
+    out
+}
+
+fn instance_matches(reference: &ExternalPortRef, instance: &LiveInstance) -> bool {
+    let Some(project) = instance.project.as_deref() else {
+        return false;
+    };
+    if !project_matches(project, &reference.project) {
+        return false;
+    }
+    if let Some(script) = &reference.script
+        && instance.script != *script
+    {
+        return false;
+    }
+    let Some(branch) = instance.branch.as_deref() else {
+        return false;
+    };
+    branch_matches(branch, &reference.branch)
+}
+
+/// Whether any live instance matches the reference's project, branch and
+/// (when given) script, regardless of whether it publishes the port.
+pub fn any_instance_matches(reference: &ExternalPortRef, instances: &[LiveInstance]) -> bool {
+    instances
+        .iter()
+        .any(|instance| instance_matches(reference, instance))
+}
+
+/// Why a cross-instance reference could not be resolved from live instances.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PickFailure {
+    /// No running instance matches project, branch (and script, when given).
+    NoInstance,
+    /// A matching instance is running but publishes no port of that name.
+    /// Carries the sorted list of names it does publish.
+    MissingPort(String),
+    /// Several matching instances disagree on the value. Carries the details.
+    Ambiguous(String),
+}
+
+/// Resolves one cross-instance reference against `instances`, reporting the
+/// kind of failure so callers can try a cold start only for [`PickFailure::NoInstance`].
+pub fn pick_external_port_detailed(
+    reference: &ExternalPortRef,
+    instances: &[LiveInstance],
+) -> Result<u16, PickFailure> {
+    pick_external_port_source(reference, instances).map(|(port, _)| port)
+}
+
+/// Like [`pick_external_port_detailed`], also returning the PID of the instance
+/// that published the value (for the startup log).
+pub fn pick_external_port_source(
+    reference: &ExternalPortRef,
+    instances: &[LiveInstance],
+) -> Result<(u16, u32), PickFailure> {
+    let candidates: Vec<&LiveInstance> = instances
+        .iter()
+        .filter(|instance| instance_matches(reference, instance))
+        .collect();
+    if candidates.is_empty() {
+        return Err(PickFailure::NoInstance);
+    }
+    let mut values: Vec<(&LiveInstance, u16)> = candidates
+        .iter()
+        .filter_map(|instance| {
+            instance
+                .ports
+                .get(&reference.name)
+                .map(|port| (*instance, *port))
+        })
+        .collect();
+    if values.is_empty() {
+        let mut names: Vec<String> = candidates
+            .iter()
+            .flat_map(|instance| instance.ports.keys().cloned())
+            .collect();
+        names.sort_unstable();
+        names.dedup();
+        let available = if names.is_empty() {
+            "(none)".to_string()
+        } else {
+            names.join(", ")
+        };
+        return Err(PickFailure::MissingPort(available));
+    }
+    let first = values[0].1;
+    if values.iter().any(|(_, port)| *port != first) {
+        values.sort_by_key(|(instance, _)| instance.pid);
+        let detail = values
+            .iter()
+            .map(|(instance, port)| {
+                format!(
+                    "pid {} (script '{}') -> {}",
+                    instance.pid, instance.script, port
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(PickFailure::Ambiguous(detail));
+    }
+    Ok((first, values[0].0.pid))
+}
+
+/// Renders a [`PickFailure`] for one reference as the user-facing error.
+pub fn format_pick_failure(reference: &ExternalPortRef, failure: &PickFailure) -> String {
+    let atom = reference.atom();
+    match failure {
+        PickFailure::NoInstance => {
+            let hint = if reference.script.is_some() {
+                format!("start it first or pass --port {}=PORT", reference.key())
+            } else {
+                format!(
+                    "start it first, add ':script' (e.g. '${{ports.{}@{}:{}:<script>}}') so fog can \
+                     start it, or pass --port {}=PORT",
+                    reference.name,
+                    reference.project,
+                    reference.branch,
+                    reference.key()
+                )
+            };
+            format!(
+                "'${{{atom}}}' needs a running fog instance for '{}' — {hint}",
+                reference.target()
+            )
+        }
+        PickFailure::MissingPort(available) => format!(
+            "'${{{atom}}}': '{}' is running but declares no '{}' port (available: {available})",
+            reference.target(),
+            reference.name
+        ),
+        PickFailure::Ambiguous(detail) => format!(
+            "'${{{atom}}}' is ambiguous: {detail}; pass --port {}=PORT to choose",
+            reference.key()
+        ),
+    }
+}
+
+/// Resolves one cross-instance reference against `instances`, failing when no
+/// matching instance is running, when it does not declare the port, or when
+/// two matching instances disagree on the value.
+pub fn pick_external_port(
+    reference: &ExternalPortRef,
+    instances: &[LiveInstance],
+) -> Result<u16, String> {
+    pick_external_port_detailed(reference, instances)
+        .map_err(|failure| format_pick_failure(reference, &failure))
+}
+
+/// Inserts resolved cross-instance ports into `ports`. A key already present
+/// (an explicit `--port` override or a takeover) is left untouched.
+pub fn apply_external_refs(
+    refs: &[ExternalPortRef],
+    instances: &[LiveInstance],
+    ports: &mut PortMap,
+) -> Result<usize, String> {
+    let mut resolved = 0;
+    for reference in refs {
+        if ports.contains_key(&reference.key()) {
+            continue;
+        }
+        let port = pick_external_port(reference, instances)?;
+        ports.insert(reference.key(), port);
+        resolved += 1;
+    }
+    Ok(resolved)
+}
+
+/// Resolves every cross-instance reference in `script` against live instances
+/// and stores the values in `ports`.
+pub fn resolve_external_refs(
+    script: &crate::config::ScriptConfig,
+    native_routes: Option<&Vec<crate::config::NativeRouteConfig>>,
+    ports: &mut PortMap,
+) -> Result<usize, String> {
+    let refs = collect_external_port_refs(script, native_routes)?;
+    if refs.is_empty() {
+        return Ok(0);
+    }
+    apply_external_refs(&refs, &live_instances(), ports)
+}
+
 /// Validates native route ports against the allocated port map and branch.
 /// Mirrors the checks previously duplicated in `main.rs` and `runtime.rs`.
 pub fn validate_native_routes(
@@ -404,15 +996,17 @@ pub fn validate_native_routes(
     Ok(())
 }
 
-/// Whether a declared endpoint uses any `${...}` template.
+/// Whether a declared endpoint uses any local `${ports.<name>}` template.
 fn endpoint_has_template(s: &crate::config::EndpointConfig) -> bool {
-    s.host.as_ref().is_some_and(|h| has_template(h))
-        || s.port.as_ref().is_some_and(|p| has_template(p))
-        || s.path_prefix.as_ref().is_some_and(|p| has_template(p))
+    s.host.as_ref().is_some_and(|h| has_local_port_template(h))
+        || s.port.as_ref().is_some_and(|p| has_local_port_template(p))
+        || s.path_prefix
+            .as_ref()
+            .is_some_and(|p| has_local_port_template(p))
         || s.health_check.as_ref().is_some_and(|hc| match hc {
-            crate::config::HealthCheckSpec::Single(c) => has_template(&c.target),
+            crate::config::HealthCheckSpec::Single(c) => has_local_port_template(&c.target),
             crate::config::HealthCheckSpec::Multiple(v) => {
-                v.iter().any(|c| has_template(&c.target))
+                v.iter().any(|c| has_local_port_template(&c.target))
             }
         })
 }
@@ -468,10 +1062,12 @@ pub fn validate_endpoints(
     Ok(())
 }
 
-/// Ensures `ports` top-level is defined when any template references `${ports.*}`.
-/// Checks service `cmd`/`shutdown_cmd`/`env`/`health_check`, proxy routes, and
-/// native routes. Returns `Err` with the same message previously duplicated in
-/// `main.rs` and `runtime.rs`.
+/// Ensures `ports` top-level is defined when any template references a local
+/// `${ports.<name>}`. Checks service `cmd`/`shutdown_cmd`/`env`/`health_check`,
+/// proxy routes, and native routes. Cross-instance references
+/// (`${ports.<name>@<repo>:<branch>}`) are resolved from live instances, so
+/// they do not require a `ports` map. Returns `Err` with the same message
+/// previously duplicated in `main.rs` and `runtime.rs`.
 pub fn ensure_ports_defined(
     config_ports: Option<&std::collections::HashMap<String, u16>>,
     script: &crate::config::ScriptConfig,
@@ -482,15 +1078,17 @@ pub fn ensure_ports_defined(
     }
     let has_template = script.service.as_ref().is_some_and(|entries| {
         entries.iter().any(|e| {
-            has_template(&e.cmd)
-                || e.shutdown_cmd.as_ref().is_some_and(|s| has_template(s))
+            has_local_port_template(&e.cmd)
+                || e.shutdown_cmd
+                    .as_ref()
+                    .is_some_and(|s| has_local_port_template(s))
                 || e.env
                     .as_ref()
-                    .is_some_and(|m| m.values().any(|v| has_template(v)))
+                    .is_some_and(|m| m.values().any(|v| has_local_port_template(v)))
                 || e.health_check.as_ref().is_some_and(|hc| match hc {
-                    crate::config::HealthCheckSpec::Single(c) => has_template(&c.target),
+                    crate::config::HealthCheckSpec::Single(c) => has_local_port_template(&c.target),
                     crate::config::HealthCheckSpec::Multiple(v) => {
-                        v.iter().any(|c| has_template(&c.target))
+                        v.iter().any(|c| has_local_port_template(&c.target))
                     }
                 })
                 || e.endpoint
@@ -498,11 +1096,15 @@ pub fn ensure_ports_defined(
                     .is_some_and(|subs| subs.iter().any(endpoint_has_template))
         })
     }) || script.proxy.as_ref().is_some_and(|p| {
-        p.routes
+        p.routes.iter().any(|r| {
+            has_local_port_template(&r.upstream)
+                || r.host.as_ref().is_some_and(|h| has_local_port_template(h))
+        })
+    }) || native_routes.is_some_and(|routes| {
+        routes
             .iter()
-            .any(|r| has_template(&r.upstream) || r.host.as_ref().is_some_and(|h| has_template(h)))
-    }) || native_routes
-        .is_some_and(|routes| routes.iter().any(|r| has_template(&r.port)));
+            .any(|r| has_local_port_template(&r.port) || has_local_port_template(&r.host))
+    });
     if has_template {
         return Err("config uses ${ports.*} but top-level 'ports' is not defined".to_string());
     }
@@ -797,5 +1399,472 @@ mod tests {
             let err = validate_native_routes(&[route("api", port)], &m, None).unwrap_err();
             assert!(err.contains("invalid port"), "{port}: {err}");
         }
+    }
+
+    #[test]
+    fn test_parse_external_port_key_ok() {
+        let reference = parse_external_port_key("api@cinema_ticket:main")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            reference,
+            ExternalPortRef {
+                name: "api".to_string(),
+                project: "cinema_ticket".to_string(),
+                branch: "main".to_string(),
+                script: None,
+            }
+        );
+        assert_eq!(reference.key(), "api@cinema_ticket:main");
+        assert_eq!(reference.atom(), "ports.api@cinema_ticket:main");
+        assert_eq!(reference.target(), "cinema_ticket:main");
+        // The optional script segment authorizes a cold start.
+        let script = parse_external_port_key("api@cinema_ticket:main:dev")
+            .unwrap()
+            .unwrap();
+        assert_eq!(script.key(), "api@cinema_ticket:main:dev");
+        assert_eq!(script.target(), "cinema_ticket:main:dev");
+        // A raw branch name is accepted; matching happens by slug.
+        assert!(
+            parse_external_port_key("api@repo:feat/login")
+                .unwrap()
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_parse_external_port_key_local_and_malformed() {
+        assert!(parse_external_port_key("api").is_none());
+        let err = parse_external_port_key("api@repo").unwrap().unwrap_err();
+        assert!(err.contains("expected"), "{err}");
+        for key in [
+            "@repo:main",
+            "api@:main",
+            "api@repo:",
+            "api@repo:main:",
+            "api@repo:main:dev:extra",
+        ] {
+            let err = parse_external_port_key(key).unwrap().unwrap_err();
+            assert!(
+                err.contains("non-empty") || err.contains("expected"),
+                "{key}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_external_port_key_accepts_dynamic_branch_tokens() {
+        for branch in ["?", "${branch}", "${FOG_BRANCH}", "${branch_raw}"] {
+            let key = format!("api@repo:{branch}");
+            let reference = parse_external_port_key(&key).unwrap().unwrap();
+            assert_eq!(reference.branch, branch);
+            assert_eq!(reference.key(), key);
+        }
+    }
+
+    #[test]
+    fn test_parse_port_overrides_external_key() {
+        let raw = vec![
+            "api@repo:main=4000".to_string(),
+            "api@repo:main:dev=4001".to_string(),
+        ];
+        let m = parse_port_overrides(&raw).unwrap();
+        assert_eq!(m["api@repo:main"], 4000);
+        assert_eq!(m["api@repo:main:dev"], 4001);
+        let err = parse_port_overrides(&["api@repo=4000".to_string()]).unwrap_err();
+        assert!(err.contains("cross-instance"), "{err}");
+        let err = parse_port_overrides(&["api@repo:main:=4000".to_string()]).unwrap_err();
+        assert!(err.contains("non-empty"), "{err}");
+    }
+
+    #[test]
+    fn test_parse_port_overrides_rejects_zero_for_external_key() {
+        let err = parse_port_overrides(&["api@repo:main=0".to_string()]).unwrap_err();
+        assert!(err.contains("fixed value"), "{err}");
+        let err = parse_port_overrides(&["api@repo:main:dev=0".to_string()]).unwrap_err();
+        assert!(err.contains("fixed value"), "{err}");
+        // A local name may still be re-randomized for the run.
+        let m = parse_port_overrides(&["api=0".to_string()]).unwrap();
+        assert_eq!(m["api"], 0);
+    }
+
+    #[test]
+    fn test_allocate_ports_rejects_reserved_name_characters() {
+        for name in ["api@repo", "api:main"] {
+            let specs = HashMap::from([(name.to_string(), 0)]);
+            let err = allocate_ports(&specs).unwrap_err();
+            assert!(err.contains("reserved"), "{name}: {err}");
+        }
+    }
+
+    #[test]
+    fn test_expand_branch_token() {
+        assert_eq!(
+            expand_branch_token("${branch}", Some("feat/login")).as_deref(),
+            Some("feat-login")
+        );
+        assert_eq!(
+            expand_branch_token("${FOG_BRANCH}", Some("feat/login")).as_deref(),
+            Some("feat-login")
+        );
+        assert_eq!(
+            expand_branch_token("${branch_raw}", Some("feat/login")).as_deref(),
+            Some("feat/login")
+        );
+        assert_eq!(
+            expand_branch_token("${branch}", None),
+            None,
+            "a detached HEAD cannot resolve the atom"
+        );
+        assert_eq!(
+            expand_branch_token("main", Some("feat/login")).as_deref(),
+            Some("main")
+        );
+        assert_eq!(expand_branch_token("main", None).as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn test_resolve_external_atom_uses_resolved_key() {
+        let m = pm(&[
+            ("api@cinema_ticket:main", 8080),
+            ("api@cinema_ticket:main:dev", 8081),
+        ]);
+        assert_eq!(
+            resolve_template("http://localhost:${ports.api@cinema_ticket:main}", &m, None).unwrap(),
+            "http://localhost:8080"
+        );
+        assert_eq!(
+            resolve_template(
+                "http://localhost:${ports.api@cinema_ticket:main:dev}",
+                &m,
+                None
+            )
+            .unwrap(),
+            "http://localhost:8081"
+        );
+    }
+
+    #[test]
+    fn test_resolve_template_external_with_nested_branch_atom() {
+        let m = pm(&[("api@cinema_ticket:${branch}:serve", 8080)]);
+        assert_eq!(
+            resolve_template(
+                "http://localhost:${ports.api@cinema_ticket:${branch}:serve}",
+                &m,
+                Some("feat/login")
+            )
+            .unwrap(),
+            "http://localhost:8080"
+        );
+    }
+
+    #[test]
+    fn test_scan_port_atoms_keeps_nested_branch_atom() {
+        let mut refs = std::collections::BTreeSet::new();
+        referenced_port_names(
+            "x ${ports.api@cinema_ticket:${branch}:serve} y ${ports.web}",
+            &mut refs,
+        );
+        assert_eq!(
+            refs.into_iter().collect::<Vec<_>>(),
+            vec!["web".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_resolve_external_atom_unresolved_errors() {
+        let m = pm(&[]);
+        let err = resolve_template("${ports.api@cinema_ticket:main}", &m, None).unwrap_err();
+        assert!(err.contains("not resolved"), "{err}");
+        assert!(err.contains("cinema_ticket"), "{err}");
+        assert!(err.contains(":script"), "{err}");
+        let err = resolve_template("${ports.api@cinema_ticket:main:dev}", &m, None).unwrap_err();
+        assert!(err.contains("cinema_ticket:main:dev"), "{err}");
+    }
+
+    #[test]
+    fn test_resolve_external_atom_malformed_errors() {
+        let m = pm(&[("api@repo", 1)]);
+        let err = resolve_template("${ports.api@repo}", &m, None).unwrap_err();
+        assert!(err.contains("invalid cross-instance"), "{err}");
+    }
+
+    #[test]
+    fn test_referenced_port_names_skips_external_refs() {
+        let mut out = std::collections::BTreeSet::new();
+        referenced_port_names(
+            "${ports.api} ${ports.db@repo:main} ${ports.web@repo:feat/x} \
+             ${ports.cache@repo:main:dev}",
+            &mut out,
+        );
+        assert_eq!(out, std::collections::BTreeSet::from(["api".to_string()]));
+    }
+
+    #[test]
+    fn test_has_local_port_template() {
+        assert!(has_local_port_template("${ports.api}"));
+        assert!(!has_local_port_template("${ports.api@repo:main}"));
+        assert!(!has_local_port_template("${ports.api@repo:main:dev}"));
+        assert!(!has_local_port_template("${branch}"));
+        assert!(!has_local_port_template("plain"));
+    }
+
+    #[test]
+    fn test_referenced_local_port_names_walks_script() {
+        let mut script = script_with_env(&[("A", "${ports.api} ${ports.db@repo:main}")]);
+        script.proxy = Some(crate::config::ProxyConfig {
+            port: 3000,
+            host: None,
+            routes: vec![crate::config::ProxyRoute {
+                path: "/".to_string(),
+                host: Some("${ports.ui}.acme".to_string()),
+                upstream: "http://localhost:${ports.web@repo:main}".to_string(),
+                ws: None,
+            }],
+            tls_cert: None,
+            tls_key: None,
+            max_log_entries: None,
+        });
+        let routes = vec![route("api", "${ports.api}")];
+        let names = referenced_local_port_names(&script, Some(&routes));
+        assert_eq!(
+            names,
+            std::collections::BTreeSet::from(["api".to_string(), "ui".to_string(),])
+        );
+    }
+
+    fn script_with_env(values: &[(&str, &str)]) -> crate::config::ScriptConfig {
+        let env = values
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        crate::config::ScriptConfig {
+            service: Some(vec![crate::config::ConfigEntry {
+                name: Some("web".to_string()),
+                path: ".".to_string(),
+                cmd: "true".to_string(),
+                health_check: None,
+                endpoint: None,
+                depends_on: None,
+                shutdown_cmd: None,
+                env: Some(env),
+                reuse: false,
+                share: false,
+            }]),
+            proxy: None,
+            terminal: None,
+            concurrent: true,
+        }
+    }
+
+    #[test]
+    fn test_ensure_ports_defined_external_and_branch_only() {
+        let external = script_with_env(&[("API", "http://localhost:${ports.api@repo:main}")]);
+        assert!(ensure_ports_defined(None, &external, None).is_ok());
+        let branch_only = script_with_env(&[("HOST", "http://${branch}.acme")]);
+        assert!(ensure_ports_defined(None, &branch_only, None).is_ok());
+        let local = script_with_env(&[("API", "http://localhost:${ports.api}")]);
+        let err = ensure_ports_defined(None, &local, None).unwrap_err();
+        assert!(err.contains("'ports' is not defined"), "{err}");
+    }
+
+    #[test]
+    fn test_collect_external_port_refs_scans_fields_and_dedupes() {
+        let mut script = script_with_env(&[("A", "${ports.api@repo:main}")]);
+        script.proxy = Some(crate::config::ProxyConfig {
+            port: 3000,
+            host: None,
+            routes: vec![crate::config::ProxyRoute {
+                path: "/".to_string(),
+                host: Some("${ports.api@repo:feat/login}.acme".to_string()),
+                upstream: "http://localhost:${ports.web@repo:main}".to_string(),
+                ws: None,
+            }],
+            tls_cert: None,
+            tls_key: None,
+            max_log_entries: None,
+        });
+        let routes = vec![route("api", "${ports.api@repo:main}")];
+        let refs = collect_external_port_refs(&script, Some(&routes)).unwrap();
+        let keys: Vec<String> = refs.iter().map(ExternalPortRef::key).collect();
+        // BTreeMap order: api@repo:feat/login, api@repo:main, web@repo:main
+        assert_eq!(
+            keys,
+            vec!["api@repo:feat/login", "api@repo:main", "web@repo:main"]
+        );
+        // A script segment is part of the key, so it is a distinct reference.
+        let with_script = script_with_env(&[("A", "${ports.cache@repo:main:dev}")]);
+        let refs = collect_external_port_refs(&with_script, None).unwrap();
+        assert_eq!(refs[0].key(), "cache@repo:main:dev");
+        // A malformed reference surfaces as an error.
+        let bad = script_with_env(&[("A", "${ports.api@repo}")]);
+        let err = collect_external_port_refs(&bad, None).unwrap_err();
+        assert!(err.contains("expected"), "{err}");
+    }
+
+    fn instance(
+        pid: u32,
+        script: &str,
+        project: &str,
+        branch: Option<&str>,
+        pairs: &[(&str, u16)],
+    ) -> LiveInstance {
+        LiveInstance {
+            pid,
+            script: script.to_string(),
+            project: Some(project.to_string()),
+            branch: branch.map(String::from),
+            ports: pm(pairs),
+        }
+    }
+
+    #[test]
+    fn test_pick_external_port_matches_display_name_and_slug() {
+        let reference = parse_external_port_key("api@repo:feat-login")
+            .unwrap()
+            .unwrap();
+        let instances = vec![instance(
+            1,
+            "dev",
+            "/tmp/repo/.git",
+            Some("feat/login"),
+            &[("api", 8080)],
+        )];
+        assert_eq!(pick_external_port(&reference, &instances).unwrap(), 8080);
+    }
+
+    #[test]
+    fn test_pick_external_port_matches_index_worktree_segment() {
+        // The index truncates `release/1.2` to the first DNS label,
+        // `release-1`; a reference copied from the UI URL uses that label.
+        let reference = parse_external_port_key("api@repo:release-1")
+            .unwrap()
+            .unwrap();
+        let instances = vec![instance(
+            1,
+            "dev",
+            "/tmp/repo/.git",
+            Some("release/1.2"),
+            &[("api", 8080)],
+        )];
+        assert_eq!(pick_external_port(&reference, &instances).unwrap(), 8080);
+    }
+
+    #[test]
+    fn test_pick_external_port_matches_project_name_case_insensitively() {
+        let reference = parse_external_port_key("api@Cinema_Ticket:main")
+            .unwrap()
+            .unwrap();
+        let instances = vec![instance(
+            1,
+            "dev",
+            "/tmp/cinema_ticket/.git",
+            Some("main"),
+            &[("api", 8080)],
+        )];
+        assert_eq!(pick_external_port(&reference, &instances).unwrap(), 8080);
+    }
+
+    #[test]
+    fn test_pick_external_port_filters_by_script() {
+        let reference = parse_external_port_key("api@repo:main:worker")
+            .unwrap()
+            .unwrap();
+        let instances = vec![
+            instance(1, "dev", "/tmp/repo/.git", Some("main"), &[("api", 8080)]),
+            instance(
+                2,
+                "worker",
+                "/tmp/repo/.git",
+                Some("main"),
+                &[("api", 8081)],
+            ),
+        ];
+        assert_eq!(pick_external_port(&reference, &instances).unwrap(), 8081);
+        let reference = parse_external_port_key("api@repo:main:api")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            pick_external_port_detailed(&reference, &instances),
+            Err(PickFailure::NoInstance)
+        );
+    }
+
+    #[test]
+    fn test_pick_external_port_no_instance_errors() {
+        let reference = parse_external_port_key("api@repo:main").unwrap().unwrap();
+        let err = pick_external_port(&reference, &[]).unwrap_err();
+        assert!(err.contains("running fog instance"), "{err}");
+        assert!(err.contains("--port api@repo:main=PORT"), "{err}");
+        assert!(err.contains(":script"), "{err}");
+        assert_eq!(
+            pick_external_port_detailed(&reference, &[]),
+            Err(PickFailure::NoInstance)
+        );
+        let script = parse_external_port_key("api@repo:main:dev")
+            .unwrap()
+            .unwrap();
+        let err = pick_external_port(&script, &[]).unwrap_err();
+        assert!(err.contains("repo:main:dev"), "{err}");
+    }
+
+    #[test]
+    fn test_pick_external_port_missing_name_lists_available() {
+        let reference = parse_external_port_key("db@repo:main").unwrap().unwrap();
+        let instances = vec![instance(
+            1,
+            "dev",
+            "/tmp/repo/.git",
+            Some("main"),
+            &[("api", 8080), ("web", 5173)],
+        )];
+        let err = pick_external_port(&reference, &instances).unwrap_err();
+        assert!(err.contains("api, web"), "{err}");
+    }
+
+    #[test]
+    fn test_pick_external_port_disagreement_errors() {
+        let reference = parse_external_port_key("api@repo:main").unwrap().unwrap();
+        let instances = vec![
+            instance(1, "dev", "/tmp/repo/.git", Some("main"), &[("api", 8080)]),
+            instance(2, "alt", "/tmp/repo/.git", Some("main"), &[("api", 8081)]),
+        ];
+        let err = pick_external_port(&reference, &instances).unwrap_err();
+        assert!(err.contains("ambiguous"), "{err}");
+        assert!(err.contains("8080") && err.contains("8081"), "{err}");
+    }
+
+    #[test]
+    fn test_pick_external_port_same_value_ok() {
+        let reference = parse_external_port_key("api@repo:main").unwrap().unwrap();
+        let instances = vec![
+            instance(1, "dev", "/tmp/repo/.git", Some("main"), &[("api", 8080)]),
+            instance(2, "alt", "/tmp/repo/.git", Some("main"), &[("api", 8080)]),
+        ];
+        assert_eq!(pick_external_port(&reference, &instances).unwrap(), 8080);
+    }
+
+    #[test]
+    fn test_apply_external_refs_keeps_override() {
+        let reference = parse_external_port_key("api@repo:main").unwrap().unwrap();
+        let instances = vec![instance(
+            1,
+            "dev",
+            "/tmp/repo/.git",
+            Some("main"),
+            &[("api", 8080)],
+        )];
+        let mut ports = pm(&[("api@repo:main", 9999)]);
+        assert_eq!(
+            apply_external_refs(std::slice::from_ref(&reference), &instances, &mut ports).unwrap(),
+            0
+        );
+        assert_eq!(ports["api@repo:main"], 9999);
+        let mut empty = pm(&[]);
+        assert_eq!(
+            apply_external_refs(&[reference], &instances, &mut empty).unwrap(),
+            1
+        );
+        assert_eq!(empty["api@repo:main"], 8080);
     }
 }

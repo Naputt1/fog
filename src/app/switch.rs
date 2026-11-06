@@ -266,6 +266,24 @@ impl App {
             &mut port_map,
             self.no_share,
         );
+        // Resolve `${ports.<name>@<repo>:<branch>[:<script>]}` against live
+        // instances (cold-starting a `:script` target when needed) before
+        // building, so a missing dependency aborts the switch while the
+        // current instance is still running.
+        if let Err(e) = crate::references::resolve(
+            script,
+            config.native_routes.as_ref(),
+            crate::references::Owner {
+                config_dir: &config_dir,
+                project: self.ipc_state.project.as_deref(),
+                branch: branch_for_ports.as_deref(),
+                script_name: &script_name,
+            },
+            &mut port_map,
+            &mut Vec::new(),
+        ) {
+            return Err(format!("switch worktree: {e}"));
+        }
 
         // Build the new runtime *before* tearing down the old one, so a
         // build failure doesn't leave the UI empty.

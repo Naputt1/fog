@@ -137,6 +137,11 @@ pub struct IpcState {
     pub handoff_all: Arc<AtomicBool>,
     /// Whether this instance was started with `--no-share`.
     pub no_share: bool,
+    /// PID of the instance that cold-started this one through a cross-instance
+    /// port reference, if any.
+    pub autostarted_by: Option<u32>,
+    /// Identity (`repo:branch:script`) of that parent, for display.
+    pub autostarted_by_label: Option<String>,
     /// Per-service control request published by the IPC thread for the App to
     /// execute; cleared by the App once it has been taken.
     pub control_req: Arc<Mutex<Option<ServiceActionRequest>>>,
@@ -181,6 +186,8 @@ impl IpcState {
             handoff_done: Arc::new(AtomicBool::new(false)),
             handoff_all: Arc::new(AtomicBool::new(false)),
             no_share,
+            autostarted_by: None,
+            autostarted_by_label: None,
             control_req: Arc::new(Mutex::new(None)),
             control_result: Arc::new(Mutex::new(None)),
             control_done: Arc::new(AtomicBool::new(false)),
@@ -226,6 +233,12 @@ pub struct StatusResponse {
     /// Whether this instance was started with `--no-share`.
     #[serde(default)]
     pub no_share: bool,
+    /// PID of the instance that cold-started this one, if any.
+    #[serde(default)]
+    pub autostarted_by: Option<u32>,
+    /// Identity (`repo:branch:script`) of that parent, for display.
+    #[serde(default)]
+    pub autostarted_by_label: Option<String>,
     /// Whether every service has started (no service still waiting on
     /// dependencies or in its startup grace). `false` for older instances.
     #[serde(default)]

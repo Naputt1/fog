@@ -222,6 +222,16 @@ pub(crate) fn remember(config_dir: &Path) {
     let _ = remember_in(&registry_path(), &dir);
 }
 
+/// Every registered config dir that still exists, for cross-instance port
+/// resolution: a stopped project can be identified (and cold-started) by its
+/// registered config dirs.
+pub(crate) fn registered_config_dirs() -> Vec<PathBuf> {
+    load()
+        .into_iter()
+        .map(|project| PathBuf::from(project.path))
+        .collect()
+}
+
 /// Adds a user-picked config dir to the registry.
 pub(super) fn add(raw: &str) -> Result<RegisteredProject, String> {
     add_to(&registry_path(), raw)

@@ -28,7 +28,7 @@ See [`fog.schema.json`](https://github.com/Naputt1/fog/blob/main/fog.schema.json
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `scripts` | `object` | — | Named profiles; each defines its own services and proxy |
-| `ports` | `object` | — | Allocatable ports for templating (`${ports.<name>}`); `0` = random free port. Override per run with `--port <name>=<port>` |
+| `ports` | `object` | — | Allocatable ports for templating (`${ports.<name>}`); `0` = random free port. Override per run with `--port <name>=<port>`. Use `${ports.<name>@<repo>:<branch>[:<script>]}` to read a port from another running instance (see [Cross-instance ports](#cross-instance-ports)) |
 | `native_routes` | `array` | — | Explicit Traefik file-provider routes for native services |
 | `max_scrollback` | `integer` | `2000` | Maximum scrollback lines per terminal (min: 100) |
 | `sidebar` | `object` | `null` | Sidebar width constraints |
@@ -38,7 +38,7 @@ See [`fog.schema.json`](https://github.com/Naputt1/fog/blob/main/fog.schema.json
 | `router` | `object` | `null` | Central Traefik router (host-global). See [Router & DNS](/router) |
 | `dnsmasq` | `object` | `null` | Wildcard DNS setup. See [Router & DNS](/router) |
 
-Run-time port overrides: `fog <script> --port <name>=<port>` (repeatable) replaces an allocated port for one run without editing `fog.json`; `--port <name>=0` re-randomizes it. A name not declared in `ports` is added for that run. Overrides apply before templating, so every `${ports.<name>}` consumer — service `cmd`/`env`/health checks, endpoint routes and native routes — resolves to the overridden value.
+Run-time port overrides: `fog <script> --port <name>=<port>` (repeatable) replaces an allocated port for one run without editing `fog.json`; `--port <name>=0` re-randomizes it. A name not declared in `ports` is added for that run. Overrides apply before templating, so every `${ports.<name>}` consumer — service `cmd`/`env`/health checks, endpoint routes and native routes — resolves to the overridden value. A cross-instance key (`--port api@my-repo:main=4000`, or `--port api@my-repo:main:dev=4000` with a script segment) pins that reference for one run and skips lookup and auto-start.
 
 ## Scripts
 
@@ -236,6 +236,72 @@ When fog runs a script in a git worktree (via `--branch` or an in-place worktree
 A branch like `feat/book` sanitizes to `feat-book` (`feat/book.acme` would be an invalid DNS hostname). Use `${branch_raw}` only for display/logging — never for `Host()` or DNS. If the slug would be empty or exceed 63 chars (DNS label limit) fog errors.
 
 When the script is not in a git worktree (or the worktree is detached), `FOG_BRANCH` is unset; use `:-` fallbacks (e.g. `${FOG_BRANCH:-main}`) in compose files to keep them usable outside fog.
+
+### Cross-instance ports
+
+`${ports.<name>}` reads this instance's own allocation. A service can also read a port owned by a **different fog instance** — another repo, or another branch of this one — with:
+
+```
+${ports.<name>@<repo>:<branch>[:<script>]}
+```
+
+- `<repo>` is the project name shown by the index and its URLs (the lowercased repository directory name; matching is case-insensitive), the repository directory name itself, or the exact git-common-dir identity.
+- `<branch>` accepts the raw branch, its DNS-safe slug, or the short worktree segment the index uses (`feat/login`, `feat-login` and `feat-login` all match; `release/1.2` also matches `release-1`, the segment shown in the UI URL). `${branch}` / `${FOG_BRANCH}` / `${FOG_BRANCH_SLUG}` inside the atom expand to the **referencing** instance's branch slug (and `${branch_raw}` / `${FOG_BRANCH_RAW}` to the raw name), which is what a per-branch stack usually wants. `?` means whatever the target repo currently has checked out in its main worktree — useful when two repos do not share branch names.
+- `<name>` is a port declared in that instance's `ports` map. Port names may not contain `@` or `:`; both mark cross-instance references.
+- `<script>` is optional. It narrows the reference to one script of that project+branch (useful when several scripts run there) and authorizes fog to **start** that script when no matching instance is running.
+
+For example, a frontend on branch `feat/login` reads the backend repo's API port for the same branch — and the backend stays on `main` rather than tracking the frontend branch — with:
+
+```json
+{
+  "name": "web",
+  "path": ".",
+  "cmd": "npm run dev",
+  "env": {
+    "SAME_BRANCH_API": "http://localhost:${ports.api@cinema_ticket:${branch}:dev}",
+    "BACKEND_API": "http://localhost:${ports.api@cinema_ticket:?:dev}"
+  }
+}
+```
+
+References resolve once, at startup, by querying running instances over fog's local IPC sockets. A reference never needs a top-level `ports` map of its own.
+
+Without `:script`, the target must already be running. With it, a stopped target is started for you when all of these hold:
+
+- the project is registered — either run it once with fog or add it in the index UI's launch picker;
+- the branch has a git worktree (`git worktree list`) in that repository;
+- that worktree's `fog.json` exists at the same relative config location and declares both the script and the referenced port.
+
+fog then launches `fog --config <worktree>/fog.json <script>` detached, waits until the new instance reports that every service has started, and reads the value from the new instance. Services that declare a health check count as started only after their startup grace, so a slow compile finishes before your services begin; a service without a health check counts as started as soon as it spawns, so add a health check (or a service that binds before it exits) when the dependent needs a socket that is already listening. (The wait is per instance, not per service: fog does not gate your `depends_on` on one specific service of another repo.) The started instance keeps running after the calling instance exits; the startup log records `started <repo>:<branch>:<script> (pid …)` and every resolved value as `resolved 'ports.<name>@…' = <port> (pid …)`, visible in `daemon.log` and `fog logs <pid>`. If the started instance fails, the caller's error includes the last `error:` line from that instance's `daemon.log`, so a cycle or a failed build is readable without opening the log. Several references to the same target start it once, and a per-target lock file in the temp directory keeps two parents from racing — the OS releases the lock if a parent dies mid-start, so a crash cannot wedge the project.
+
+Instances started this way record their parent. `fog ls` shows it in the `started-by` column (`<repo>:<branch>:<script> (pid)`), and `fog kill <parent>` prints a line for each auto-started instance it leaves running:
+
+```text
+b:main:dev (pid 50699) was started by this instance and is still running; fog kill 50699
+```
+
+Add `--with-dependents` to stop them along with the parent, or kill them individually.
+
+Startup fails with an actionable message when:
+
+- no instance of that repo+branch is running and the reference has no `:script` (start it first, add `:script`, or pin the value);
+- the project is not registered, the branch has no worktree, the branch token is ambiguous, `?` finds a detached main worktree, the script does not exist, or it does not declare that port (available names are listed);
+- the started instance exits or does not become ready in time (its log directory is shown);
+- the reference would re-start an instance already in the current start chain (a cycle such as `a:main:dev` → `b:main:web` → `a:main:dev`);
+- the instance runs but does not declare that port (its declared ports are listed);
+- two matching instances (different scripts) disagree on the value (both are listed).
+
+To break a dependency, choose a script, or pin a value for one run, override the reference key exactly like a normal port:
+
+```sh
+fog dev --port api@cinema_ticket:feat-login=4000
+fog dev --port api@cinema_ticket:feat-login:worker=4000
+fog dev --port 'api@cinema_ticket:${branch}:worker=4000'   # template key verbatim
+```
+
+An override wins over both live lookup and auto-start, so it also works while the target is stopped. A key written with the expanded branch (as above) matches a config that uses `${branch}`. A cross-instance override must be a fixed port: `=0` is rejected, because the parent cannot re-randomize a port it does not own — a live target keeps its value and a cold-started target allocates its own. `fog.json` on the target still says `ports: { api: 0 }`.
+
+`@` is reserved in port names. Values are captured at startup: if the owning instance later re-allocates, restart the referencing script. Cross-instance references are not used for [shared-port adoption](#concurrent-mode--sharing-services), which stays scoped to the same project+script+branch.
 
 ### Health check
 

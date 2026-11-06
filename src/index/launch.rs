@@ -4,7 +4,7 @@
 use hyper::{Response, StatusCode};
 use std::io;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use super::{
     RespBody, api_error, api_not_found, container_labels, discover_fog_instances, json_response,
@@ -315,8 +315,6 @@ struct LaunchBody {
 
 /// How long a launched daemon may take to become ready before we give up.
 const LAUNCH_READY_TIMEOUT_SECS: u64 = 60;
-/// How long we poll for readiness (ms).
-const LAUNCH_READY_POLL_MS: u64 = 100;
 
 /// Resolves a launch request's effective config path and validates the script
 /// against the config's `scripts`, returning a human-readable error message on
@@ -360,47 +358,13 @@ fn resolve_launch_target(body: &LaunchBody) -> Result<PathBuf, String> {
 /// socket serves a status reply, and returns its PID. Returns `io::Error` on
 /// spawn failure or if the child exits / never becomes ready during startup.
 fn spawn_detached(config_path: &std::path::Path, script: &str) -> io::Result<u32> {
-    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("fog"));
-    let mut cmd = Command::new(&exe);
-    cmd.arg("--config")
-        .arg(config_path)
-        .arg(script)
-        .env("FOG_DAEMON_CHILD", "1")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    // Detach from the controlling terminal / session, exactly like
-    // `daemonize`.
-    crate::process::detach_command(&mut cmd);
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| io::Error::other(format!("could not start detached fog: {e}")))?;
-    let pid = child.id();
-
-    // Wait until the daemon's socket serves a status reply.
-    let socket = crate::ipc::socket_path(pid);
-    let deadline =
-        std::time::Instant::now() + std::time::Duration::from_secs(LAUNCH_READY_TIMEOUT_SECS);
-    loop {
-        if crate::ipc::query_status(&socket).is_ok() {
-            break;
-        }
-        if child.try_wait().ok().flatten().is_some() {
-            return Err(io::Error::other(format!(
-                "detached fog '{script}' (pid {pid}) exited during startup; logs: {}",
-                crate::ipc::instance_log_dir(pid).display()
-            )));
-        }
-        if std::time::Instant::now() >= deadline {
-            return Err(io::Error::other(format!(
-                "detached fog '{script}' (pid {pid}) did not become ready within {}s; logs: {}",
-                LAUNCH_READY_TIMEOUT_SECS,
-                crate::ipc::instance_log_dir(pid).display()
-            )));
-        }
-        std::thread::sleep(std::time::Duration::from_millis(LAUNCH_READY_POLL_MS));
-    }
-    Ok(pid)
+    crate::ipc::spawn_detached(
+        config_path,
+        script,
+        None,
+        &[],
+        std::time::Duration::from_secs(LAUNCH_READY_TIMEOUT_SECS),
+    )
 }
 
 /// Handles `POST /api/launch`.

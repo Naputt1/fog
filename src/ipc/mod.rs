@@ -1,5 +1,6 @@
 use std::io;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 const READ_TIMEOUT_SECS: u64 = 5;
@@ -78,6 +79,120 @@ pub fn instance_log_dir(pid: u32) -> PathBuf {
 /// Returns the socket path for the current process.
 pub fn current_socket_path() -> PathBuf {
     socket_path(std::process::id())
+}
+
+/// Spawns `fog <script>` detached (mirroring `daemonize`), waits until the child
+/// reports that every service has started, and returns its PID. Returns
+/// `io::Error` on spawn failure or if the child exits / never becomes ready
+/// during startup.
+///
+/// `branch` is passed through as `--branch` when set; `extra_env` is added to
+/// the child's environment (used to carry the cross-instance start chain).
+pub fn spawn_detached(
+    config_path: &Path,
+    script: &str,
+    branch: Option<&str>,
+    extra_env: &[(&str, String)],
+    timeout: Duration,
+) -> io::Result<u32> {
+    const POLL_MS: u64 = 100;
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("fog"));
+    let mut cmd = Command::new(&exe);
+    cmd.arg("--config")
+        .arg(config_path)
+        .arg(script)
+        .env("FOG_DAEMON_CHILD", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if let Some(b) = branch {
+        cmd.arg("--branch").arg(b);
+    }
+    for (key, value) in extra_env {
+        cmd.env(key, value);
+    }
+    crate::process::detach_command(&mut cmd);
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| io::Error::other(format!("could not start fog '{script}': {e}")))?;
+    let pid = child.id();
+    let socket = socket_path(pid);
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match query_status(&socket) {
+            Ok(status) if status.started => return Ok(pid),
+            _ => {}
+        }
+        if child.try_wait().ok().flatten().is_some() {
+            return Err(io::Error::other(format!(
+                "fog '{script}' (pid {pid}) exited during startup: {}; logs: {}",
+                daemon_error_hint(pid).unwrap_or_else(|| "no error line in daemon.log".into()),
+                instance_log_dir(pid).display()
+            )));
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(io::Error::other(format!(
+                "fog '{script}' (pid {pid}) did not become ready within {}s: {}; logs: {}",
+                timeout.as_secs(),
+                daemon_error_hint(pid).unwrap_or_else(|| "no error line in daemon.log".into()),
+                instance_log_dir(pid).display()
+            )));
+        }
+        std::thread::sleep(Duration::from_millis(POLL_MS));
+    }
+}
+
+/// Last `error:` line from a daemon's log (falling back to its last non-empty
+/// line), so a failed startup reports the cause without opening the log.
+pub fn daemon_error_hint(pid: u32) -> Option<String> {
+    const TAIL_BYTES: usize = 64 * 1024;
+    let raw = std::fs::read_to_string(instance_log_dir(pid).join("daemon.log")).ok()?;
+    let tail = if raw.len() > TAIL_BYTES {
+        let mut start = raw.len() - TAIL_BYTES;
+        while !raw.is_char_boundary(start) {
+            start += 1;
+        }
+        &raw[start..]
+    } else {
+        &raw
+    };
+    tail.lines()
+        .rfind(|line| line.contains("error:"))
+        .or_else(|| tail.lines().rev().find(|line| !line.trim().is_empty()))
+        .map(clean_error_line)
+}
+
+/// Unwraps the `Error: Custom { kind: …, error: "…" }` debug form that a
+/// daemon's `main` prints for an `io::Error`, so hints read like the message
+/// the child actually failed with.
+fn clean_error_line(line: &str) -> String {
+    let line = line.trim();
+    if !line.starts_with("Error: Custom {") {
+        return line.to_string();
+    }
+    let Some(start) = line.find(", error: \"") else {
+        return line.to_string();
+    };
+    let rest = &line[start + ", error: \"".len()..];
+    let Some(end) = rest.rfind("\" }") else {
+        return line.to_string();
+    };
+    let mut out = String::new();
+    let mut chars = rest[..end].chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            match chars.next() {
+                Some('"') => out.push('"'),
+                Some('\\') => out.push('\\'),
+                Some('n') => out.push(' '),
+                Some(other) => out.push(other),
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out.trim().to_string()
 }
 
 /// Creates the per-user instance directory (if needed) and restricts it to the

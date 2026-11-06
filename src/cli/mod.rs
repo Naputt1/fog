@@ -87,6 +87,11 @@ struct Cli {
     #[arg(long)]
     force: bool,
 
+    /// Also stop instances that were cold-started by the target through a
+    /// cross-instance port reference. Only used with `fog kill`.
+    #[arg(long)]
+    with_dependents: bool,
+
     /// Only used with `fog logs`: print the captured output of this service
     /// instead of listing services. Without it, `fog logs` lists the
     /// available service names and their status.
@@ -494,6 +499,7 @@ struct InstanceRow {
     script: String,
     project: String,
     branch: String,
+    started_by: String,
     proxy: String,
     services: Vec<ServiceEntry>,
 }
@@ -532,11 +538,17 @@ fn cmd_ls() -> io::Result<()> {
                     .map(|p| crate::project::display_name(&p))
                     .unwrap_or_else(|| "-".to_string());
                 let branch = status.branch.unwrap_or_else(|| "-".to_string());
+                let started_by = match (status.autostarted_by, status.autostarted_by_label) {
+                    (Some(parent), Some(label)) => format!("{label} ({parent})"),
+                    (Some(parent), None) => parent.to_string(),
+                    (None, _) => "-".to_string(),
+                };
                 rows.push(InstanceRow {
                     pid: *pid,
                     script: status.script,
                     project,
                     branch,
+                    started_by,
                     proxy,
                     services,
                 });
@@ -566,15 +578,17 @@ fn cmd_ls() -> io::Result<()> {
     let w_script = rows.iter().map(|r| r.script.len()).max().unwrap_or(0);
     let w_project = rows.iter().map(|r| r.project.len()).max().unwrap_or(0);
     let w_branch = rows.iter().map(|r| r.branch.len()).max().unwrap_or(0);
+    let w_started_by = rows.iter().map(|r| r.started_by.len()).max().unwrap_or(0);
 
     let w_pid = max(w_pid, "pid");
     let w_script = max(w_script, "script");
     let w_project = max(w_project, "project");
     let w_branch = max(w_branch, "branch");
+    let w_started_by = max(w_started_by, "started-by");
 
     println!(
-        "{:>w_pid$}  {:<w_script$}  {:<w_project$}  {:<w_branch$}  proxy",
-        "pid", "script", "project", "branch"
+        "{:>w_pid$}  {:<w_script$}  {:<w_project$}  {:<w_branch$}  {:<w_started_by$}  proxy",
+        "pid", "script", "project", "branch", "started-by"
     );
     let color = color_enabled();
     for row in rows {
@@ -583,8 +597,8 @@ fn cmd_ls() -> io::Result<()> {
             None => row.proxy.clone(),
         };
         println!(
-            "{:>w_pid$}  {:<w_script$}  {:<w_project$}  {:<w_branch$}  {proxy}",
-            row.pid, row.script, row.project, row.branch
+            "{:>w_pid$}  {:<w_script$}  {:<w_project$}  {:<w_branch$}  {:<w_started_by$}  {proxy}",
+            row.pid, row.script, row.project, row.branch, row.started_by
         );
         if !row.services.is_empty() {
             for line in service_table(&row.services, "  ", color) {
@@ -1246,7 +1260,33 @@ fn cmd_kill(pid: Option<u32>, all: bool, cli: &Cli) -> io::Result<()> {
     }
 
     let targets = resolve_targets(&instances, pid, all, cli, "kill");
-    for (target_pid, path) in &targets {
+
+    // Snapshot identity before anything stops: sockets disappear with their
+    // process, and the auto-start links are needed to explain what remains.
+    let mut statuses: HashMap<u32, ipc::StatusResponse> = HashMap::new();
+    let mut socket_paths: HashMap<u32, std::path::PathBuf> = HashMap::new();
+    for (instance_pid, path) in &instances {
+        if let Ok(status) = ipc::query_status(path) {
+            statuses.insert(*instance_pid, status);
+            socket_paths.insert(*instance_pid, path.clone());
+        }
+    }
+
+    let mut to_kill: Vec<(u32, std::path::PathBuf)> = targets.clone();
+    if cli.with_dependents {
+        for (target_pid, _) in &targets {
+            for child in descendants(*target_pid, &statuses) {
+                if let Some(path) = socket_paths.get(&child)
+                    && !to_kill.iter().any(|(p, _)| p == &child)
+                {
+                    to_kill.push((child, path.clone()));
+                }
+            }
+        }
+    }
+
+    let killed: Vec<u32> = to_kill.iter().map(|(p, _)| *p).collect();
+    for (target_pid, path) in &to_kill {
         let target_pid = *target_pid;
         if stop_instance(target_pid, path, cli.force, true) {
             println!("stopped fog instance {target_pid}");
@@ -1255,9 +1295,77 @@ fn cmd_kill(pid: Option<u32>, all: bool, cli: &Cli) -> io::Result<()> {
         }
     }
 
+    // Instances this run created indirectly and chose to keep: name them so
+    // they do not linger invisibly behind their parent.
+    for (instance_pid, path) in ipc::find_instances()? {
+        if killed.contains(&instance_pid) {
+            continue;
+        }
+        let Ok(status) = ipc::query_status(&path) else {
+            continue;
+        };
+        let Some(parent) = status.autostarted_by else {
+            continue;
+        };
+        if !chain_reaches(parent, &killed, &statuses) {
+            continue;
+        }
+        println!(
+            "{} (pid {instance_pid}) was started by this instance and is still running; \
+             fog kill {instance_pid}",
+            instance_label(&status)
+        );
+    }
+
     // Tear down the index server if no instance remains. Best-effort.
     crate::index::maybe_terminate_if_no_instances(None);
     Ok(())
+}
+
+/// Every instance transitively cold-started by `root`, from the pre-kill
+/// snapshot.
+fn descendants(root: u32, statuses: &HashMap<u32, ipc::StatusResponse>) -> Vec<u32> {
+    let mut found = Vec::new();
+    let mut queue = vec![root];
+    while let Some(parent) = queue.pop() {
+        for (instance_pid, status) in statuses {
+            if status.autostarted_by == Some(parent) && !found.contains(instance_pid) {
+                found.push(*instance_pid);
+                queue.push(*instance_pid);
+            }
+        }
+    }
+    found
+}
+
+/// Whether `parent` is one of `killed`, following auto-start links through the
+/// pre-kill snapshot (so killed parents still link to their children).
+fn chain_reaches(
+    parent: u32,
+    killed: &[u32],
+    statuses: &HashMap<u32, ipc::StatusResponse>,
+) -> bool {
+    let mut current = Some(parent);
+    while let Some(instance_pid) = current {
+        if killed.contains(&instance_pid) {
+            return true;
+        }
+        current = statuses
+            .get(&instance_pid)
+            .and_then(|status| status.autostarted_by);
+    }
+    false
+}
+
+/// `repo:branch:script` label for an instance, for human-facing messages.
+fn instance_label(status: &ipc::StatusResponse) -> String {
+    let repo = status
+        .project
+        .as_deref()
+        .map(crate::project::display_name)
+        .unwrap_or_else(|| "-".to_string());
+    let branch = status.branch.as_deref().unwrap_or("-");
+    format!("{repo}:{branch}:{}", status.script)
 }
 
 fn cmd_restart(pid: Option<u32>, all: bool, cli: &Cli) -> io::Result<()> {
@@ -1333,44 +1441,7 @@ fn spawn_instance_detached(
     script: &str,
     branch: Option<&str>,
 ) -> io::Result<u32> {
-    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("fog"));
-    let mut cmd = Command::new(&exe);
-    cmd.arg("--config")
-        .arg(config_path)
-        .arg(script)
-        .env("FOG_DAEMON_CHILD", "1")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    if let Some(b) = branch {
-        cmd.arg("--branch").arg(b);
-    }
-    crate::process::detach_command(&mut cmd);
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| io::Error::other(format!("could not restart fog '{script}': {e}")))?;
-    let pid = child.id();
-    let socket = ipc::socket_path(pid);
-    let deadline = std::time::Instant::now() + DAEMON_READY_TIMEOUT;
-    loop {
-        if ipc::query_status(&socket).is_ok() {
-            return Ok(pid);
-        }
-        if child.try_wait().ok().flatten().is_some() {
-            return Err(io::Error::other(format!(
-                "restarted fog '{script}' (pid {pid}) exited during startup; logs: {}",
-                ipc::instance_log_dir(pid).display()
-            )));
-        }
-        if std::time::Instant::now() >= deadline {
-            return Err(io::Error::other(format!(
-                "restarted fog '{script}' (pid {pid}) did not become ready within {}s; logs: {}",
-                DAEMON_READY_TIMEOUT.as_secs(),
-                ipc::instance_log_dir(pid).display()
-            )));
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
+    crate::ipc::spawn_detached(config_path, script, branch, &[], DAEMON_READY_TIMEOUT)
 }
 
 /// Normalizes a directory for comparison: canonicalized when possible,
@@ -2312,6 +2383,15 @@ fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>) -> io::Res
     );
     ipc_state.config_dir = Some(config_dir.to_string_lossy().into_owned());
     ipc_state.config_path = Some(config_path.to_string_lossy().into_owned());
+    // Cold-start provenance: `references::resolve` passes the parent's pid and
+    // identity when it spawns this instance, so `fog ls` and `fog kill` can
+    // show and optionally stop instances this one caused to start.
+    ipc_state.autostarted_by = std::env::var(crate::references::AUTOSTART_BY_ENV)
+        .ok()
+        .and_then(|v| v.trim().parse().ok());
+    ipc_state.autostarted_by_label = std::env::var(crate::references::AUTOSTART_PARENT_ENV)
+        .ok()
+        .filter(|v| !v.trim().is_empty());
     let ipc_state = Arc::new(ipc_state);
 
     // Restore the terminal on panic (interactive runs only). Installed before
@@ -2400,8 +2480,17 @@ fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>) -> io::Res
     };
     note_phase(&mut progress, "allocating ports");
     let mut port_specs = config.ports.clone().unwrap_or_default();
-    let ports_defined = config.ports.is_some() || !overrides.is_empty();
-    port_specs.extend(overrides);
+    // Cross-instance overrides are values, not allocations: they must not be
+    // probed or re-bound locally, so keep them out of `allocate_ports`.
+    let mut external_overrides = std::collections::HashMap::new();
+    for (key, port) in overrides {
+        if crate::ports::parse_external_port_key(&key).is_some() {
+            external_overrides.insert(key, port);
+        } else {
+            port_specs.insert(key, port);
+        }
+    }
+    let ports_defined = config.ports.is_some() || !port_specs.is_empty();
 
     let mut port_map = if !port_specs.is_empty() {
         match crate::ports::allocate_ports(&port_specs) {
@@ -2427,6 +2516,47 @@ fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>) -> io::Res
         for (name, port) in target_ports {
             port_map.insert(name, port);
         }
+    }
+    // An explicit `--port api@repo:branch[=PORT]` wins over lookup and
+    // auto-start; references already present in `port_map` are left untouched.
+    port_map.extend(external_overrides);
+    // Adopt the live ports of a sibling that already owns a shared service, so
+    // dependent services resolve `${ports.*}` to the borrowed resource's real
+    // port instead of this instance's freshly allocated one. Adoption and
+    // cross-instance resolution run before validation so every template sees
+    // its final port.
+    let owned_shared = crate::runtime::adopt_shared_ports(
+        script,
+        name,
+        &config_dir,
+        project.as_deref(),
+        branch_for_ports.as_deref(),
+        &mut port_map,
+        cli.no_share,
+    );
+    // Resolve `${ports.<name>@<repo>:<branch>[:<script>]}` against live fog
+    // instances; a `:script` reference may start its target when it is not
+    // running. An explicit `--port <key>=PORT` already in `port_map` wins.
+    if let Err(e) = crate::references::resolve(
+        script,
+        config.native_routes.as_ref(),
+        crate::references::Owner {
+            config_dir: &config_dir,
+            project: project.as_deref(),
+            branch: branch_for_ports.as_deref(),
+            script_name: name,
+        },
+        &mut port_map,
+        &mut startup_messages,
+    ) {
+        if !detached {
+            let _ = execute!(stdout(), LeaveAlternateScreen, DisableMouseCapture);
+            let _ = disable_raw_mode();
+        }
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("error: {e}"),
+        ));
     }
     // Validate native_routes and ensure ${ports.*} has a top-level `ports` map
     if let Some(routes) = &config.native_routes
@@ -2467,18 +2597,6 @@ fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>) -> io::Res
             format!("error: {e}"),
         ));
     }
-    // Adopt the live ports of a sibling that already owns a shared service, so
-    // dependent services resolve `${ports.*}` to the borrowed resource's real
-    // port instead of this instance's freshly allocated one.
-    let owned_shared = crate::runtime::adopt_shared_ports(
-        script,
-        name,
-        &config_dir,
-        project.as_deref(),
-        branch_for_ports.as_deref(),
-        &mut port_map,
-        cli.no_share,
-    );
     // Publish allocated ports + native routes to IPC so the index server can synthesize
     // native ApiService entries for the Services UI (which otherwise only sees docker).
     {
@@ -2919,6 +3037,9 @@ fn daemonize(script: &str) -> io::Result<()> {
                 "{} detached fog '{script}' (pid {pid}) exited during startup",
                 error_label()
             );
+            if let Some(hint) = ipc::daemon_error_hint(pid) {
+                eprintln!("  {hint}");
+            }
             eprintln!("  logs: {}", ipc::instance_log_dir(pid).display());
             std::process::exit(1);
         }
@@ -2929,6 +3050,9 @@ fn daemonize(script: &str) -> io::Result<()> {
                 error_label(),
                 DAEMON_READY_TIMEOUT.as_secs()
             );
+            if let Some(hint) = ipc::daemon_error_hint(pid) {
+                eprintln!("  {hint}");
+            }
             eprintln!("  logs: {}", ipc::instance_log_dir(pid).display());
             std::process::exit(1);
         }
@@ -3417,8 +3541,42 @@ mod tests {
             ports: Default::default(),
             native_routes: Vec::new(),
             no_share: false,
+            autostarted_by: None,
+            autostarted_by_label: None,
             started: true,
         }
+    }
+
+    #[test]
+    fn test_kill_dependents_follow_autostart_links() {
+        let mut parent = test_status(Vec::new(), None);
+        parent.pid = 10;
+        let mut child = test_status(Vec::new(), None);
+        child.pid = 11;
+        child.autostarted_by = Some(10);
+        child.autostarted_by_label = Some("a:main:web".to_string());
+        let mut grandchild = test_status(Vec::new(), None);
+        grandchild.pid = 12;
+        grandchild.autostarted_by = Some(11);
+        let mut unrelated = test_status(Vec::new(), None);
+        unrelated.pid = 13;
+        let map: HashMap<u32, ipc::StatusResponse> =
+            [(10, parent), (11, child), (12, grandchild), (13, unrelated)]
+                .into_iter()
+                .collect();
+
+        let mut found = descendants(10, &map);
+        found.sort_unstable();
+        assert_eq!(found, vec![11, 12]);
+        assert!(chain_reaches(11, &[10], &map));
+        assert!(chain_reaches(12, &[10], &map));
+        assert!(!chain_reaches(13, &[10], &map));
+        assert!(!chain_reaches(10, &[99], &map));
+        assert_eq!(
+            instance_label(map.get(&11).unwrap()),
+            "-:-:dev",
+            "test_status leaves project/branch unset"
+        );
     }
 
     fn svc(name: &str, running: bool, health: &str) -> ipc::ServiceStatus {

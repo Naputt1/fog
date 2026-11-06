@@ -173,6 +173,7 @@ fog <script> [OPTIONS]        # run a script (e.g. fog dev)
 fog ls                        # list running instances, project/branch and service status
 fog restart [pid]             # restart a running instance
 fog kill [pid]                # gracefully shut down
+fog kill [pid] --with-dependents  # also stop instances it cold-started for cross-instance ports
 fog kill --all                # every instance from this config (or every instance, outside a fog.json dir)
 fog kill [pid] --force        # escalate SIGTERM → SIGKILL for a wedged instance
 fog logs [pid]                # list services and their status
@@ -195,6 +196,7 @@ instance), `2` a usage error (bad flag, unknown script).
 | `--no-share`             | Ignore `share:`/`reuse:` — start fresh even when a healthy sibling could be borrowed                            |
 | `--all`                  | With `fog kill`/`fog restart`: apply to every matching instance (conflicts with `PID`)                          |
 | `--force`                | With `fog kill`/`fog restart`: escalate to SIGTERM then SIGKILL for a wedged instance                           |
+| `--with-dependents`      | With `fog kill`: also stop instances it cold-started through cross-instance port references                     |
 | `-s`, `--service <NAME>` | With `fog logs`: show one service instead of listing (`daemon` and `proxy` included)                            |
 | `--head <N\|-N>`         | With `fog logs -s`: keep the first `N` lines, or all but the last `N` with `-N`                                 |
 | `--tail <N\|-N\|+N>`     | With `fog logs -s`: keep the last `N` lines, or from line `N` to the end with `+N`                              |
@@ -203,7 +205,7 @@ instance), `2` a usage error (bad flag, unknown script).
 | `-v`, `--verbose`        | Print informational setup output (DNS, router, index, ports, native routes); warnings always print              |
 | `--completions <SHELL>`  | Print bash/zsh/fish completions                                                                                 |
 
-`fog ls` prints one row per instance — `pid script project branch proxy` — with a `service`/`status` sub-table beneath each (`healthy`, `starting`, `unhealthy`, `unknown`, or `stopped`).
+`fog ls` prints one row per instance — `pid script project branch started-by proxy` — with a `service`/`status` sub-table beneath each (`healthy`, `starting`, `unhealthy`, `unknown`, or `stopped`). `started-by` names the parent that auto-started an instance for a cross-instance port reference, so a cold-started stack is visible rather than orphaned; `fog kill <parent>` warns about such instances and `--with-dependents` stops them too.
 
 Each instance exposes a Unix socket at `$TMPDIR/fog-<pid>.sock`. `fog ls` and `fog kill` discover it there. Pass a PID when multiple instances run.
 
@@ -213,7 +215,7 @@ Override an allocated port for one run without editing `fog.json`:
 fog dev --port api=4000 --port web=0   # pin api, re-randomize web
 ```
 
-`--port` is repeatable and applies before `${ports.*}` templating, so services, endpoint routes and native routes all use the overridden value. A name not declared in the config's `ports` map is added for that run.
+`--port` is repeatable and applies before `${ports.*}` templating, so services, endpoint routes and native routes all use the overridden value. A name not declared in the config's `ports` map is added for that run. A cross-instance key such as `--port api@my-repo:main=4000` pins that reference (fixed ports only — `=0` is rejected, since the parent does not own that port); with a script segment (`--port api@my-repo:main:dev=4000`) it also skips starting the target.
 
 Docs: [https://naputt1.github.io/fog/](https://naputt1.github.io/fog/) for configuration, proxy, themes, keybindings, architecture and troubleshooting.
 
