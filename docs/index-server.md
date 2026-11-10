@@ -189,7 +189,9 @@ still reports one dir's scripts, branch and worktrees for scripts and tools):
   branches of the same repo (discovered from running fog instances' config dirs
   plus docker compose `working_dir` labels) appear under a single project named
   after the repo, each with its git worktrees and the scripts each worktree's
-  `fog.json` defines.
+  `fog.json` defines. Roots without a `fog.json` are skipped: the picker always
+  launches `<dir>/fog.json`, so an instance started with `-c other.json` is not
+  a launchable project.
 - `POST /api/launch` — body
   `{"config_dir":"/abs/path","script":"dev","branch":"feature-x"|null}`; spawns
   a detached fog daemon and waits until its IPC socket serves status, replying

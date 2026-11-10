@@ -192,11 +192,18 @@ pub(super) fn forget_from(path: &Path, raw: &str) -> Result<(), String> {
     })
 }
 
-/// The registered config dirs that still exist, in path order.
+/// The registered config dirs that still exist and can be launched, in path
+/// order.
 pub(super) fn load_existing_from(path: &Path) -> Vec<RegisteredProject> {
     load_from(path)
         .into_iter()
-        .filter(|p| Path::new(&p.path).is_dir())
+        .filter(|p| {
+            let dir = Path::new(&p.path);
+            // A dir without `fog.json` cannot be launched by the picker, so it
+            // is not a project — this drops entries left by instances started
+            // with `-c other.json`.
+            dir.is_dir() && dir.join("fog.json").is_file()
+        })
         .collect()
 }
 
@@ -210,6 +217,10 @@ pub(super) fn load() -> Vec<RegisteredProject> {
 
 /// Remembers a config dir that fog was started from or is running. Best-effort:
 /// the path may be `fog.json` itself, in which case its parent is stored.
+///
+/// Only dirs holding a `fog.json` are remembered: the launch picker starts
+/// projects from that file, so remembering an instance started with a custom
+/// `-c other.json` would only add an unlaunchable entry.
 pub(crate) fn remember(config_dir: &Path) {
     let Ok(canon) = config_dir.canonicalize() else {
         return;
@@ -219,6 +230,9 @@ pub(crate) fn remember(config_dir: &Path) {
     } else {
         canon
     };
+    if !dir.join("fog.json").is_file() {
+        return;
+    }
     let _ = remember_in(&registry_path(), &dir);
 }
 

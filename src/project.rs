@@ -97,6 +97,20 @@ pub fn fallback_identity(config_dir: &Path) -> Option<String> {
         .map(|c| c.to_string_lossy().into_owned())
 }
 
+/// Resolves an instance's project identity.
+///
+/// Prefers the git repository containing the config dir. A config kept outside
+/// its repository (e.g. `fog dev -c /tmp/override.json` pointing at a repo's
+/// worktree) has no git identity of its own, so this falls back to the repo of
+/// the first service working directory that is inside one — naming the
+/// instance after the repo it actually drives. Only a config with no repo at
+/// all (standalone/non-git) uses the config dir as its identity.
+pub fn identity(config_dir: &Path, service_paths: &[PathBuf]) -> Option<String> {
+    detect(config_dir)
+        .or_else(|| service_paths.iter().find_map(|path| detect(path)))
+        .or_else(|| fallback_identity(config_dir))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,6 +261,51 @@ mod tests {
         // name is its basename. A bare/rootless path falls back to itself.
         assert_eq!(display_name("/tmp/my-project"), "my-project");
         assert_eq!(display_name("fog"), "fog");
+    }
+
+    #[test]
+    fn test_identity_falls_back_to_service_repo() {
+        let git = Command::new("git").arg("--version").output();
+        if git.map(|o| !o.status.success()).unwrap_or(true) {
+            eprintln!("skipping: git not available");
+            return;
+        }
+
+        let base = std::env::temp_dir().join(format!("fog-identity-test-{}", std::process::id()));
+        let repo = base.join("retail-mobile-dashboard");
+        let config_dir = base.join("opencode");
+        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(&config_dir).unwrap();
+
+        let run = |dir: &Path, args: &[&str]| {
+            Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(args)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        };
+        run(&repo, &["init", "-q", "-b", "main"]);
+        run(&repo, &["config", "user.email", "test@example.com"]);
+        run(&repo, &["config", "user.name", "Test"]);
+        fs::write(repo.join("fog.json"), "{}").unwrap();
+        run(&repo, &["add", "fog.json"]);
+        run(&repo, &["commit", "-q", "-m", "init"]);
+
+        // The config lives outside any repo; the repo comes from its service.
+        let got = identity(&config_dir, &[repo.clone()]);
+        assert_eq!(got, detect(&repo), "service repo should supply identity");
+
+        // Without a repo anywhere, the config dir itself is the identity.
+        let empty = base.join("standalone");
+        fs::create_dir_all(&empty).unwrap();
+        assert_eq!(
+            identity(&empty, &[]),
+            empty.canonicalize().ok().map(|c| c.to_string_lossy().into_owned())
+        );
+
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]

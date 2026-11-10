@@ -2315,11 +2315,21 @@ fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>) -> io::Res
         .to_path_buf();
 
     // Every start — TUI, daemon or worktree switch — keeps the project in the
-    // index's "known project" list after it stops.
+    // index's "known project" list after it stops. Only launchable configs
+    // (those with a `fog.json`) are remembered: the picker launches via that
+    // file, so a `-c some-other.json` dir would only show up unlaunchable.
     crate::index::registry::remember(&config_dir);
 
-    let project = crate::project::detect(&config_dir)
-        .or_else(|| crate::project::fallback_identity(&config_dir));
+    // A config kept outside its repo (e.g. `-c /tmp/override.json` pointing at
+    // a repo worktree) takes the identity of the repo its services run in, so
+    // the index does not label it after the config's folder.
+    let service_paths: Vec<PathBuf> = script
+        .service
+        .iter()
+        .flatten()
+        .map(|entry| config_dir.join(&entry.path))
+        .collect();
+    let project = crate::project::identity(&config_dir, &service_paths);
     // Branch for instance identity: an explicit `--branch` wins; otherwise it
     // is resolved from the worktree containing the config (so a plain
     // `fog dev` in a worktree gets that worktree's branch).

@@ -88,6 +88,12 @@ fn discover_launch_targets() -> LaunchTargets {
     let mut seen = std::collections::HashSet::new();
     let mut push = |roots: &mut Vec<PathBuf>, p: &std::path::Path| {
         let canon = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+        // The picker launches `<dir>/fog.json`, so a dir without one is not
+        // launchable and must not be listed as a project (e.g. an instance
+        // started with `-c /tmp/override.json`).
+        if !canon.join("fog.json").is_file() {
+            return;
+        }
         if seen.insert(canon.clone()) {
             roots.push(canon);
         }
