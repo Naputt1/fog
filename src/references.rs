@@ -276,11 +276,11 @@ impl ChainEntry {
 
     /// Human-readable `repo:branch:script` label.
     fn label(&self) -> String {
-        let repo = if self.project.contains(std::path::MAIN_SEPARATOR) {
-            crate::project::display_name(&self.project)
-        } else {
-            self.project.clone()
-        };
+        // `display_name` also passes a plain (already short) project name
+        // through unchanged, so it works for both the git identity path and a
+        // non-git fallback without guessing the separator: identities are
+        // always `/`-separated, which is not `MAIN_SEPARATOR` on Windows.
+        let repo = crate::project::display_name(&self.project);
         if self.branch.is_empty() {
             format!("{repo}:{script}", script = self.script)
         } else {

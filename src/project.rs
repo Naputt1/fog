@@ -294,7 +294,7 @@ mod tests {
         run(&repo, &["commit", "-q", "-m", "init"]);
 
         // The config lives outside any repo; the repo comes from its service.
-        let got = identity(&config_dir, &[repo.clone()]);
+        let got = identity(&config_dir, std::slice::from_ref(&repo));
         assert_eq!(got, detect(&repo), "service repo should supply identity");
 
         // Without a repo anywhere, the config dir itself is the identity.
@@ -302,7 +302,10 @@ mod tests {
         fs::create_dir_all(&empty).unwrap();
         assert_eq!(
             identity(&empty, &[]),
-            empty.canonicalize().ok().map(|c| c.to_string_lossy().into_owned())
+            empty
+                .canonicalize()
+                .ok()
+                .map(|c| c.to_string_lossy().into_owned())
         );
 
         let _ = fs::remove_dir_all(&base);
