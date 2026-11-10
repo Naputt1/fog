@@ -239,66 +239,6 @@ fn terminate_server_on_port(port: u16) -> bool {
     false
 }
 
-/// Kill the index server on `port` if no fog instances remain.
-pub fn maybe_terminate_on_port(port: u16) {
-    let instances = crate::ipc::find_instances().unwrap_or_default();
-    let any_alive = instances
-        .iter()
-        .any(|(_, p)| crate::ipc::query_status(p).is_ok());
-    if any_alive {
-        return;
-    }
-    let _ = terminate_server_on_port(port);
-    if port != DEFAULT_INDEX_PORT {
-        let _ = terminate_server_on_port(DEFAULT_INDEX_PORT);
-    }
-}
-
-/// Kill the index server for a full `Config` if no instances remain.
-pub fn maybe_terminate_for_config(cfg: &crate::config::Config) {
-    maybe_terminate_on_port(cfg.index_port());
-}
-
-/// Kill the index server if no fog instances remain.
-///
-/// Looks at `crate::ipc::find_instances()`. If no instances are alive,
-/// attempts to stop the server on the configured port (or the default
-/// `18080`). Best-effort and never panics.
-pub fn maybe_terminate_if_no_instances(cfg: Option<&RouterConfig>) {
-    let instances = crate::ipc::find_instances().unwrap_or_default();
-    let any_alive = instances
-        .iter()
-        .any(|(_, p)| crate::ipc::query_status(p).is_ok());
-    if any_alive {
-        return;
-    }
-    // No live instance responded — idle, tear down the server.
-    if let Some(c) = cfg {
-        let port = c.index_port.unwrap_or(DEFAULT_INDEX_PORT);
-        let _ = terminate_server_on_port(port);
-        if port != DEFAULT_INDEX_PORT {
-            let _ = terminate_server_on_port(DEFAULT_INDEX_PORT);
-        }
-        return;
-    }
-    // No config given (e.g. `fog kill` without a config): try the default
-    // port and any pidfile-discovered custom ports.
-    let _ = terminate_server_on_port(DEFAULT_INDEX_PORT);
-    if let Ok(dir) = std::fs::read_dir(std::env::temp_dir()) {
-        for entry in dir.flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if let Some(port_str) = name
-                .strip_prefix("fog-index-")
-                .and_then(|s| s.strip_suffix(".pid"))
-                && let Ok(port) = port_str.parse::<u16>()
-                && port != DEFAULT_INDEX_PORT
-            {
-                let _ = terminate_server_on_port(port);
-            }
-        }
-    }
-}
-
 /// Kill the index server for a full `Config` (respects `index.port` then
 /// `router.index_port`, plus global fog config fallback).
 pub fn kill_for_config(cfg: &crate::config::Config) -> bool {
@@ -486,7 +426,7 @@ pub fn serve_detached(port: u16, network: &str) -> io::Result<()> {
         .spawn()
         .map_err(|e| io::Error::other(format!("could not spawn index server: {e}")))?;
     let pid = child.id();
-    // Record the pid so `maybe_terminate_if_no_instances` can find it later.
+    // Record the pid so `fog index kill/restart` can find it later.
     let _ = std::fs::write(index_pid_path(port), pid.to_string());
     // Wait for it to bind before reporting success (mirrors `daemonize`).
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -573,7 +513,7 @@ fn spawn_server(cfg: &RouterConfig) -> Result<(), String> {
         .spawn()
         .map_err(|e| format!("could not spawn index server: {e}"))?;
     let pid = child.id();
-    // Record the pid so `maybe_terminate_if_no_instances` can find it later.
+    // Record the pid so `fog index kill/restart` can find it later.
     let _ = std::fs::write(index_pid_path(port), pid.to_string());
     // Wait briefly for it to bind before reporting success.
     for _ in 0..25 {
@@ -613,31 +553,10 @@ pub fn serve() -> io::Result<()> {
 /// port externally. Any local process can still call them.
 fn serve_blocking(port: u16, network: String) -> io::Result<()> {
     CURRENT_INDEX_PORT.store(port, std::sync::atomic::Ordering::SeqCst);
-    // Record this server's pid for `maybe_terminate_if_no_instances`.
+    // Record this server's pid so `fog index kill/restart` can find it later.
     let _ = std::fs::write(index_pid_path(port), std::process::id().to_string());
-    // Self-terminate when no fog instance has been alive for a while, so a
-    // crashed last instance (no cleanup hook) still brings the server down.
-    std::thread::spawn(move || {
-        let mut idle_ticks: u32 = 0;
-        loop {
-            std::thread::sleep(std::time::Duration::from_secs(5));
-            let instances = crate::ipc::find_instances().unwrap_or_default();
-            let any_alive = instances
-                .iter()
-                .any(|(_, p)| crate::ipc::query_status(p).is_ok());
-            if any_alive {
-                idle_ticks = 0;
-            } else {
-                idle_ticks += 1;
-                // 4 ticks = ~20s of continuous idleness before exiting.
-                if idle_ticks >= 4 {
-                    let _ = std::fs::remove_file(index_pid_path(port));
-                    std::process::exit(0);
-                }
-            }
-        }
-    });
-
+    // The server runs until stopped explicitly: it must outlive the last
+    // instance so its SPA can launch the next one, like the Traefik router.
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

@@ -17,8 +17,8 @@ use super::logs::{serve_logs_history, serve_logs_stream};
 use super::registry::handle_launch_projects_request;
 use super::{
     CURRENT_INDEX_PORT, DEFAULT_INDEX_PORT, RespBody, api_error, api_not_found,
-    discover_fog_instances, index_pid_path, json_response, load_runtime_config,
-    maybe_terminate_if_no_instances, query_param, resolve_service_target, terminate_server_on_port,
+    discover_fog_instances, index_pid_path, json_response, load_runtime_config, query_param,
+    resolve_service_target, terminate_server_on_port,
 };
 
 /// Guards state-changing routes against cross-origin "simple" requests.
@@ -408,13 +408,8 @@ async fn handle_kill_request(method: &hyper::Method, pid_str: &str) -> Response<
 
     match outcome {
         Ok(()) => {
-            // The killed instance will run `maybe_terminate_if_no_instances`
-            // on its own exit, but also schedule a server-side idle check
-            // so the server exits even if that instance crashes before it.
-            tokio::task::spawn_blocking(|| {
-                std::thread::sleep(std::time::Duration::from_millis(800));
-                maybe_terminate_if_no_instances(None);
-            });
+            // The index server stays up after the last instance is killed so
+            // the SPA can launch the next one; stop it explicitly instead.
             json_response(&serde_json::json!({"ok":true}))
         }
         Err(e) => api_error(StatusCode::BAD_GATEWAY, &e.to_string()),

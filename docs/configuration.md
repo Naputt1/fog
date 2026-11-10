@@ -439,7 +439,7 @@ The standalone [Index Server](/index-server) (web UI + API, `index` field) and t
 - **Index server** — directory of running services at `http://<tailnet IP>` + React SPA on `127.0.0.1:18080`. Opt out per-project with `index: { enabled: false }`. Details: [Index Server](/index-server).
 - **Router & DNS** — wildcard `*.acme` → `127.0.0.1` via `dnsmasq` and Traefik on `:80`/`:443` with auto-discovery. TLS via `mkcert`. Details: [Router & DNS](/router).
 
-Both are idempotent and tear down automatically (index) or manually (`docker rm -f fog-router-traefik`).
+Both are idempotent. The index server stays up after the last instance exits and is stopped explicitly with `fog index kill`; the router is removed manually (`docker rm -f fog-router-traefik`).
 
 ## Theme
 

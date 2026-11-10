@@ -1317,8 +1317,6 @@ fn cmd_kill(pid: Option<u32>, all: bool, cli: &Cli) -> io::Result<()> {
         );
     }
 
-    // Tear down the index server if no instance remains. Best-effort.
-    crate::index::maybe_terminate_if_no_instances(None);
     Ok(())
 }
 
@@ -2869,13 +2867,8 @@ fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>) -> io::Res
     // Clean up native Traefik routes for this branch (explicit only).
     crate::router::cleanup_native_routes(branch_for_ports.as_deref(), &config);
 
-    // If no fog instances remain, tear down the index server as well.
-    // Give the socket file a moment to disappear from the filesystem.
-    std::thread::sleep(std::time::Duration::from_millis(200));
-    // Use the effective index port (project → global fallback) so a custom
-    // port is torn down correctly.
-    let port = config.effective_index_port();
-    crate::index::maybe_terminate_on_port(port);
+    // The index server is left running after the last instance exits so its
+    // SPA can launch the next one; stop it with `fog index kill`.
 
     Ok(())
 }

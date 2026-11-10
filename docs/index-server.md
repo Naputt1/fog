@@ -4,7 +4,7 @@ title: Index Server
 
 # Index Server
 
-Standalone service-directory **index server** (web UI + JSON API). By default every `fog <script>` serves the index unless opted out. This lives in the **fog config** (top-level `fog.json` alongside `theme`/`sidebar`, default `enabled:true`) — not per-script. It can be set **per-project** (`./fog.json`) or **globally** (`~/.config/fog/fog.json`, same schema); either can opt-out (both must be `true` to serve). The server is host-global (like `router`/`dnsmasq`) and is torn down automatically when the last fog instance exits — see `fog index kill/restart`.
+Standalone service-directory **index server** (web UI + JSON API). By default every `fog <script>` serves the index unless opted out. This lives in the **fog config** (top-level `fog.json` alongside `theme`/`sidebar`, default `enabled:true`) — not per-script. It can be set **per-project** (`./fog.json`) or **globally** (`~/.config/fog/fog.json`, same schema); either can opt-out (both must be `true` to serve). The server is host-global (like `router`/`dnsmasq`) and keeps running after the last fog instance exits, so its SPA can launch the next one. Stop it explicitly with `fog index kill` (or respawn it with `fog index restart`).
 
 > **No Docker required.** The index server runs without Docker: it binds
 > `127.0.0.1:<port>` and serves the web UI plus every IPC-backed endpoint
@@ -31,7 +31,7 @@ Standalone service-directory **index server** (web UI + JSON API). By default ev
 | `enabled` | No | `boolean` | `true` | Whether starting this project serves the index. Set `false` to opt this project out (useful for CI or projects that never need the web UI). |
 | `port` | No | `integer` | `18080` | Port the index listens on. Overrides `router.index_port` when set. |
 
-When `enabled:false`, `fog <script>` for this project will not start the index (and will not print the `+ service index server` line). The index can still be started manually via `fog index restart` or by starting another project that has `enabled:true` (the default). Other lifecycle still applies: `fog kill`/`fog restart` per-instance, `POST /api/server/kill` + `/restart`, and auto-teardown when the last instance exits.
+When `enabled:false`, `fog <script>` for this project will not start the index (and will not print the `+ service index server` line). The index can still be started manually via `fog index restart` or by starting another project that has `enabled:true` (the default). Other lifecycle still applies: `fog kill`/`fog restart` per-instance and `POST /api/server/kill` + `/restart`. The server itself stays up after the last instance exits; only an explicit stop shuts it down.
 
 The index port can also be set via `router.index_port` (default `18080`). If `index.port` is set it takes precedence.
 
@@ -45,8 +45,8 @@ unmatched hosts to it via a low-priority catch-all router
 (`Host(\`*\`)`, `priority = 1`), so specific app routers always win.
 
 - fog runs a standalone index server (`fog index serve`) on loopback
-  `index_port` (default `18080`), detached so it survives individual fog
-  instances exiting.
+  `index_port` (default `18080`), detached so it outlives fog instances —
+  including the last one — until `fog index kill`.
 - The file is regenerated when instances start and stop (bounded startup
   refreshes + a teardown refresh); refresh the browser to pick up changes.
 
