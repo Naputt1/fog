@@ -59,8 +59,11 @@ inspectable. Those logs sit in `$TMPDIR/fog-<pid>.logs/` until pruned: `fog prun
 reports what they hold, `fog prune` removes them (a running instance's logs are never
 touched). Don't leave output from runs you started lying around.
 
-`fog ls` prints one row per instance — `pid script project branch proxy services` — with
-each service's state (`healthy`, `reused`, `running`, `stopped`, `unhealthy`).
+`fog ls` prints one row per instance — `pid script project branch started-by proxy services`
+— with each service's state (`healthy`, `reused`, `running`, `stopped`, `unhealthy`).
+`started-by` names the parent that auto-started an instance for a cross-instance port
+reference (see below), so a stack whose other half was started for you is visible rather
+than orphaned.
 
 Done when you have read the state — and the log, if it matters — of every service you care
 about.
@@ -72,7 +75,11 @@ fog kill <pid>             # graceful: each service's shutdown_cmd runs
 fog kill <pid> --force     # escalate to SIGTERM then SIGKILL for a wedged instance
 fog restart <pid>          # restart a running instance
 fog kill --all             # every local instance (or every instance outside a fog.json dir)
+fog kill <pid> --with-dependents  # also stop instances this one cold-started
 ```
+
+`fog kill <pid>` warns when the instance cold-started another instance for a cross-instance
+port reference and leaves it running; pass `--with-dependents` to take that chain down too.
 
 The index server (the optional web UI/API on `127.0.0.1:18080`) is host-global; control it
 with `fog index serve|kill|restart`. Its write endpoints are localhost-only — never expose
@@ -94,6 +101,12 @@ side-by-side.
   single-instance (`"concurrent": false`) equivalent, handed over live on a re-run.
 - **Branch isolation** comes from `--branch` and the injected `FOG_BRANCH` (slug) and
   `FOG_BRANCH_RAW` variables, so per-branch compose projects and hostnames never collide.
+- **Other repos' ports**: `${ports.<name>@<repo>:<branch>[:<script>]}` reads a port from an
+  instance of another repo (or branch), resolved once at startup. `?` follows your branch
+  when that repo has it and otherwise uses its main worktree; `*` always uses its main
+  worktree; `${branch}` is exact. Adding `:script` cold-starts that instance, which then
+  shows up under `started-by` — give the target a health check if your services need it
+  already listening. `--port api@<repo>:?:<script>=PORT` pins the value and skips the start.
 
 ## Reference
 
