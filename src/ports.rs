@@ -145,9 +145,12 @@ pub fn parse_port_overrides(raw: &[String]) -> Result<HashMap<String, u16>, Stri
 /// the index show), matched case-insensitively, or the exact git-common-dir
 /// identity. `<branch>` matches a live instance's raw branch, its branch slug,
 /// or the index's worktree segment, so `feat/login`, `feat-login` and the
-/// truncated label the UI shows all resolve. The optional `<script>` narrows
-/// the reference to one script of that project+branch; it also allows fog to
-/// start that script when no matching instance is running.
+/// truncated label the UI shows all resolve. Two tokens are special: `?` means
+/// "the referencing branch when the target repo has that branch, otherwise its
+/// main worktree", and `*` always means the target's main worktree. The
+/// optional `<script>` narrows the reference to one script of that
+/// project+branch; it also allows fog to start that script when no matching
+/// instance is running.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalPortRef {
     /// Symbolic port name declared by the target instance.
@@ -214,10 +217,12 @@ pub fn parse_external_port_key(key: &str) -> Option<Result<ExternalPortRef, Stri
              script must all be non-empty ({EXPECTED})"
         )));
     }
-    // `?` (the target's main worktree) and branch atoms such as `${branch}` are
-    // resolved later against the referencing instance, so they cannot be
-    // slug-checked here.
+    // `?` (same branch in the target, else its main worktree), `*` (the
+    // target's main worktree) and branch atoms such as `${branch}` are resolved
+    // later against the referencing instance, so they cannot be slug-checked
+    // here.
     if branch != "?"
+        && branch != "*"
         && !branch.contains("${")
         && let Err(e) = branch_slug(branch)
     {
@@ -1454,7 +1459,7 @@ mod tests {
 
     #[test]
     fn test_parse_external_port_key_accepts_dynamic_branch_tokens() {
-        for branch in ["?", "${branch}", "${FOG_BRANCH}", "${branch_raw}"] {
+        for branch in ["?", "*", "${branch}", "${FOG_BRANCH}", "${branch_raw}"] {
             let key = format!("api@repo:{branch}");
             let reference = parse_external_port_key(&key).unwrap().unwrap();
             assert_eq!(reference.branch, branch);

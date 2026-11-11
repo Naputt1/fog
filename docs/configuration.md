@@ -246,7 +246,7 @@ ${ports.<name>@<repo>:<branch>[:<script>]}
 ```
 
 - `<repo>` is the project name shown by the index and its URLs (the lowercased repository directory name; matching is case-insensitive), the repository directory name itself, or the exact git-common-dir identity.
-- `<branch>` accepts the raw branch, its DNS-safe slug, or the short worktree segment the index uses (`feat/login`, `feat-login` and `feat-login` all match; `release/1.2` also matches `release-1`, the segment shown in the UI URL). `${branch}` / `${FOG_BRANCH}` / `${FOG_BRANCH_SLUG}` inside the atom expand to the **referencing** instance's branch slug (and `${branch_raw}` / `${FOG_BRANCH_RAW}` to the raw name), which is what a per-branch stack usually wants. `?` means whatever the target repo currently has checked out in its main worktree — useful when two repos do not share branch names.
+- `<branch>` accepts the raw branch, its DNS-safe slug, or the short worktree segment the index uses (`feat/login`, `feat-login` and `feat-login` all match; `release/1.2` also matches `release-1`, the segment shown in the UI URL). `${branch}` / `${FOG_BRANCH}` / `${FOG_BRANCH_SLUG}` inside the atom expand to the **referencing** instance's branch slug (and `${branch_raw}` / `${FOG_BRANCH_RAW}` to the raw name) and must match exactly. Two tokens are special: `?` uses the target worktree on the referencing branch when the repo has one, otherwise the target's main worktree (`*` always means the main worktree). That keeps a per-branch stack working when only one of the two repos has the branch; the fallback is logged as `fell back to '<branch>'`.
 - `<name>` is a port declared in that instance's `ports` map. Port names may not contain `@` or `:`; both mark cross-instance references.
 - `<script>` is optional. It narrows the reference to one script of that project+branch (useful when several scripts run there) and authorizes fog to **start** that script when no matching instance is running.
 
@@ -259,10 +259,13 @@ For example, a frontend on branch `feat/login` reads the backend repo's API port
   "cmd": "npm run dev",
   "env": {
     "SAME_BRANCH_API": "http://localhost:${ports.api@cinema_ticket:${branch}:dev}",
-    "BACKEND_API": "http://localhost:${ports.api@cinema_ticket:?:dev}"
+    "BACKEND_API": "http://localhost:${ports.api@cinema_ticket:?:dev}",
+    "MAIN_API": "http://localhost:${ports.api@cinema_ticket:*:dev}"
   }
 }
 ```
+
+`${branch}` is exact: if the backend has no `feat/login` worktree, startup fails. `?` is the pragmatic choice for a per-branch stack — it follows the frontend branch when the backend has one and otherwise stays on the backend's main worktree. `*` pins the backend to its main worktree even when a same-named branch exists.
 
 References resolve once, at startup, by querying running instances over fog's local IPC sockets. A reference never needs a top-level `ports` map of its own.
 

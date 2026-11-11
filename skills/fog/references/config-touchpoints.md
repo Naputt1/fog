@@ -23,8 +23,10 @@ Templates: `${ports.*}`; `${branch}` / `${FOG_BRANCH}` (DNS-safe slug, `feat/boo
 `Host()` or DNS name). Cross-instance ports use
 `${ports.<name>@<repo>:<branch>[:<script>]}`: repo is the index/UI project name (matched
 case-insensitively), branch accepts the raw name, its slug, the index worktree segment
-(`release/1.2` → `release-1`), `${branch}` for the referencing branch, or `?` for the
-target's main worktree. Port names may not contain `@` or `:`. Values resolve once at
+(`release/1.2` → `release-1`), or `${branch}` for the referencing branch (exact). Two
+tokens are special: `?` follows the referencing branch when the target repo has a worktree
+for it and otherwise falls back to its main worktree (logged as `fell back to '<branch>'`);
+`*` always means the main worktree. Port names may not contain `@` or `:`. Values resolve once at
 startup against live instances and are logged (`resolved … = PORT (pid N)`); add `:script`
 to let fog start that project+branch+script when it is stopped (it must be in the project
 registry, have a worktree on the branch, and declare the port), waiting until the target

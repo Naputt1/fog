@@ -76,10 +76,7 @@ pub fn resolve(
         match ports::pick_external_port_source(&request.matcher, &instances) {
             Ok((port, pid)) => {
                 ports_map.insert(key, port);
-                messages.push(format!(
-                    "resolved '{}' = {port} (pid {pid})",
-                    request.original.atom()
-                ));
+                messages.push(resolved_message(&request, port, pid));
             }
             Err(PickFailure::NoInstance) => pending.push(request),
             Err(failure) => {
@@ -168,10 +165,7 @@ pub fn resolve(
         let (port, pid) = ports::pick_external_port_source(&request.matcher, &instances)
             .map_err(|failure| ports::format_pick_failure(&request.original, &failure))?;
         ports_map.insert(request.original.key(), port);
-        messages.push(format!(
-            "resolved '{}' = {port} (pid {pid})",
-            request.original.atom()
-        ));
+        messages.push(resolved_message(request, port, pid));
     }
     Ok(())
 }
@@ -182,53 +176,80 @@ pub fn resolve(
 struct Request {
     original: ExternalPortRef,
     matcher: ExternalPortRef,
+    /// Extra wording for the resolved-value log line, e.g. a `?` fallback.
+    note: Option<String>,
 }
 
 fn request_for(reference: ExternalPortRef, owner: Owner<'_>) -> Result<Request, String> {
-    let matcher = concrete_branch(&reference, owner)?;
+    let (matcher, note) = concrete_branch(&reference, owner)?;
     Ok(Request {
         original: reference,
         matcher,
+        note,
     })
 }
 
-/// Resolves `${branch}`-style atoms and the `?` token in a reference's branch.
+/// `resolved '<atom>' = <port> (pid <pid>[, <note>])`.
+fn resolved_message(request: &Request, port: u16, pid: u32) -> String {
+    let note = request
+        .note
+        .as_deref()
+        .map(|note| format!(", {note}"))
+        .unwrap_or_default();
+    format!(
+        "resolved '{}' = {port} (pid {pid}{note})",
+        request.original.atom()
+    )
+}
+
+/// Resolves `${branch}`-style atoms and the `?` / `*` branch tokens in a
+/// reference's branch, returning the matcher plus a note for the log.
 fn concrete_branch(
     reference: &ExternalPortRef,
     owner: Owner<'_>,
-) -> Result<ExternalPortRef, String> {
+) -> Result<(ExternalPortRef, Option<String>), String> {
     let mut matcher = reference.clone();
-    if reference.branch == "?" {
-        matcher.branch = current_branch_of(&reference.project).map_err(|e| {
-            format!(
-                "'${{{}}}': could not resolve '?' to a branch: {e}",
-                reference.atom()
-            )
-        })?;
-        return Ok(matcher);
+    match reference.branch.as_str() {
+        "*" => {
+            matcher.branch = main_branch_of(&reference.project).map_err(|e| {
+                format!(
+                    "'${{{}}}': could not resolve '*' to a branch: {e}",
+                    reference.atom()
+                )
+            })?;
+            Ok((matcher, None))
+        }
+        "?" => {
+            let (branch, fell_back) = same_branch_or_main(&reference.project, owner.branch)
+                .map_err(|e| {
+                    format!(
+                        "'${{{}}}': could not resolve '?' to a branch: {e}",
+                        reference.atom()
+                    )
+                })?;
+            matcher.branch = branch;
+            let note = fell_back.then(|| format!("fell back to '{}'", matcher.branch));
+            Ok((matcher, note))
+        }
+        _ => {
+            let Some(branch) = ports::expand_branch_token(&reference.branch, owner.branch) else {
+                return Err(format!(
+                    "'${{{}}}' uses '${{branch}}' but this config has no branch (detached HEAD); \
+                     use a concrete branch, '?' for the same branch with the other repo's main \
+                     worktree as fallback, '*' for its main worktree, or --port",
+                    reference.atom()
+                ));
+            };
+            matcher.branch = branch;
+            Ok((matcher, None))
+        }
     }
-    let Some(branch) = ports::expand_branch_token(&reference.branch, owner.branch) else {
-        return Err(format!(
-            "'${{{}}}' uses '${{branch}}' but this config has no branch (detached HEAD); use a \
-             concrete branch, '?' for the other repo's main worktree, or --port",
-            reference.atom()
-        ));
-    };
-    matcher.branch = branch;
-    Ok(matcher)
 }
 
-/// The branch currently checked out in the target repo's main worktree, for the
-/// `?` branch token.
-fn current_branch_of(project: &str) -> Result<String, String> {
+/// The branch checked out in the target repo's main worktree, for `*`.
+fn main_branch_of(project: &str) -> Result<String, String> {
     let repo = find_repo(project)?;
-    let worktrees = worktree::list(&repo.dirs[0]).ok_or_else(|| {
-        format!(
-            "'{}' is registered at {} but is not inside a git repository",
-            repo.name,
-            repo.dirs[0].display()
-        )
-    })?;
+    let worktrees = target_worktrees(&repo)?;
     // `git worktree list` prints the main worktree first.
     let main = worktrees
         .first()
@@ -239,6 +260,65 @@ fn current_branch_of(project: &str) -> Result<String, String> {
             repo.name
         )
     })
+}
+
+/// The branch for `?`: the target worktree on the referencing branch when the
+/// repo has one, otherwise its main-worktree branch. The flag says which.
+fn same_branch_or_main(
+    project: &str,
+    owner_branch: Option<&str>,
+) -> Result<(String, bool), String> {
+    let repo = find_repo(project)?;
+    let worktrees = target_worktrees(&repo)?;
+    if let Some(owner) = owner_branch
+        && let Some(branch) = pick_branch(&worktrees, owner)?
+    {
+        return Ok((branch, false));
+    }
+    Ok((main_branch_of(project)?, true))
+}
+
+fn target_worktrees(repo: &RegisteredRepo) -> Result<Vec<crate::worktree::Worktree>, String> {
+    crate::worktree::list(&repo.dirs[0]).ok_or_else(|| {
+        format!(
+            "'{}' is registered at {} but is not inside a git repository",
+            repo.name,
+            repo.dirs[0].display()
+        )
+    })
+}
+
+/// Branch of the target worktree that matches `owner` (raw name first, then
+/// slug). `None` when the repo has no such worktree.
+fn pick_branch(
+    worktrees: &[crate::worktree::Worktree],
+    owner: &str,
+) -> Result<Option<String>, String> {
+    if let Some(exact) = worktrees
+        .iter()
+        .find(|worktree| worktree.branch.as_deref() == Some(owner))
+    {
+        return Ok(exact.branch.clone());
+    }
+    let Ok(slug) = ports::branch_slug(owner) else {
+        return Ok(None);
+    };
+    let mut slugged: Vec<&str> = worktrees
+        .iter()
+        .filter_map(|worktree| worktree.branch.as_deref())
+        .filter(|branch| ports::branch_slug(branch).is_ok_and(|b| b == slug))
+        .collect();
+    match slugged.len() {
+        0 => Ok(None),
+        1 => Ok(slugged.pop().map(str::to_string)),
+        _ => {
+            slugged.sort_unstable();
+            Err(format!(
+                "several worktrees match branch '{owner}': {}; use a concrete branch",
+                slugged.join(", ")
+            ))
+        }
+    }
 }
 
 /// One link in the auto-start chain: the canonical identity of an instance.
@@ -661,6 +741,7 @@ mod tests {
         let requests = vec![Request {
             original: reference.clone(),
             matcher: reference,
+            note: None,
         }];
         let mut chain = StartChain::default();
         chain.push(entry("/repo/a/.git", "main", "dev"));
@@ -766,6 +847,69 @@ mod tests {
         let err = request_for(reference, owner).unwrap_err();
         assert!(err.contains("detached HEAD"), "{err}");
         assert!(err.contains("--port"), "{err}");
+    }
+
+    #[test]
+    fn test_pick_branch_prefers_exact_then_slug() {
+        let worktree = |branch: &str| crate::worktree::Worktree {
+            path: PathBuf::from(format!("/repo/{branch}")),
+            branch: Some(branch.to_string()),
+        };
+        let trees = vec![worktree("main"), worktree("feat/login")];
+        assert_eq!(
+            pick_branch(&trees, "feat/login").unwrap(),
+            Some("feat/login".to_string())
+        );
+        assert_eq!(pick_branch(&trees, "release/2.0").unwrap(), None);
+
+        let slugged = vec![worktree("main"), worktree("feat-login")];
+        assert_eq!(
+            pick_branch(&slugged, "feat/login").unwrap(),
+            Some("feat-login".to_string())
+        );
+
+        let detached = vec![
+            worktree("main"),
+            crate::worktree::Worktree {
+                path: PathBuf::from("/repo/detached"),
+                branch: None,
+            },
+        ];
+        assert_eq!(pick_branch(&detached, "feat/login").unwrap(), None);
+    }
+
+    #[test]
+    fn test_pick_branch_rejects_ambiguous_slug_matches() {
+        let worktree = |branch: &str| crate::worktree::Worktree {
+            path: PathBuf::from(format!("/repo/{branch}")),
+            branch: Some(branch.to_string()),
+        };
+        let trees = vec![worktree("feat-login"), worktree("feat/login")];
+        let err = pick_branch(&trees, "feat.login").unwrap_err();
+        assert!(err.contains("several worktrees"), "{err}");
+        assert!(err.contains("feat-lo"), "{err}");
+    }
+
+    #[test]
+    fn test_resolved_message_includes_fallback_note() {
+        let reference = ExternalPortRef {
+            name: "api".to_string(),
+            project: "b".to_string(),
+            branch: "?".to_string(),
+            script: Some("dev".to_string()),
+        };
+        let request = Request {
+            original: reference.clone(),
+            matcher: ExternalPortRef {
+                branch: "main".to_string(),
+                ..reference
+            },
+            note: Some("fell back to 'main'".to_string()),
+        };
+        assert_eq!(
+            resolved_message(&request, 8080, 42),
+            "resolved 'ports.api@b:?:dev' = 8080 (pid 42, fell back to 'main')"
+        );
     }
 
     #[test]
