@@ -140,6 +140,7 @@ fn unlock(file: &File) -> io::Result<()> {
 pub fn with_file_lock<T>(path: &Path, f: impl FnOnce() -> T) -> T {
     const WAIT_STEP_MS: u64 = 5;
     const WAIT_STEPS: u32 = 400;
+    let started = std::time::Instant::now();
     let Ok(file) = ({
         // The sidecar may live in a state dir that does not exist yet; opening
         // the lock must not depend on the payload's own write creating it.
@@ -169,6 +170,14 @@ pub fn with_file_lock<T>(path: &Path, f: impl FnOnce() -> T) -> T {
     let out = f();
     if held {
         let _ = unlock(&file);
+    } else {
+        // The wait is capped at ~2s; running the update unlocked is the
+        // documented trade-off, but a wedged launch usually starts here.
+        tracing::debug!(
+            lock = %path.display(),
+            waited_ms = started.elapsed().as_millis() as u64,
+            "shared state lock unavailable, updated without it"
+        );
     }
     out
 }
@@ -246,6 +255,8 @@ impl OwnerLock {
         branch: Option<&str>,
     ) -> io::Result<AcquireResult> {
         let path = owner_lock_path(project, script, branch);
+        let started = std::time::Instant::now();
+        let hash = identity_hash(project, script, branch);
         // Not `truncate(true)` here on purpose: opening with truncate would
         // wipe a held lock's payload before we even attempt `flock`.
         #[allow(clippy::suspicious_open_options)]
@@ -256,9 +267,20 @@ impl OwnerLock {
             .open(&path)?;
         if try_lock_exclusive(&file)? {
             write_payload(&file, project, script, branch)?;
+            tracing::debug!(
+                hash = %hash,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "owner lock acquired"
+            );
             Ok(AcquireResult::Locked(OwnerLock { file }))
         } else {
-            Ok(AcquireResult::HeldBy(read_payload(&path).ok().flatten()))
+            let holder = read_payload(&path).ok().flatten();
+            tracing::debug!(
+                hash = %hash,
+                holder_pid = holder.as_ref().map(|h| h.pid),
+                "owner lock held by another instance"
+            );
+            Ok(AcquireResult::HeldBy(holder))
         }
     }
 
@@ -274,11 +296,33 @@ impl OwnerLock {
         timeout: Duration,
     ) -> io::Result<Option<OwnerLock>> {
         let deadline = std::time::Instant::now() + timeout;
+        let started = std::time::Instant::now();
+        let hash = identity_hash(project, script, branch);
+        tracing::debug!(
+            hash = %hash,
+            timeout_ms = timeout.as_millis() as u64,
+            "owner lock wait started"
+        );
         loop {
             match Self::try_acquire(project, script, branch)? {
-                AcquireResult::Locked(lock) => return Ok(Some(lock)),
+                AcquireResult::Locked(lock) => {
+                    let waited_ms = started.elapsed().as_millis() as u64;
+                    if waited_ms > 0 {
+                        tracing::debug!(
+                            hash = %hash,
+                            waited_ms,
+                            "owner lock acquired after waiting"
+                        );
+                    }
+                    return Ok(Some(lock));
+                }
                 AcquireResult::HeldBy(_) => {
                     if std::time::Instant::now() >= deadline {
+                        tracing::warn!(
+                            hash = %hash,
+                            waited_ms = started.elapsed().as_millis() as u64,
+                            "owner lock wait timed out"
+                        );
                         return Ok(None);
                     }
                     std::thread::sleep(Duration::from_millis(50));
@@ -290,6 +334,9 @@ impl OwnerLock {
 
 impl Drop for OwnerLock {
     fn drop(&mut self) {
+        // The unlock is process-wide, so the pid identifies the holder even
+        // though the path is no longer in scope here.
+        tracing::debug!(pid = std::process::id(), "owner lock released");
         let _ = unlock(&self.file);
     }
 }
