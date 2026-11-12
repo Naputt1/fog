@@ -50,6 +50,8 @@ notify = "8"
 tokio-tungstenite = "0.30"
 futures-channel = "0.3"
 futures-util = "0.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "time"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -15,6 +15,7 @@ pub mod ipc;
 pub mod keybinding;
 pub mod lock;
 pub mod log;
+pub mod observability;
 pub mod ports;
 pub mod process;
 pub mod project;
