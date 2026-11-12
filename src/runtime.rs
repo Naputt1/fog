@@ -667,7 +667,13 @@ fn resolve_entries(
 }
 
 /// Preferred entry point using `BuildOpts` to avoid `clippy::too_many_arguments`.
+#[tracing::instrument(
+    name = "build",
+    skip_all,
+    fields(script = opts.script_name, project = opts.project.as_deref().unwrap_or("-"))
+)]
 pub fn build_with_opts(opts: BuildOpts) -> Result<Runtime, String> {
+    let started = std::time::Instant::now();
     let BuildOpts {
         script,
         script_name,
@@ -705,6 +711,7 @@ pub fn build_with_opts(opts: BuildOpts) -> Result<Runtime, String> {
     {
         Ok(v) => v,
         Err(e) => {
+            tracing::warn!(error = %e, "runtime build failed");
             for (_, handoff) in adopted.drain() {
                 crate::fds::close(handoff.fd);
             }
@@ -770,6 +777,18 @@ pub fn build_with_opts(opts: BuildOpts) -> Result<Runtime, String> {
         let script_name_for_spawn = script_name.clone();
         let spawn_now = |health_checks: Vec<HealthCheckConfig>,
                          injected_env: HashMap<String, String>| {
+            // The resolved ports, not the `${ports.*}` names: what the process
+            // actually binds is what makes a "port already in use" debuggable.
+            tracing::debug!(
+                service = %name,
+                cmd = %entry.cmd,
+                path = %service_path_str,
+                ports = ?crate::ports::entry_referenced_ports(entry)
+                    .into_iter()
+                    .filter_map(|n| ports.get(&n).copied().map(|p| (n, p)))
+                    .collect::<Vec<_>>(),
+                "service spawned"
+            );
             spawn_checked_terminal(
                 &service_path_str,
                 &entry.cmd,
@@ -794,6 +813,11 @@ pub fn build_with_opts(opts: BuildOpts) -> Result<Runtime, String> {
             // not configured for reuse. `reused = false` keeps normal owned
             // semantics (liveness from the process, not health-derived), so a
             // dead service is still detected and torn down on exit.
+            tracing::debug!(
+                service = %name,
+                pid = handoff.pid,
+                "service adopted from handoff (takeover)"
+            );
             let mut t = Terminal::adopt(
                 service_path_str.clone(),
                 entry.cmd.clone(),
@@ -819,6 +843,11 @@ pub fn build_with_opts(opts: BuildOpts) -> Result<Runtime, String> {
             t
         } else if shared {
             if let Some(handoff) = adopted.remove(&name) {
+                tracing::debug!(
+                    service = %name,
+                    pid = handoff.pid,
+                    "shared service adopted from handoff"
+                );
                 let mut t = Terminal::adopt(
                     service_path_str.clone(),
                     entry.cmd.clone(),
@@ -871,6 +900,7 @@ pub fn build_with_opts(opts: BuildOpts) -> Result<Runtime, String> {
                 if !dominated {
                     // The resource is genuinely up: borrow it instead of re-running
                     // the start command.
+                    tracing::debug!(service = %name, path = %service_path_str, "service borrowed (already running)");
                     let mut reused = Terminal::spawn_reused(
                         name.clone(),
                         service_path_str,
@@ -906,6 +936,12 @@ pub fn build_with_opts(opts: BuildOpts) -> Result<Runtime, String> {
             }
         } else if has_deps {
             let deps = entry.depends_on.clone().unwrap_or_default();
+            tracing::debug!(
+                service = %name,
+                cmd = %entry.cmd,
+                depends_on = ?deps,
+                "service waiting on dependencies"
+            );
             let mut t = Terminal::spawn_pending(name.clone(), scrollback, &deps);
             t.save_logs = save_logs;
             t.branch = branch.clone();
@@ -949,6 +985,10 @@ pub fn build_with_opts(opts: BuildOpts) -> Result<Runtime, String> {
 
     // Close any handoffs whose service is not present in this script's config.
     for (_, handoff) in adopted.drain() {
+        tracing::debug!(
+            pid = handoff.pid,
+            "closing handoff fd for a service not in this script"
+        );
         // The handle was dupped for transfer and is owned by us.
         crate::fds::close(handoff.fd);
     }
@@ -984,6 +1024,7 @@ pub fn build_with_opts(opts: BuildOpts) -> Result<Runtime, String> {
                 .collect();
             let max_log_entries = pc.max_log_entries.unwrap_or(1000);
             let terminal_cfg = script.terminal.clone().unwrap_or_default();
+            let route_count = routes.len();
             let mut p = ProxyInstance::new(
                 pc.port,
                 pc.host,
@@ -994,11 +1035,24 @@ pub fn build_with_opts(opts: BuildOpts) -> Result<Runtime, String> {
             )
             .with_terminal_config(terminal_cfg);
             p.start();
+            tracing::debug!(
+                port = p.bound_port(),
+                routes = route_count,
+                "proxy starting"
+            );
             Some(p)
         }
         None => None,
     };
 
+    tracing::debug!(
+        services = items.len(),
+        pending = pending_services.len(),
+        warnings = warnings.len(),
+        proxy = proxy.is_some(),
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "runtime build finished"
+    );
     Ok(Runtime {
         items,
         pending_services,
