@@ -477,6 +477,7 @@ fn last_lines(text: &str, n: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::commands::test_status;
     use crate::cli::presentation::ANSI_RESET;
 
     #[test]
@@ -666,6 +667,72 @@ mod tests {
         assert_eq!(
             settled_state("unhealthy", false, true, true),
             ("unhealthy", false)
+        );
+    }
+    /// Rendering into a `Vec<u8>` is what the injected writer buys: the piped
+    /// checklist can be asserted byte for byte, spinner glyph and all.
+    #[test]
+    fn test_start_progress_appended_writes_a_checklist() {
+        let services = vec![
+            ipc::ServiceStatus {
+                name: "api".to_string(),
+                running: false,
+                health: "pending".to_string(),
+                endpoints: Vec::new(),
+                shutdown_cmd: None,
+            },
+            ipc::ServiceStatus {
+                name: "db".to_string(),
+                running: true,
+                health: "healthy".to_string(),
+                endpoints: Vec::new(),
+                shutdown_cmd: None,
+            },
+        ];
+        let status = test_status(services, None);
+        let phases = vec!["dnsmasq".to_string(), "allocating ports".to_string()];
+
+        let mut out: Vec<u8> = Vec::new();
+        let mut view = StartProgress::new(4242, "dev", false, false);
+        view.render(&mut out, &phases, Some(&status), false)
+            .expect("render into a Vec");
+
+        assert_eq!(
+            String::from_utf8(out).expect("utf-8 output"),
+            concat!(
+                "Starting fog 'dev' (pid 4242)...\n",
+                "  ✓ dnsmasq\n",
+                "  ✓ allocating ports\n",
+                "  · api  waiting\n",
+                "  ✓ db  started\n",
+            )
+        );
+    }
+
+    /// The live path redraws in place: the cursor save/restore and clear
+    /// sequences a piped run never emits are pinned here.
+    #[test]
+    fn test_start_progress_live_redraws_in_place() {
+        let phases = vec!["allocating ports".to_string()];
+
+        let mut out: Vec<u8> = Vec::new();
+        let mut view = StartProgress::new(7, "dev", true, true);
+        view.render(&mut out, &phases, None, false)
+            .expect("render into a Vec");
+        // Second render settles the checklist: the spinner becomes a green tick.
+        view.render(&mut out, &phases, None, true)
+            .expect("render into a Vec");
+
+        assert_eq!(
+            String::from_utf8(out).expect("utf-8 output"),
+            concat!(
+                "Starting fog 'dev' (pid 7)...\n",
+                "\x1b7",
+                "\x1b8\x1b[J",
+                "  \x1b[94m⠋\x1b[0m allocating ports\n",
+                "\x1b8\x1b[J",
+                "  \x1b[92m✓\x1b[0m allocating ports\n",
+            )
         );
     }
 }
