@@ -1,0 +1,28 @@
+# Pinned prebuilt SPA bundles.
+#
+# build.rs embeds `ui/dist` when it exists. On `cargo install --git` (no
+# `ui/dist`) it downloads the tarball listed here for CARGO_PKG_VERSION and
+# verifies it against `sha256` before extracting anything. A mismatch fails the
+# build: the bytes that get embedded are exactly the bytes pinned here.
+#
+# To add an entry for a new release (newest first):
+#   curl -fsSL <url> -o /tmp/fog-spa.tgz && shasum -a 256 /tmp/fog-spa.tgz
+#
+# `lock_version` is the schema of this file, not the crate version.
+
+lock_version = 1
+
+[[spa]]
+version = "0.1.3"
+url = "https://github.com/Naputt1/fog/releases/download/v0.1.3/fog-spa-v0.1.3.tar.gz"
+sha256 = "14bb132df1f670e376cffc6fa8462cd0e5d0bc7301a79ca50021edc0ef4afb1e"
+
+[[spa]]
+version = "0.1.2"
+url = "https://github.com/Naputt1/fog/releases/download/v0.1.2/fog-spa-v0.1.2.tar.gz"
+sha256 = "eb3a7ea3d9578d3c414d94e1527628d9ac8ace62a2529765ca0d5a3e8b91e43f"
+
+[[spa]]
+version = "0.1.1"
+url = "https://github.com/Naputt1/fog/releases/download/v0.1.1/fog-spa-v0.1.1.tar.gz"
+sha256 = "6210ab740626e16ec1e3875ed31deb6663bd7b8bce0506add9d2da5bd5245044"

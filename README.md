@@ -92,7 +92,7 @@ cargo install --git https://github.com/Naputt1/fog.git
 cargo install --git https://github.com/Naputt1/fog.git --tag v0.1.3
 ```
 
-If `ui/dist` is absent on a git install, `build.rs` fetches the prebuilt SPA from the GitHub Release. For offline builds use `FOG_SKIP_SPA_DOWNLOAD=1`. Use `FOG_REQUIRE_SPA=1` to fail the build instead of embedding the fallback page.
+If `ui/dist` is absent on a git install, `build.rs` downloads the prebuilt SPA pinned in `spa.lock` and verifies its SHA-256 before embedding it. A failed download or a mismatched digest fails the build. `FOG_SKIP_SPA_DOWNLOAD=1` (or `CARGO_NET_OFFLINE`) disables the download, `FOG_ALLOW_SPA_FALLBACK=1` opts into embedding the stub page instead, and `FOG_REQUIRE_SPA=1` always forbids the stub page.
 
 Windows 10 build 17763 (October 2018) or newer is supported; see the [Windows notes](https://naputt1.github.io/fog/troubleshooting#windows-support) for the few platform differences.
 

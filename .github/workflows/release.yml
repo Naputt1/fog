@@ -61,9 +61,36 @@ jobs:
           if [ "$TAG" = "$GITHUB_REF" ] || [ -z "$TAG" ]; then TAG=$(grep '^version' Cargo.toml | head -1 | sed -E 's/.*"(.*)".*/v\1/'); TAG="v$TAG"; fi
           VERSION=${TAG#v}
           echo "Using TAG=$TAG VERSION=$VERSION"
-          tar czf fog-spa-v${VERSION}.tar.gz -C ui dist
-          tar czf fog-spa.tar.gz -C ui dist
+          # Deterministic archives: sorted names, fixed mtime/owner, gzip -n
+          # (no timestamp). Re-running this job for the same tag must produce
+          # the same SHA-256, because spa.lock pins exactly one digest per
+          # release and a changed digest would break every install that trusts
+          # it.
+          set -o pipefail
+          tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
+            -cf - -C ui dist | gzip -9n > fog-spa-v${VERSION}.tar.gz
+          tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
+            -cf - -C ui dist | gzip -9n > fog-spa.tar.gz
           ls -lh fog-spa*.tar.gz
+      - name: Check the SPA tarball against spa.lock
+        run: |
+          set -euo pipefail
+          VERSION=$(ls fog-spa-v*.tar.gz | head -1 | sed -E 's/^fog-spa-v(.*)\.tar\.gz$/\1/')
+          ACTUAL=$(sha256sum "fog-spa-v${VERSION}.tar.gz" | cut -d' ' -f1)
+          EXPECTED=$(grep -A3 "^version = \"${VERSION}\"$" spa.lock \
+            | sed -n 's/^sha256 = "\([0-9a-f]\{64\}\)"$/\1/p' | head -1 || true)
+          echo "fog-spa-v${VERSION}.tar.gz sha256 = ${ACTUAL}"
+          if [ -z "$EXPECTED" ]; then
+            echo "::warning::spa.lock has no entry for v${VERSION}; 'cargo install --git' at this tag falls back to the newest pinned bundle."
+            echo "::warning::After the asset publishes, pin it in spa.lock with:"
+            echo "::warning::  version = \"${VERSION}\" / sha256 = \"${ACTUAL}\""
+          elif [ "$EXPECTED" != "$ACTUAL" ]; then
+            echo "::error::spa.lock pins ${EXPECTED} for v${VERSION}, but this tarball hashes to ${ACTUAL}."
+            echo "::error::Publishing it would break builds that trust spa.lock; update spa.lock first."
+            exit 1
+          else
+            echo "spa.lock already pins v${VERSION} with this digest."
+          fi
       - name: Publish to crates.io
         uses: katyo/publish-crates@v2
         with:

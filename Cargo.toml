@@ -7,7 +7,7 @@ license = "MIT"
 keywords = ["tui", "proxy", "orchestrator", "terminal", "ratatui"]
 categories = ["command-line-utilities", "development-tools"]
 edition = "2024"
-include = ["src/**/*", "build.rs", "ui/dist/**/*", "README.md", "LICENSE", "fog.schema.json", "fog.json"]
+include = ["src/**/*", "build.rs", "build/**/*", "spa.lock", "ui/dist/**/*", "README.md", "LICENSE", "fog.schema.json", "fog.json"]
 readme = "README.md"
 
 [lib]
@@ -77,6 +77,8 @@ strip = "symbols"
 [build-dependencies]
 brotli = "9.0.0"
 flate2 = "1.1.10"
+# Verifies the pinned SPA tarball against spa.lock before anything is extracted.
+sha2 = "0.10"
 
 [lints.clippy]
 # Production code never unwraps: a panic in the TUI thread takes every service
