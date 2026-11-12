@@ -218,11 +218,11 @@ fn apply_linux(
             Ok(false) => {
                 let content = format!("{line}\n");
                 sudo_write(&file, &content, non_interactive).map_err(|e| {
-                    format!(
+                    FogError::new(format!(
                         "could not write {} ({}); run interactively once",
                         file.display(),
                         e
-                    )
+                    ))
                 })?;
                 changed = true;
                 messages.push(format!(
@@ -247,11 +247,11 @@ fn apply_linux(
         Ok(true) => {}
         Ok(false) => {
             sudo_write(&port_conf, &port_content, non_interactive).map_err(|e| {
-                format!(
+                FogError::new(format!(
                     "could not write {} ({}); run interactively once",
                     port_conf.display(),
                     e
-                )
+                ))
             })?;
             changed = true;
             messages.push(format!(

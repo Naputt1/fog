@@ -70,7 +70,7 @@ pub(crate) fn redirect_daemon_output(dir: &Path) -> io::Result<()> {
 /// Windows has no `dup2`; instead the standard handles are pointed at the log
 /// file, which Rust's stdout/stderr resolve on each write.
 #[cfg(windows)]
-fn redirect_daemon_output(dir: &Path) -> io::Result<()> {
+pub(crate) fn redirect_daemon_output(dir: &Path) -> io::Result<()> {
     use std::os::windows::io::IntoRawHandle;
     use windows_sys::Win32::System::Console::{STD_ERROR_HANDLE, STD_OUTPUT_HANDLE, SetStdHandle};
     let log = fs::File::create(dir.join("daemon.log"))?;
