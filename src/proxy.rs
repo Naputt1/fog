@@ -238,6 +238,14 @@ impl ProxyInstance {
             (Some(cert), Some(key)) => match load_tls_config(cert, key) {
                 Ok(a) => Some(a),
                 Err(e) => {
+                    // Paths (not contents) are safe to log; the reason the TLS
+                    // listener cannot come up is otherwise only a TUI row.
+                    tracing::warn!(
+                        cert = %cert,
+                        key = %key,
+                        error = %e,
+                        "proxy tls config failed"
+                    );
                     let mut lk = logs.lock().expect("mutex poisoned");
                     lk.push_back(LogEntry {
                         method: "ERR".into(),
@@ -272,6 +280,7 @@ impl ProxyInstance {
                 let listener = match TcpListener::bind(&addr).await {
                     Ok(l) => l,
                     Err(e) => {
+                        tracing::error!(addr = %addr, error = %e, "proxy bind failed");
                         let mut lk = logs.lock().expect("mutex poisoned");
                         lk.push_back(LogEntry {
                             method: "ERR".into(),
@@ -295,6 +304,15 @@ impl ProxyInstance {
                 if let Ok(bound) = listener.local_addr() {
                     bound_port.store(bound.port(), Ordering::SeqCst);
                 }
+                // The real bound address, not the configured one: a `port: 0`
+                // config only becomes answerable once the OS picks.
+                tracing::info!(
+                    addr = %addr,
+                    port = bound_port.load(Ordering::SeqCst),
+                    tls = tls_acceptor.is_some(),
+                    routes = routes.len(),
+                    "proxy listener bound"
+                );
 
                 // Configure the upstream client with a connect timeout and a
                 // pool idle timeout so hung upstreams cannot leak connections.
@@ -386,6 +404,10 @@ impl ProxyInstance {
                 }
 
                 running.store(false, Ordering::SeqCst);
+                tracing::debug!(
+                    port = bound_port.load(Ordering::SeqCst),
+                    "proxy accept loop ended"
+                );
             });
         });
 
@@ -393,6 +415,7 @@ impl ProxyInstance {
     }
 
     pub fn stop(&mut self) {
+        tracing::debug!(port = self.bound_port(), "proxy shutdown requested");
         self.shutdown.store(true, Ordering::SeqCst);
         if let Some(h) = self.handle.take() {
             let _ = h.join();
@@ -763,6 +786,12 @@ async fn proxy_ws_pipe(
     }
 
     let ms = start.elapsed().as_millis() as u64;
+    tracing::debug!(
+        path = %log_entry.path,
+        upstream = %log_entry.upstream,
+        duration_ms = ms,
+        "websocket tunnel closed"
+    );
     let mut lk = logs.lock().expect("mutex poisoned");
     lk.push_back(LogEntry {
         method: log_entry.method,
@@ -778,6 +807,7 @@ async fn proxy_ws_pipe(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[tracing::instrument(skip_all, fields(path = %path, ws = true))]
 async fn handle_ws(
     mut req: Request<hyper::body::Incoming>,
     route: &RouteEntry,
@@ -800,6 +830,7 @@ async fn handle_ws(
     let request_bytes = build_ws_request(suffix, query, req.headers(), &upstream_host);
 
     let upstream_str = format!("ws://{}{}", upstream_host, suffix);
+    tracing::debug!(upstream = %upstream_str, "websocket handshake started");
     let log_entry = LogEntry {
         method,
         path,
@@ -813,7 +844,17 @@ async fn handle_ws(
     // failures surface as a 502 instead of a half-open tunnel.
     match connect_ws_upstream(&upstream_host, &request_bytes).await {
         Ok((upstream, (status, headers))) => {
+            tracing::debug!(
+                upstream = %log_entry.upstream,
+                status,
+                "websocket upstream handshake finished"
+            );
             if status != 101 {
+                tracing::warn!(
+                    upstream = %log_entry.upstream,
+                    status,
+                    "websocket upgrade rejected by upstream"
+                );
                 let mut lk = logs.lock().expect("mutex poisoned");
                 lk.push_back(LogEntry {
                     status: 502,
@@ -864,6 +905,10 @@ async fn handle_ws(
                     }
                     Err(_) => {
                         // Client disconnected before the upgrade completed.
+                        tracing::debug!(
+                            path = %le.path,
+                            "client disconnected before websocket upgrade"
+                        );
                         let mut lk = l.lock().expect("mutex poisoned");
                         lk.push_back(LogEntry { status: 502, ..le });
                         if lk.len() > max_log_entries {
@@ -878,6 +923,11 @@ async fn handle_ws(
                 .expect("response builder failed"))
         }
         Err(e) => {
+            tracing::warn!(
+                upstream = %upstream_host,
+                error = %e,
+                "websocket upstream connect failed"
+            );
             let mut lk = logs.lock().expect("mutex poisoned");
             lk.push_back(LogEntry {
                 upstream: format!("ws connect error: {}", e),
@@ -897,6 +947,7 @@ async fn handle_ws(
     }
 }
 
+#[tracing::instrument(skip_all, fields(method = %ctx.method, path = %ctx.path))]
 async fn handle_http(
     ctx: HttpRequestContext<'_>,
 ) -> Result<Response<BoxedBody>, std::convert::Infallible> {
@@ -936,6 +987,7 @@ async fn handle_http(
     let upstream_uri = match build_upstream_uri(&ctx.route.upstream, ctx.suffix, ctx.query) {
         Ok(uri) => uri,
         Err(e) => {
+            tracing::warn!(upstream = %upstream_str, error = %e, "invalid upstream url");
             let mut lk = ctx.logs.lock().expect("mutex poisoned");
             lk.push_back(LogEntry {
                 method: ctx.method,
@@ -1021,6 +1073,11 @@ async fn handle_http(
             Ok(resp)
         }
         Err(e) => {
+            tracing::warn!(
+                upstream = %upstream_str,
+                error = %e,
+                "upstream request failed"
+            );
             let ms = start.elapsed().as_millis() as u64;
             let mut lk = ctx.logs.lock().expect("mutex poisoned");
             lk.push_back(LogEntry {
@@ -1044,6 +1101,10 @@ async fn handle_http(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[tracing::instrument(
+    skip_all,
+    fields(peer = %peer_ip, method = %req.method(), path = %req.uri().path())
+)]
 async fn handle_request(
     req: Request<hyper::body::Incoming>,
     client: Client<HttpConnector, Full<Bytes>>,
@@ -1075,6 +1136,7 @@ async fn handle_request(
         let target = service
             .as_ref()
             .and_then(|s| crate::index::resolve_service_target(s));
+        tracing::debug!(service = ?service, "terminal gateway upgrade");
         if service.is_some() && target.is_none() {
             return Ok(hyper::Response::builder()
                 .status(hyper::StatusCode::NOT_FOUND)
@@ -1099,6 +1161,12 @@ async fn handle_request(
 
     match matched {
         Some((route, suffix)) if is_ws_upgrade(&req) => {
+            tracing::debug!(
+                route = %route.path,
+                upstream = %route.upstream,
+                ws = true,
+                "route matched"
+            );
             handle_ws(
                 req,
                 route,
@@ -1112,6 +1180,12 @@ async fn handle_request(
             .await
         }
         Some((route, suffix)) => {
+            tracing::debug!(
+                route = %route.path,
+                upstream = %route.upstream,
+                ws = false,
+                "route matched"
+            );
             let ctx = HttpRequestContext {
                 req,
                 client,
@@ -1128,6 +1202,7 @@ async fn handle_request(
             handle_http(ctx).await
         }
         None => {
+            tracing::debug!(host = ?host, "no route matched");
             {
                 let mut lk = logs.lock().expect("mutex poisoned");
                 lk.push_back(LogEntry {
