@@ -19,17 +19,6 @@ allow = [
 # no-op there and no longer emitted by `cargo-deny init`); kept because older
 # cargo-deny releases still use it to select v2 semantics.
 version = 2
-ignore = [
-    # rustls-pemfile 2.2.0 - direct runtime dependency, imported in src/proxy.rs
-    # to load the TLS certificate/key PEM files, so it ships in the binary.
-    # RUSTSEC-2025-0134 is informational ("unmaintained") only, not a
-    # vulnerability: the crate is a thin wrapper over the PEM parsing code that
-    # now lives in rustls-pki-types, receives no security fixes because there is
-    # nothing to fix, and 2.2.0 is the final release - no upgrade exists.
-    # Accepted until the two call sites move to rustls_pki_types::pem::PemObject.
-    # Reviewed 2026-11-12.
-    "RUSTSEC-2025-0134",
-]
 
 [bans]
 wildcards = "deny"

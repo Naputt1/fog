@@ -10,9 +10,9 @@ use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use rustls::ServerConfig;
-use rustls_pemfile::{certs, private_key};
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use std::collections::VecDeque;
-use std::fs;
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -82,16 +82,19 @@ trait IoBox: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
 impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> IoBox for T {}
 
 fn load_tls_config(cert_path: &str, key_path: &str) -> FogResult<TlsAcceptor> {
-    let cert_file = &mut std::io::BufReader::new(fs::File::open(cert_path)?);
-    let key_file = &mut std::io::BufReader::new(fs::File::open(key_path)?);
-
-    let cert_chain: Vec<rustls::pki_types::CertificateDer<'_>> =
-        certs(cert_file).filter_map(Result::ok).collect();
+    // A PEM file may hold several blocks; like the old parser, skip the ones
+    // that do not parse rather than failing on the first stray section.
+    let cert_chain: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(cert_path)
+        .map_err(|e| FogError::new(e.to_string()).with_source(e))?
+        .filter_map(Result::ok)
+        .collect();
     if cert_chain.is_empty() {
         return Err(FogError::new("no certificates found"));
     }
-    // `private_key` accepts PKCS#8, PKCS#1 (RSA), and SEC1 (EC) encodings.
-    let key = private_key(key_file)?.ok_or_else(|| FogError::new("no private keys found"))?;
+    // Accepts PKCS#8, PKCS#1 (RSA), and SEC1 (EC) keys, and rejects a file
+    // with no key block.
+    let key = PrivateKeyDer::from_pem_file(key_path)
+        .map_err(|e| FogError::new(e.to_string()).with_source(e))?;
 
     let config = ServerConfig::builder()
         .with_no_client_auth()
