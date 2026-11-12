@@ -1,6 +1,7 @@
 //! Health-check probing and the adaptive per-service health loop.
 
 use crate::config::HealthCheckConfig;
+use crate::service_state::ServiceState;
 use std::net::ToSocketAddrs;
 use std::sync::{
     Arc, Mutex,
@@ -70,6 +71,18 @@ pub enum HealthStatus {
     Starting,
     Healthy,
     Unhealthy,
+}
+
+impl From<HealthStatus> for ServiceState {
+    fn from(status: HealthStatus) -> Self {
+        match status {
+            HealthStatus::Pending => Self::Pending,
+            HealthStatus::Unknown => Self::Unknown,
+            HealthStatus::Starting => Self::Starting,
+            HealthStatus::Healthy => Self::Healthy,
+            HealthStatus::Unhealthy => Self::Unhealthy,
+        }
+    }
 }
 
 /// Probes a single health-check target. Both `tcp` and `http` kinds use a TCP
@@ -184,12 +197,14 @@ pub(super) fn docker_ps_is_healthy(stdout: &str) -> bool {
         let running = entry
             .get("State")
             .and_then(|s| s.as_str())
-            .is_some_and(|s| s == "running");
+            .is_some_and(|s| ServiceState::parse(s) == Some(ServiceState::Running));
         if !running {
             return false;
         }
+        // Docker omits `Health` (or sends an empty string) for a container with
+        // no healthcheck: that cannot fail, so it passes.
         match entry.get("Health").and_then(|h| h.as_str()) {
-            Some(h) if !h.is_empty() => h == "healthy",
+            Some(h) if !h.is_empty() => ServiceState::parse(h) == Some(ServiceState::Healthy),
             _ => true,
         }
     })
