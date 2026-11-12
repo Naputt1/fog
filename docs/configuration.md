@@ -28,6 +28,7 @@ See [`fog.schema.json`](https://github.com/Naputt1/fog/blob/main/fog.schema.json
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `scripts` | `object` | — | Named profiles; each defines its own services and proxy |
+| `$schema` | `string` | — | Editor autocomplete pointer to [`fog.schema.json`](https://github.com/Naputt1/fog/blob/main/fog.schema.json). Ignored by fog |
 | `ports` | `object` | — | Allocatable ports for templating (`${ports.<name>}`); `0` = random free port. Override per run with `--port <name>=<port>`. Use `${ports.<name>@<repo>:<branch>[:<script>]}` to read a port from another running instance (see [Cross-instance ports](#cross-instance-ports)) |
 | `native_routes` | `array` | — | Explicit Traefik file-provider routes for native services |
 | `max_scrollback` | `integer` | `2000` | Maximum scrollback lines per terminal (min: 100) |
@@ -39,6 +40,32 @@ See [`fog.schema.json`](https://github.com/Naputt1/fog/blob/main/fog.schema.json
 | `dnsmasq` | `object` | `null` | Wildcard DNS setup. See [Router & DNS](/router) |
 
 Run-time port overrides: `fog <script> --port <name>=<port>` (repeatable) replaces an allocated port for one run without editing `fog.json`; `--port <name>=0` re-randomizes it. A name not declared in `ports` is added for that run. Overrides apply before templating, so every `${ports.<name>}` consumer — service `cmd`/`env`/health checks, endpoint routes and native routes — resolves to the overridden value. A cross-instance key (`--port api@my-repo:main=4000`, or `--port api@my-repo:main:dev=4000` with a script segment) pins that reference for one run and skips lookup and auto-start.
+
+## Validation
+
+fog validates the config as it loads it and exits with every problem it finds before starting anything. Unknown keys are errors, not warnings: a misspelled `healt_check` or `depend_on` would otherwise silently drop a health check or a dependency, which is the hardest kind of mistake to notice.
+
+```text
+error: invalid config 'fog.json': unknown field `healt_check`, expected one of `name`, `path`, `cmd`, ... at line 6 column 11
+```
+
+Cross references that the parser cannot check are reported with a dotted path, one line per problem:
+
+| Check | Example |
+|-------|---------|
+| Empty `cmd` | `scripts.dev.service[0].cmd: cmd must not be empty` |
+| Duplicate service names in one script | `scripts.dev.service[1]: duplicate service name 'db' (also service[0])` |
+| `depends_on` names a missing service | `scripts.dev.service[0].depends_on: service 'api' depends on unknown service 'db2'` |
+| `depends_on` forms a cycle | `scripts.dev.service: circular dependency detected between services` |
+| `share: true` / `reuse: true` without a health check | `scripts.dev.service[0].share: share: true needs a health_check; without one fog cannot tell whether the service is already up, so it starts the command again` |
+| A `ports` name contains `@` or `:` | `ports.api@main: port name 'api@main' must not contain '@' or ':' (reserved for cross-instance references ...)` |
+| A `native_routes` port is not a port | `native_routes[0]: native_routes for service 'api' has invalid port 'http'` |
+| Endpoint problems (empty/duplicate name, unusable port) | `scripts.dev: service 'api' has duplicate endpoint name 'web'` |
+| Unknown or malformed `${...}` template | `scripts.dev.service[0].cmd: unknown port 'db' in '${ports.db}' (available: api)` |
+
+Only fog's own atoms are templates: `${ports.<name>}`, `${branch}`, `${FOG_BRANCH}`, `${branch_raw}` and `${FOG_BRANCH_RAW}`. Shell expansions such as `${HOME}` are passed through to the shell unchanged.
+
+The same structs parse the global config at `~/.config/fog/fog.json`. It has no entry point of its own, so if it is invalid fog warns once (`warning: invalid config '...'; using the built-in defaults`) and continues rather than failing the run — check that warning line for the key it rejected.
 
 ## Scripts
 
@@ -188,7 +215,7 @@ Services flagged with `"reuse": true` are treated specially to save time when sw
 }
 ```
 
-> `reuse` works best **with** a `health_check` — fog needs it to verify the resource is already up. If `reuse` is set without one, fog warns and starts the `cmd` normally.
+> `reuse` requires a `health_check` — fog needs it to verify the resource is already up. A `reuse` service without one fails config validation (see [Validation](#validation)).
 
 ### Concurrent mode & sharing services
 
@@ -217,7 +244,7 @@ Services flagged `"share": true` are **shared between all concurrent instances**
 }
 ```
 
-> Like `reuse`, `share` works best **with** a `health_check` — fog needs it to verify the resource is already up. If `share` is set without one, fog warns and starts the `cmd` normally (concurrent instances could then race to start the same resource).
+> Like `reuse`, `share` requires a `health_check` — fog needs it to verify the resource is already up. A `share` service without one fails config validation (see [Validation](#validation)), since concurrent instances could otherwise race to start the same resource.
 
 > `reuse` and `share` are mutually exclusive across modes: `reuse` is only honored when `"concurrent": false` (single-instance), and `share` is only honored when `"concurrent": true`. Set `"concurrent": false` to restore the old behavior where a re-run kills the previous instance first (handing over `reuse` services).
 

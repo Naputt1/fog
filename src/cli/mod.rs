@@ -220,10 +220,31 @@ fn load_config(path: &Path) -> Config {
             1,
         );
     }
-    match crate::config::load(path) {
+    let config = match crate::config::load(path) {
         Ok(c) => c,
         Err(e) => fail(&e),
+    };
+    let issues = config.validate();
+    if !issues.is_empty() {
+        // One line per problem, path first, so a typo can be found by the same
+        // dotted path the user would grep for.
+        for issue in &issues {
+            eprintln!("{} {issue}", error_label());
+        }
+        die(
+            &format!(
+                "config '{}' has {} problem{}",
+                path.display(),
+                issues.len(),
+                if issues.len() == 1 { "" } else { "s" }
+            ),
+            Some(
+                "fix the paths above; the config reference is https://naputt1.github.io/fog/configuration",
+            ),
+            1,
+        );
     }
+    config
 }
 
 /// Loads config for `fog index restart` — best-effort, no exit on failure.

@@ -507,7 +507,96 @@ pub struct Config {
     pub project: Option<ProjectConfig>,
 }
 
+/// One problem found by [`Config::validate`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigIssue {
+    /// Dotted path into the config, e.g. `scripts.dev.service[2].depends_on`.
+    pub path: String,
+    /// Lowercase, actionable description of what is wrong.
+    pub message: String,
+}
+
+impl std::fmt::Display for ConfigIssue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.path, self.message)
+    }
+}
+
 impl Config {
+    /// Collects every problem fog can report before starting anything.
+    ///
+    /// Unknown keys are rejected at parse time; this covers the cross
+    /// references serde cannot see: port names, service dependencies,
+    /// `${...}` templates, endpoint/native-route ports, and `share`/`reuse`
+    /// flags that cannot work without a health check. Every issue is collected
+    /// rather than stopping at the first, because agent-written configs
+    /// usually contain more than one mistake and one run per mistake is the
+    /// slow path.
+    pub fn validate(&self) -> Vec<ConfigIssue> {
+        let mut issues = Vec::new();
+        self.validate_port_names(&mut issues);
+
+        // Native routes are shared by every script, so they are checked once
+        // against the local ports plus their own cross-instance references.
+        let local_ports: crate::ports::PortMap = self.ports.clone().unwrap_or_default();
+        let route_ports = port_map_with_external_refs(
+            &local_ports,
+            &ScriptConfig {
+                service: None,
+                proxy: None,
+                terminal: None,
+                concurrent: true,
+            },
+            self.native_routes.as_ref(),
+            "native_routes",
+            &mut issues,
+        );
+        for (i, route) in self.native_routes.iter().flatten().enumerate() {
+            if let Err(message) = crate::ports::validate_native_routes(
+                std::slice::from_ref(route),
+                &route_ports,
+                Some(VALIDATION_BRANCH),
+            ) {
+                issues.push(ConfigIssue {
+                    path: format!("native_routes[{i}]"),
+                    message,
+                });
+            }
+        }
+
+        let mut script_names: Vec<&String> = self.scripts.keys().collect();
+        script_names.sort();
+        for name in script_names {
+            validate_script(
+                &self.scripts[name],
+                &format!("scripts.{name}"),
+                &local_ports,
+                self.native_routes.as_ref(),
+                &mut issues,
+            );
+        }
+        issues
+    }
+
+    /// Port names are `ports.<name>` atoms, so `@` and `:` would make
+    /// `${ports.api}` ambiguous with the cross-instance
+    /// `${ports.api@repo:branch}` form. Same rule as `ports::allocate_ports`.
+    fn validate_port_names(&self, issues: &mut Vec<ConfigIssue>) {
+        let Some(ports) = &self.ports else { return };
+        let mut names: Vec<&String> = ports.keys().collect();
+        names.sort();
+        for name in names {
+            if name.contains('@') || name.contains(':') {
+                issues.push(ConfigIssue {
+                    path: format!("ports.{name}"),
+                    message: format!(
+                        "port name '{name}' must not contain '@' or ':' (reserved for cross-instance references like ${{ports.api@my-repo:main}})"
+                    ),
+                });
+            }
+        }
+    }
+
     /// Whether this project should serve the index server when a script starts.
     /// Default `true` when `index` is absent or `enabled` is not set.
     pub fn should_serve_index(&self) -> bool {
@@ -570,6 +659,207 @@ impl Config {
     }
 }
 
+/// Stand-in branch for static template checks: validation runs before fog knows
+/// which worktree it will start in, so it only proves that `${branch}`-style
+/// atoms exist, not what they expand to.
+const VALIDATION_BRANCH: &str = "validation";
+
+/// The name a service is known by: its explicit `name`, else its path's
+/// basename. Mirrors the rule `runtime::resolve_dep_order` applies when it
+/// resolves `depends_on`.
+fn effective_name(entry: &ConfigEntry) -> String {
+    entry.name.clone().unwrap_or_else(|| {
+        Path::new(&entry.path)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned()
+    })
+}
+
+fn validate_script(
+    script: &ScriptConfig,
+    base: &str,
+    local_ports: &crate::ports::PortMap,
+    native_routes: Option<&Vec<NativeRouteConfig>>,
+    issues: &mut Vec<ConfigIssue>,
+) {
+    let entries = script.service.as_deref().unwrap_or_default();
+    validate_services(entries, base, issues);
+
+    let port_map = port_map_with_external_refs(local_ports, script, native_routes, base, issues);
+    validate_templates(entries, base, &port_map, issues);
+    if let Err(message) =
+        crate::ports::validate_endpoints(script, &port_map, Some(VALIDATION_BRANCH))
+    {
+        issues.push(ConfigIssue {
+            path: base.to_string(),
+            message,
+        });
+    }
+}
+
+/// Checks one script's service list: empty commands, duplicate names, unknown
+/// `depends_on` targets, dependency cycles, and `share`/`reuse` without a
+/// health check.
+fn validate_services(entries: &[ConfigEntry], base: &str, issues: &mut Vec<ConfigIssue>) {
+    let names: Vec<String> = entries.iter().map(effective_name).collect();
+    let known: std::collections::HashSet<&str> = names.iter().map(String::as_str).collect();
+
+    let mut first_seen: HashMap<&str, usize> = HashMap::with_capacity(entries.len());
+    for (i, name) in names.iter().enumerate() {
+        if let Some(prev) = first_seen.get(name.as_str()) {
+            issues.push(ConfigIssue {
+                path: format!("{base}.service[{i}]"),
+                message: format!("duplicate service name '{name}' (also service[{prev}])"),
+            });
+        } else {
+            first_seen.insert(name.as_str(), i);
+        }
+    }
+
+    for (i, entry) in entries.iter().enumerate() {
+        let entry_base = format!("{base}.service[{i}]");
+        if entry.cmd.trim().is_empty() {
+            issues.push(ConfigIssue {
+                path: format!("{entry_base}.cmd"),
+                message: "cmd must not be empty".to_string(),
+            });
+        }
+        for dep in entry.depends_on.iter().flatten() {
+            if !known.contains(dep.as_str()) {
+                issues.push(ConfigIssue {
+                    path: format!("{entry_base}.depends_on"),
+                    message: format!("service '{}' depends on unknown service '{dep}'", names[i]),
+                });
+            }
+        }
+        // A `share`d/`reuse`d resource is only borrowed when fog can verify it
+        // is already up, which needs a health check (on the service or on one
+        // of its endpoints).
+        let has_health = entry.health_check.is_some()
+            || entry
+                .endpoint
+                .iter()
+                .flatten()
+                .any(|endpoint| endpoint.health_check.is_some());
+        for (flag, enabled) in [("share", entry.share), ("reuse", entry.reuse)] {
+            if enabled && !has_health {
+                issues.push(ConfigIssue {
+                    path: format!("{entry_base}.{flag}"),
+                    message: format!(
+                        "{flag}: true needs a health_check; without one fog cannot tell whether the service is already up, so it starts the command again"
+                    ),
+                });
+            }
+        }
+    }
+
+    // `runtime::resolve_dep_order` is the only cycle detector: dependency order
+    // must stay identical at run time, and a second implementation would drift.
+    // Feed it a copy whose already-reported duplicate names and unknown edges
+    // are normalized, so a cycle is still found in the same run.
+    let mut graph = entries.to_vec();
+    let mut occurrences: HashMap<String, usize> = HashMap::new();
+    for entry in &mut graph {
+        let name = effective_name(entry);
+        let count = occurrences.entry(name.clone()).or_insert(0);
+        *count += 1;
+        if *count > 1 {
+            entry.name = Some(format!("{name}#{}", *count));
+        }
+    }
+    for entry in &mut graph {
+        if let Some(deps) = entry.depends_on.take() {
+            entry.depends_on = Some(
+                deps.into_iter()
+                    .filter(|dep| known.contains(dep.as_str()))
+                    .collect(),
+            );
+        }
+    }
+    if let Err(message) = crate::runtime::resolve_dep_order(&graph) {
+        issues.push(ConfigIssue {
+            path: format!("{base}.service"),
+            message,
+        });
+    }
+}
+
+/// Checks `${...}` templates in a service's command, shutdown command and env
+/// values. Resolution goes through `ports::resolve_template` so the accepted
+/// atoms and the error text match the runtime, and through `ports::has_template`
+/// so shell expansions like `${HOME}` are left to the shell.
+fn validate_templates(
+    entries: &[ConfigEntry],
+    base: &str,
+    port_map: &crate::ports::PortMap,
+    issues: &mut Vec<ConfigIssue>,
+) {
+    for (i, entry) in entries.iter().enumerate() {
+        let entry_base = format!("{base}.service[{i}]");
+        resolve_template_issue(&entry.cmd, &format!("{entry_base}.cmd"), port_map, issues);
+        if let Some(cmd) = &entry.shutdown_cmd {
+            resolve_template_issue(cmd, &format!("{entry_base}.shutdown_cmd"), port_map, issues);
+        }
+        if let Some(env) = &entry.env {
+            let mut keys: Vec<&String> = env.keys().collect();
+            keys.sort();
+            for key in keys {
+                resolve_template_issue(
+                    &env[key],
+                    &format!("{entry_base}.env.{key}"),
+                    port_map,
+                    issues,
+                );
+            }
+        }
+    }
+}
+
+fn resolve_template_issue(
+    value: &str,
+    path: &str,
+    port_map: &crate::ports::PortMap,
+    issues: &mut Vec<ConfigIssue>,
+) {
+    if !crate::ports::has_template(value) {
+        return;
+    }
+    if let Err(message) = crate::ports::resolve_template(value, port_map, Some(VALIDATION_BRANCH)) {
+        issues.push(ConfigIssue {
+            path: path.to_string(),
+            message,
+        });
+    }
+}
+
+/// Local ports plus a placeholder for every cross-instance
+/// `ports.<name>@<repo>:<branch>` reference in `script`/`native_routes`.
+/// Static checks only care that the reference parses and names something, so a
+/// placeholder value is enough; a malformed reference is reported here.
+fn port_map_with_external_refs(
+    local_ports: &crate::ports::PortMap,
+    script: &ScriptConfig,
+    native_routes: Option<&Vec<NativeRouteConfig>>,
+    path: &str,
+    issues: &mut Vec<ConfigIssue>,
+) -> crate::ports::PortMap {
+    let mut map = local_ports.clone();
+    match crate::ports::collect_external_port_refs(script, native_routes) {
+        Ok(references) => {
+            for reference in references {
+                map.insert(reference.key(), 0);
+            }
+        }
+        Err(message) => issues.push(ConfigIssue {
+            path: path.to_string(),
+            message,
+        }),
+    }
+    map
+}
+
 /// Loads the global fog config (`~/.config/fog/fog.json`, the one with `theme`
 /// etc) if it exists. Used for `index.enabled` global override.
 pub fn load_global_config() -> Option<Config> {
@@ -581,7 +871,20 @@ pub fn load_global_config() -> Option<Config> {
     if !path.is_file() {
         return None;
     }
-    load(&path).ok()
+    match load(&path) {
+        Ok(config) => Some(config),
+        Err(message) => {
+            // Every caller treats the global file as best-effort, and it only
+            // carries host-wide overrides (theme, index). An unknown key now
+            // fails the whole parse, so say once why those overrides stopped
+            // applying instead of silently falling back to the defaults.
+            static WARNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+            if WARNED.set(()).is_ok() {
+                eprintln!("warning: {message}; using the built-in defaults");
+            }
+            None
+        }
+    }
 }
 
 /// Loads and parses a config file, returning a human-readable error on failure.
