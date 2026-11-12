@@ -1,6 +1,7 @@
 use crate::config::{EndpointConfig, HealthCheckConfig, HealthCheckSpec};
 use crate::fds::Fd;
 use crate::process::{self, Signal};
+use crate::service_state::ServiceState;
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize};
 use ratatui::{
     style::Style,
@@ -1455,8 +1456,9 @@ impl Terminal {
             .iter()
             .map(|s| crate::ipc::EndpointStatus {
                 name: s.config.name.clone(),
-                health: format!("{:?}", s.health_status.lock().expect("mutex poisoned"))
-                    .to_lowercase(),
+                health: ServiceState::from(*s.health_status.lock().expect("mutex poisoned"))
+                    .as_str()
+                    .to_string(),
             })
             .collect()
     }

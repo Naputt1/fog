@@ -6,6 +6,7 @@ use crate::click_tab::TabKind;
 use crate::config_watcher;
 use crate::ipc;
 use crate::runtime;
+use crate::service_state::ServiceState;
 use crate::terminal::{HealthStatus, Init};
 use crossterm::event;
 use ratatui::DefaultTerminal;
@@ -463,7 +464,9 @@ impl App {
             services.push(ipc::ServiceStatus {
                 name: item.name.clone(),
                 running: !item.stopped && item.process_running,
-                health: format!("{:?}", item.get_health_status()).to_lowercase(),
+                health: ServiceState::from(item.get_health_status())
+                    .as_str()
+                    .to_string(),
                 endpoints: item.endpoint_statuses(),
                 shutdown_cmd: item.shutdown_cmd.clone(),
             });

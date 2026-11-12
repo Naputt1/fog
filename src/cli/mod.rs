@@ -25,6 +25,7 @@ use crate::completion::CompletionShell;
 use crate::config::Config;
 use crate::config_watcher;
 use crate::ipc;
+use crate::service_state::{ServiceState, Tone};
 use crate::theme::Theme;
 
 const DEFAULT_SCROLLBACK: usize = 2000;
@@ -551,7 +552,7 @@ fn cmd_ls() -> io::Result<()> {
                         let state = if s.running {
                             s.health.clone()
                         } else {
-                            "stopped".to_string()
+                            ServiceState::Stopped.as_str().to_string()
                         };
                         (s.name.clone(), state)
                     })
@@ -710,12 +711,18 @@ fn usage_error(message: impl Into<FogError>, hint: &str) -> ! {
 
 /// ANSI color for a status label, or `None` to leave it plain.
 fn state_color(state: &str) -> Option<&'static str> {
-    match state {
-        "healthy" | "running" => Some(MARKER_GREEN),
-        "unhealthy" | ":down" | "failed" => Some(MARKER_RED),
-        "starting" | "waiting" | "pending" => Some(MARKER_BLUE),
-        "stopped" | "unknown" => Some(ANSI_DIM),
-        _ => None,
+    // `:down` is the proxy column's value rather than a service state, but it
+    // reads as a failure, so it keeps the error colour.
+    if state == ":down" {
+        return Some(MARKER_RED);
+    }
+    match ServiceState::parse(state)?.tone() {
+        Tone::Success => Some(MARKER_GREEN),
+        // No state reports a warning tone today; if one does, it should stand
+        // out like an error rather than fade into the dim neutral colour.
+        Tone::Error | Tone::Warning => Some(MARKER_RED),
+        Tone::Info => Some(MARKER_BLUE),
+        Tone::Neutral => Some(ANSI_DIM),
     }
 }
 
@@ -957,7 +964,10 @@ fn shutdown_lines(
         let (marker, state) = if svc.running {
             (colored(pending, MARKER_BLUE, color), "shutting down")
         } else {
-            (colored(SHUTDOWN_DONE, MARKER_GREEN, color), "stopped")
+            (
+                colored(SHUTDOWN_DONE, MARKER_GREEN, color),
+                ServiceState::Stopped.label(),
+            )
         };
         lines.push(format!("  {marker} {:<width$}  {state}", svc.name));
         for d in detail(svc) {
@@ -980,14 +990,18 @@ struct StartService {
 
 /// Maps a service's running flag and health string to its rendered start
 /// state: the text to show, whether it is up, and whether it came up unhealthy.
+///
+/// The checklist wording ("started", "waiting") differs from
+/// [`ServiceState::label`] on purpose: it collapses every up state into
+/// `started`, and a service that has not come up into `waiting`.
 fn start_service_state(running: bool, health: &str) -> (&'static str, bool, bool) {
-    match health {
-        "healthy" => ("started", true, false),
-        "unhealthy" => ("unhealthy", false, true),
-        "starting" => ("starting", false, false),
+    match ServiceState::parse(health) {
+        Some(ServiceState::Healthy) => ("started", true, false),
+        Some(state @ ServiceState::Unhealthy) => (state.label(), false, true),
+        Some(state @ ServiceState::Starting) => (state.label(), false, false),
         // `pending` without a live process is a service still waiting on a
         // dependency's health check.
-        "pending" if !running => ("waiting", false, false),
+        Some(ServiceState::Pending) if !running => ("waiting", false, false),
         _ if running => ("started", true, false),
         _ => ("waiting", false, false),
     }
@@ -1727,13 +1741,16 @@ fn log_service_rows(status: &ipc::StatusResponse, daemon_exists: bool) -> Vec<(S
             let state = if s.running {
                 s.health.clone()
             } else {
-                "stopped".to_string()
+                ServiceState::Stopped.as_str().to_string()
             };
             (s.name.clone(), state)
         })
         .collect();
     if daemon_exists {
-        rows.push(("daemon".to_string(), "running".to_string()));
+        rows.push((
+            "daemon".to_string(),
+            ServiceState::Running.as_str().to_string(),
+        ));
     }
     if let Some(p) = &status.proxy {
         let state = if p.running {

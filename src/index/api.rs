@@ -4,6 +4,8 @@ use std::path::PathBuf;
 
 use hyper::Response;
 
+use crate::service_state::ServiceState;
+
 use super::{
     FogInstance, IndexEntry, RespBody, discover_compose_containers_filtered_scoped,
     discover_fog_instances, json_response, parse_query, project_icons,
@@ -56,8 +58,9 @@ pub(super) struct ApiService {
     container: String,
     /// `running` for a live container or service; `stopped` for a fog instance
     /// service that is not running right now. Docker discovery only sees live
-    /// containers, so rows derived from it are always `running`.
-    status: String,
+    /// containers, so rows derived from it are always `running`. Serialized by
+    /// its wire name.
+    status: ServiceState,
     url: String,
     ports: Vec<String>,
     health: String,
@@ -86,10 +89,10 @@ pub(super) fn api_service_from(e: IndexEntry) -> ApiService {
         worktree: e.worktree,
         service: e.service,
         container: e.container,
-        status: "running".to_string(),
+        status: ServiceState::Running,
         url,
         ports,
-        health: "unknown".to_string(),
+        health: ServiceState::Unknown.as_str().to_string(),
         pid: None,
         icon: None,
         endpoints: Vec::new(),
@@ -117,7 +120,7 @@ fn api_endpoints_for(
     let svc_status = inst.services.iter().find(|s| s.name == service);
     let parent_health = svc_status
         .map(|s| s.health.clone())
-        .unwrap_or_else(|| "unknown".to_string());
+        .unwrap_or_else(|| ServiceState::Unknown.as_str().to_string());
     let mut out = Vec::new();
     for route in &inst.native_routes {
         let Some(endpoint_name) = route.endpoint.as_deref() else {
@@ -164,7 +167,7 @@ fn api_endpoints_for(
         let health = svc_status
             .and_then(|s| s.endpoints.iter().find(|ss| ss.name == endpoint_name))
             .map(|ss| ss.health.clone())
-            .filter(|h| h != "unknown")
+            .filter(|h| ServiceState::parse(h) != Some(ServiceState::Unknown))
             .unwrap_or_else(|| parent_health.clone());
         out.push(ApiEndpoint {
             name: endpoint_name.to_string(),
@@ -301,7 +304,7 @@ fn synthesize_native_routes(
         let health = health_map
             .get(route.service.as_str())
             .copied()
-            .unwrap_or("unknown");
+            .unwrap_or(ServiceState::Unknown.as_str());
         // Avoid duplicating a docker entry that already covers this host (e.g. if a
         // service is both docker and native in different worktrees, keep both).
         if list
@@ -315,7 +318,7 @@ fn synthesize_native_routes(
             worktree: worktree.to_string(),
             service: route.service.clone(),
             container: format!("fog-{}-{}", inst.pid, route.service),
-            status: service_status(svc_status.running).to_string(),
+            status: ServiceState::from_running(svc_status.running),
             url,
             ports: vec![format!("0.0.0.0:{}->{}/tcp", port, port)],
             health: health.to_string(),
@@ -343,7 +346,7 @@ fn attach_declared_endpoints(
     docker_entries: &[IndexEntry],
 ) {
     for svc in &inst.services {
-        let status = service_status(svc.running).to_string();
+        let status = ServiceState::from_running(svc.running);
         let subs = api_endpoints_for(inst, &svc.name, all_docker, project, worktree);
         if !subs.is_empty() {
             if let Some(existing) = list
@@ -403,11 +406,6 @@ fn attach_declared_endpoints(
             endpoints: Vec::new(),
         });
     }
-}
-
-/// The `status` string for a row derived from a fog instance service.
-fn service_status(running: bool) -> &'static str {
-    if running { "running" } else { "stopped" }
 }
 
 /// `GET /api/services`: every live compose service as JSON, so the SPA logs
@@ -619,7 +617,7 @@ mod tests {
 
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].service, "frontend");
-        assert_eq!(list[0].status, "stopped");
+        assert_eq!(list[0].status.as_str(), "stopped");
         assert_eq!(list[0].pid, Some(4321));
         assert_eq!(list[0].container, "fog-4321-frontend");
     }
@@ -641,7 +639,7 @@ mod tests {
         attach_declared_endpoints(&mut list, &inst, "red-fox", "feat-x", &[], &[]);
 
         assert_eq!(list.len(), 1);
-        assert_eq!(list[0].status, "stopped");
+        assert_eq!(list[0].status.as_str(), "stopped");
         assert_eq!(list[0].pid, Some(4321));
         assert_eq!(list[0].endpoints.len(), 1);
         assert_eq!(list[0].endpoints[0].name, "web");
@@ -666,7 +664,7 @@ mod tests {
 
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].service, "api");
-        assert_eq!(list[0].status, "stopped");
+        assert_eq!(list[0].status.as_str(), "stopped");
         assert_eq!(list[0].url, "https://feat-x.red-fox/");
         assert_eq!(list[0].pid, Some(4321));
     }

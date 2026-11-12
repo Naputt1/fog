@@ -3,6 +3,7 @@
 use super::{ALERT_REPAINT, ALERT_WIDTH, AlertHit, App, Mode};
 use crate::click_tab::TabKind;
 use crate::render;
+use crate::service_state::ServiceState;
 use crate::terminal::HealthStatus;
 use crate::worktree;
 use ratatui::{
@@ -201,11 +202,26 @@ impl App {
             Some(e) if e.pending => span("◌ waiting".to_string(), theme.status_300),
             Some(e) if e.stopped => span("○ stopped".to_string(), theme.stopped),
             Some(e) => match e.health_status {
-                HealthStatus::Healthy => span("● healthy".to_string(), theme.status_200),
-                HealthStatus::Starting => span("● starting".to_string(), theme.status_300),
-                HealthStatus::Unhealthy => span("● unhealthy".to_string(), theme.stopped),
-                HealthStatus::Pending => span("◌ pending".to_string(), theme.status_300),
-                HealthStatus::Unknown => span("○ unknown".to_string(), theme.text_muted),
+                HealthStatus::Healthy => span(
+                    format!("● {}", ServiceState::Healthy.label()),
+                    theme.status_200,
+                ),
+                HealthStatus::Starting => span(
+                    format!("● {}", ServiceState::Starting.label()),
+                    theme.status_300,
+                ),
+                HealthStatus::Unhealthy => span(
+                    format!("● {}", ServiceState::Unhealthy.label()),
+                    theme.stopped,
+                ),
+                HealthStatus::Pending => span(
+                    format!("◌ {}", ServiceState::Pending.label()),
+                    theme.status_300,
+                ),
+                HealthStatus::Unknown => span(
+                    format!("○ {}", ServiceState::Unknown.label()),
+                    theme.text_muted,
+                ),
             },
             None => span("● up".to_string(), theme.text_muted),
         }

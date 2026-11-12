@@ -10,7 +10,8 @@ use std::sync::{Arc, Mutex};
 pub struct EndpointStatus {
     /// Endpoint display name.
     pub name: String,
-    /// Health state: `pending`, `unknown`, `starting`, `healthy`, `unhealthy`.
+    /// Health state; see [`crate::service_state::ServiceState`] for the
+    /// vocabulary shared with the CLI and the SPA.
     pub health: String,
 }
 
@@ -21,7 +22,7 @@ pub struct ServiceStatus {
     pub name: String,
     /// Whether the process is actively running.
     pub running: bool,
-    /// Health check state: `pending`, `unknown`, `healthy`, or `unhealthy`.
+    /// Health check state; see [`crate::service_state::ServiceState`].
     pub health: String,
     /// Declared endpoints (endpoints) and their health. Empty for the
     /// common case of a service with a single implicit endpoint. Omitted from

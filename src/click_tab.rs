@@ -1,3 +1,4 @@
+use crate::service_state::ServiceState;
 use crate::terminal::HealthStatus;
 use crate::theme::Theme;
 use ratatui::{
@@ -286,15 +287,17 @@ impl ClickTab {
 /// stand out at a glance. Healthy rows stay unlabelled.
 fn health_label(e: &TabEntry) -> Option<&'static str> {
     if e.pending {
+        // Waiting on a dependency is a startup phase, not a health reading.
         return Some("waiting");
     }
     if e.stopped {
-        return Some("stopped");
+        return Some(ServiceState::Stopped.label());
     }
-    match e.health_status {
-        HealthStatus::Unhealthy => Some("unhealthy"),
-        HealthStatus::Starting => Some("starting"),
-        HealthStatus::Pending => Some("pending"),
+    let state = ServiceState::from(e.health_status);
+    match state {
+        ServiceState::Unhealthy | ServiceState::Starting | ServiceState::Pending => {
+            Some(state.label())
+        }
         _ => None,
     }
 }
