@@ -9,6 +9,7 @@
 //! startup, and published like allocated ports.
 
 use crate::config::{NativeRouteConfig, ScriptConfig};
+use crate::error::{FogError, FogResult};
 use crate::ports::{self, ExternalPortRef, PickFailure, PortMap};
 use crate::worktree::{self, Worktree};
 use std::collections::{BTreeMap, BTreeSet};
@@ -53,7 +54,7 @@ pub fn resolve(
     owner: Owner<'_>,
     ports_map: &mut PortMap,
     messages: &mut Vec<String>,
-) -> Result<(), String> {
+) -> FogResult<()> {
     let references = ports::collect_external_port_refs(script, native_routes)?;
     if references.is_empty() {
         return Ok(());
@@ -80,7 +81,10 @@ pub fn resolve(
             }
             Err(PickFailure::NoInstance) => pending.push(request),
             Err(failure) => {
-                return Err(ports::format_pick_failure(&request.original, &failure));
+                return Err(FogError::new(ports::format_pick_failure(
+                    &request.original,
+                    &failure,
+                )));
             }
         }
     }
@@ -94,10 +98,10 @@ pub fn resolve(
         .iter()
         .find(|request| request.original.script.is_none())
     {
-        return Err(ports::format_pick_failure(
+        return Err(FogError::new(ports::format_pick_failure(
             &request.original,
             &PickFailure::NoInstance,
-        ));
+        )));
     }
 
     let own = own_identity(owner);
@@ -120,7 +124,7 @@ pub fn resolve(
 
     for (entry, (target, group)) in &groups {
         if inherited.contains(entry) {
-            return Err(cycle_error(group, &inherited, target));
+            return Err(FogError::new(cycle_error(group, &inherited, target)));
         }
     }
 
@@ -149,11 +153,11 @@ pub fn resolve(
             Ok(Some(pid)) => messages.push(format!("started {} (pid {pid})", target.label())),
             Ok(None) => {}
             Err(e) => {
-                return Err(format!(
+                return Err(FogError::new(format!(
                     "'${{{}}}' needs '{}', which could not be started automatically: {e}",
                     group[0].original.atom(),
                     target.label()
-                ));
+                )));
             }
         }
     }
@@ -162,8 +166,10 @@ pub fn resolve(
     // pending reference against the fresh snapshot.
     let instances = ports::live_instances();
     for request in &pending {
-        let (port, pid) = ports::pick_external_port_source(&request.matcher, &instances)
-            .map_err(|failure| ports::format_pick_failure(&request.original, &failure))?;
+        let (port, pid) =
+            ports::pick_external_port_source(&request.matcher, &instances).map_err(|failure| {
+                FogError::new(ports::format_pick_failure(&request.original, &failure))
+            })?;
         ports_map.insert(request.original.key(), port);
         messages.push(resolved_message(request, port, pid));
     }
@@ -180,7 +186,7 @@ struct Request {
     note: Option<String>,
 }
 
-fn request_for(reference: ExternalPortRef, owner: Owner<'_>) -> Result<Request, String> {
+fn request_for(reference: ExternalPortRef, owner: Owner<'_>) -> FogResult<Request> {
     let (matcher, note) = concrete_branch(&reference, owner)?;
     Ok(Request {
         original: reference,
@@ -207,25 +213,25 @@ fn resolved_message(request: &Request, port: u16, pid: u32) -> String {
 fn concrete_branch(
     reference: &ExternalPortRef,
     owner: Owner<'_>,
-) -> Result<(ExternalPortRef, Option<String>), String> {
+) -> FogResult<(ExternalPortRef, Option<String>)> {
     let mut matcher = reference.clone();
     match reference.branch.as_str() {
         "*" => {
             matcher.branch = main_branch_of(&reference.project).map_err(|e| {
-                format!(
+                FogError::new(format!(
                     "'${{{}}}': could not resolve '*' to a branch: {e}",
                     reference.atom()
-                )
+                ))
             })?;
             Ok((matcher, None))
         }
         "?" => {
             let (branch, fell_back) = same_branch_or_main(&reference.project, owner.branch)
                 .map_err(|e| {
-                    format!(
+                    FogError::new(format!(
                         "'${{{}}}': could not resolve '?' to a branch: {e}",
                         reference.atom()
-                    )
+                    ))
                 })?;
             matcher.branch = branch;
             let note = fell_back.then(|| format!("fell back to '{}'", matcher.branch));
@@ -233,12 +239,12 @@ fn concrete_branch(
         }
         _ => {
             let Some(branch) = ports::expand_branch_token(&reference.branch, owner.branch) else {
-                return Err(format!(
+                return Err(FogError::new(format!(
                     "'${{{}}}' uses '${{branch}}' but this config has no branch (detached HEAD); \
                      use a concrete branch, '?' for the same branch with the other repo's main \
                      worktree as fallback, '*' for its main worktree, or --port",
                     reference.atom()
-                ));
+                )));
             };
             matcher.branch = branch;
             Ok((matcher, None))
@@ -247,27 +253,24 @@ fn concrete_branch(
 }
 
 /// The branch checked out in the target repo's main worktree, for `*`.
-fn main_branch_of(project: &str) -> Result<String, String> {
+fn main_branch_of(project: &str) -> FogResult<String> {
     let repo = find_repo(project)?;
     let worktrees = target_worktrees(&repo)?;
     // `git worktree list` prints the main worktree first.
     let main = worktrees
         .first()
-        .ok_or_else(|| format!("'{}' has no worktrees", repo.name))?;
+        .ok_or_else(|| FogError::new(format!("'{}' has no worktrees", repo.name)))?;
     main.branch.clone().ok_or_else(|| {
-        format!(
+        FogError::new(format!(
             "the main worktree of '{}' is on a detached HEAD; use a concrete branch",
             repo.name
-        )
+        ))
     })
 }
 
 /// The branch for `?`: the target worktree on the referencing branch when the
 /// repo has one, otherwise its main-worktree branch. The flag says which.
-fn same_branch_or_main(
-    project: &str,
-    owner_branch: Option<&str>,
-) -> Result<(String, bool), String> {
+fn same_branch_or_main(project: &str, owner_branch: Option<&str>) -> FogResult<(String, bool)> {
     let repo = find_repo(project)?;
     let worktrees = target_worktrees(&repo)?;
     if let Some(owner) = owner_branch
@@ -278,22 +281,19 @@ fn same_branch_or_main(
     Ok((main_branch_of(project)?, true))
 }
 
-fn target_worktrees(repo: &RegisteredRepo) -> Result<Vec<crate::worktree::Worktree>, String> {
+fn target_worktrees(repo: &RegisteredRepo) -> FogResult<Vec<crate::worktree::Worktree>> {
     crate::worktree::list(&repo.dirs[0]).ok_or_else(|| {
-        format!(
+        FogError::new(format!(
             "'{}' is registered at {} but is not inside a git repository",
             repo.name,
             repo.dirs[0].display()
-        )
+        ))
     })
 }
 
 /// Branch of the target worktree that matches `owner` (raw name first, then
 /// slug). `None` when the repo has no such worktree.
-fn pick_branch(
-    worktrees: &[crate::worktree::Worktree],
-    owner: &str,
-) -> Result<Option<String>, String> {
+fn pick_branch(worktrees: &[crate::worktree::Worktree], owner: &str) -> FogResult<Option<String>> {
     if let Some(exact) = worktrees
         .iter()
         .find(|worktree| worktree.branch.as_deref() == Some(owner))
@@ -313,10 +313,10 @@ fn pick_branch(
         1 => Ok(slugged.pop().map(str::to_string)),
         _ => {
             slugged.sort_unstable();
-            Err(format!(
+            Err(FogError::new(format!(
                 "several worktrees match branch '{owner}': {}; use a concrete branch",
                 slugged.join(", ")
-            ))
+            )))
         }
     }
 }
@@ -472,41 +472,41 @@ impl Target {
         format!("{}:{}:{}", self.name, self.branch, self.script)
     }
 
-    fn resolve(reference: &ExternalPortRef) -> Result<Self, String> {
+    fn resolve(reference: &ExternalPortRef) -> FogResult<Self> {
         let script = reference
             .script
             .as_deref()
             .expect("cold start requires a script segment");
         let repo = find_repo(&reference.project)?;
         let worktrees = worktree::list(&repo.dirs[0]).ok_or_else(|| {
-            format!(
+            FogError::new(format!(
                 "cross-instance port '{}': '{}' is registered at {} but is not inside a git \
                  repository",
                 reference.atom(),
                 repo.name,
                 repo.dirs[0].display()
-            )
+            ))
         })?;
         let selected = select_worktree(&worktrees, &reference.branch, &repo)?;
         let branch = selected.branch.clone().unwrap_or_default();
         let config_path = find_config_path(&repo, &worktrees, selected, reference)?;
         let config = crate::config::load(&config_path).map_err(|e| {
-            format!(
+            FogError::new(format!(
                 "cross-instance port '{}': cannot read {}: {e}",
                 reference.atom(),
                 config_path.display()
-            )
+            ))
         })?;
         let Some(script_config) = config.scripts.get(script) else {
             let mut scripts: Vec<&String> = config.scripts.keys().collect();
             scripts.sort();
-            return Err(format!(
+            return Err(FogError::new(format!(
                 "cross-instance port '{}': script '{}' does not exist in {} (scripts: {})",
                 reference.atom(),
                 script,
                 config_path.display(),
                 list_or_none(&scripts)
-            ));
+            )));
         };
         if !declares_port(&config, script_config, &reference.name) {
             let mut names: BTreeSet<String> = config
@@ -519,7 +519,7 @@ impl Target {
                 config.native_routes.as_ref(),
             ));
             let names: Vec<&String> = names.iter().collect();
-            return Err(format!(
+            return Err(FogError::new(format!(
                 "cross-instance port '{}': script '{}' in {} does not declare port '{}' \
                  (available: {})",
                 reference.atom(),
@@ -527,7 +527,7 @@ impl Target {
                 config_path.display(),
                 reference.name,
                 list_or_none(&names)
-            ));
+            )));
         }
         Ok(Self {
             identity: repo.identity,
@@ -560,7 +560,7 @@ fn declares_port(config: &crate::config::Config, script: &ScriptConfig, name: &s
         || ports::referenced_local_port_names(script, config.native_routes.as_ref()).contains(name)
 }
 
-fn find_repo(token: &str) -> Result<RegisteredRepo, String> {
+fn find_repo(token: &str) -> FogResult<RegisteredRepo> {
     let repos = registered_repos();
     let matching: Vec<&RegisteredRepo> = repos
         .iter()
@@ -570,14 +570,14 @@ fn find_repo(token: &str) -> Result<RegisteredRepo, String> {
         1 => Ok(matching[0].clone()),
         0 => {
             let names: Vec<String> = repos.iter().map(|repo| repo.name.clone()).collect();
-            Err(format!(
+            Err(FogError::new(format!(
                 "cross-instance port: no registered fog project matches '{token}' (registered: \
                  {}) — run that project once or add it in the UI, or pass --port to provide the \
                  value",
                 list_or_none(&names.iter().collect::<Vec<_>>())
-            ))
+            )))
         }
-        _ => Err(format!(
+        _ => Err(FogError::new(format!(
             "cross-instance port: project '{token}' is ambiguous between {} — pass --port to \
              choose the value",
             matching
@@ -585,7 +585,7 @@ fn find_repo(token: &str) -> Result<RegisteredRepo, String> {
                 .map(|repo| format!("{} ({})", repo.name, repo.identity))
                 .collect::<Vec<_>>()
                 .join(", ")
-        )),
+        ))),
     }
 }
 
@@ -614,7 +614,7 @@ fn select_worktree<'a>(
     worktrees: &'a [Worktree],
     token: &str,
     repo: &RegisteredRepo,
-) -> Result<&'a Worktree, String> {
+) -> FogResult<&'a Worktree> {
     let matching: Vec<&Worktree> = worktrees
         .iter()
         .filter(|worktree| {
@@ -633,14 +633,14 @@ fn select_worktree<'a>(
                 .collect();
             branches.sort();
             let branches: Vec<&String> = branches.iter().collect();
-            Err(format!(
+            Err(FogError::new(format!(
                 "cross-instance port: '{}' has no worktree on branch '{}' (branches: {})",
                 repo.name,
                 token,
                 list_or_none(&branches)
-            ))
+            )))
         }
-        _ => Err(format!(
+        _ => Err(FogError::new(format!(
             "cross-instance port: branch '{}' of '{}' is ambiguous between {} — use the full branch \
              name",
             token,
@@ -650,7 +650,7 @@ fn select_worktree<'a>(
                 .map(|worktree| worktree.label())
                 .collect::<Vec<_>>()
                 .join(", ")
-        )),
+        ))),
     }
 }
 
@@ -661,7 +661,7 @@ fn find_config_path(
     worktrees: &[Worktree],
     selected: &Worktree,
     reference: &ExternalPortRef,
-) -> Result<PathBuf, String> {
+) -> FogResult<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
     for dir in &repo.dirs {
         let Some(containing) = worktree::containing_worktree(worktrees, dir) else {
@@ -684,14 +684,14 @@ fn find_config_path(
     candidates.dedup();
     match candidates.len() {
         1 => Ok(candidates.into_iter().next().expect("one candidate")),
-        0 => Err(format!(
+        0 => Err(FogError::new(format!(
             "cross-instance port '{}': branch '{}' of '{}' has no fog.json at the registered \
              config location",
             reference.atom(),
             selected.branch.as_deref().unwrap_or("?"),
             repo.name
-        )),
-        _ => Err(format!(
+        ))),
+        _ => Err(FogError::new(format!(
             "cross-instance port '{}': branch '{}' of '{}' has several fog.json candidates ({}) — \
              pass --port to choose the value",
             reference.atom(),
@@ -702,7 +702,7 @@ fn find_config_path(
                 .map(|path| path.display().to_string())
                 .collect::<Vec<_>>()
                 .join(", ")
-        )),
+        ))),
     }
 }
 
@@ -844,7 +844,7 @@ mod tests {
             branch: None,
             script_name: "web",
         };
-        let err = request_for(reference, owner).unwrap_err();
+        let err = request_for(reference, owner).unwrap_err().to_string();
         assert!(err.contains("detached HEAD"), "{err}");
         assert!(err.contains("--port"), "{err}");
     }
@@ -885,7 +885,7 @@ mod tests {
             branch: Some(branch.to_string()),
         };
         let trees = vec![worktree("feat-login"), worktree("feat/login")];
-        let err = pick_branch(&trees, "feat.login").unwrap_err();
+        let err = pick_branch(&trees, "feat.login").unwrap_err().to_string();
         assert!(err.contains("several worktrees"), "{err}");
         assert!(err.contains("feat-lo"), "{err}");
     }
@@ -939,7 +939,9 @@ mod tests {
         // `find_repo` reads the real registry; the matching rule it applies is
         // covered by `project_matches`, tested in ports.rs. Here only the
         // empty-registry error shape is asserted to stay actionable.
-        let err = find_repo("definitely-not-a-registered-repo").unwrap_err();
+        let err = find_repo("definitely-not-a-registered-repo")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("registered"), "{err}");
         assert!(err.contains("--port"), "{err}");
     }

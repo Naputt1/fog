@@ -1,4 +1,5 @@
 use crate::config::DnsmasqConfig;
+use crate::error::{FogError, FogResult};
 use std::fs;
 #[cfg(target_os = "macos")]
 use std::io::Write;
@@ -38,11 +39,7 @@ pub fn ensure(cfg: &DnsmasqConfig, non_interactive: bool) -> Vec<String> {
 }
 
 /// Platform-specific application of the wildcard routes.
-fn apply(
-    cfg: &DnsmasqConfig,
-    non_interactive: bool,
-    messages: &mut Vec<String>,
-) -> Result<(), String> {
+fn apply(cfg: &DnsmasqConfig, non_interactive: bool, messages: &mut Vec<String>) -> FogResult<()> {
     #[cfg(target_os = "macos")]
     {
         apply_macos(cfg, non_interactive, messages)
@@ -53,10 +50,10 @@ fn apply(
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        Err(format!(
+        Err(FogError::new(format!(
             "wildcard DNS setup is only supported on macOS and Linux (running on {})",
             std::env::consts::OS
-        ))
+        )))
     }
 }
 
@@ -64,8 +61,12 @@ fn apply(
 /// path or a dnsmasq config line. Accepts a lowercase dotted hostname whose
 /// labels are `[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?`, which rejects path
 /// separators, quotes, whitespace, shell metacharacters, uppercase, and `..`.
-fn validate_domain(domain: &str) -> Result<(), String> {
-    let bad = || format!("invalid domain {domain:?}: must be a lowercase hostname");
+fn validate_domain(domain: &str) -> FogResult<()> {
+    let bad = || {
+        FogError::new(format!(
+            "invalid domain {domain:?}: must be a lowercase hostname"
+        ))
+    };
     if domain.is_empty() || domain.len() > 253 || domain.starts_with('.') || domain.ends_with('.') {
         return Err(bad());
     }
@@ -92,9 +93,9 @@ fn apply_macos(
     cfg: &DnsmasqConfig,
     non_interactive: bool,
     messages: &mut Vec<String>,
-) -> Result<(), String> {
+) -> FogResult<()> {
     let prefix = detect_homebrew_prefix().ok_or_else(|| {
-        "could not find a Homebrew dnsmasq.conf under /opt/homebrew or /usr/local".to_string()
+        FogError::new("could not find a Homebrew dnsmasq.conf under /opt/homebrew or /usr/local")
     })?;
     apply_macos_at(
         cfg,
@@ -117,11 +118,11 @@ fn apply_macos_at(
     non_interactive: bool,
     restart: bool,
     messages: &mut Vec<String>,
-) -> Result<(), String> {
+) -> FogResult<()> {
     let dnsmasq_d = prefix.join("etc/dnsmasq.d");
     let dnsmasq_conf = prefix.join("etc/dnsmasq.conf");
     fs::create_dir_all(&dnsmasq_d)
-        .map_err(|e| format!("could not create {}: {}", dnsmasq_d.display(), e))?;
+        .map_err(|e| FogError::new(format!("could not create {}: {}", dnsmasq_d.display(), e)))?;
 
     let mut changed = false;
 
@@ -204,7 +205,7 @@ fn apply_linux(
     cfg: &DnsmasqConfig,
     non_interactive: bool,
     messages: &mut Vec<String>,
-) -> Result<(), String> {
+) -> FogResult<()> {
     let dnsmasq_d = PathBuf::from("/etc/dnsmasq.d");
 
     let mut changed = false;
@@ -290,27 +291,39 @@ fn command_exists(name: &str) -> bool {
 /// Reads a file, treating a missing file as empty content. Used by the
 /// idempotency checks so a first run writes the config instead of erroring.
 #[cfg(target_os = "macos")]
-fn read_optional(path: &Path) -> Result<String, String> {
+fn read_optional(path: &Path) -> FogResult<String> {
     match fs::read_to_string(path) {
         Ok(s) => Ok(s),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
-        Err(e) => Err(format!("could not read {}: {}", path.display(), e)),
+        Err(e) => Err(FogError::new(format!(
+            "could not read {}: {}",
+            path.display(),
+            e
+        ))),
     }
 }
 
 #[cfg(target_os = "macos")]
-fn write_file(path: &Path, content: &str) -> Result<(), String> {
-    fs::write(path, content).map_err(|e| format!("could not write {}: {}", path.display(), e))
+fn write_file(path: &Path, content: &str) -> FogResult<()> {
+    fs::write(path, content)
+        .map_err(|e| FogError::new(format!("could not write {}: {}", path.display(), e)))
 }
 
 #[cfg(target_os = "macos")]
-fn append_line(path: &Path, line: &str) -> Result<(), String> {
+fn append_line(path: &Path, line: &str) -> FogResult<()> {
     let mut f = fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)
-        .map_err(|e| format!("could not open {} for append: {}", path.display(), e))?;
-    writeln!(f, "{line}").map_err(|e| format!("could not write {}: {}", path.display(), e))
+        .map_err(|e| {
+            FogError::new(format!(
+                "could not open {} for append: {}",
+                path.display(),
+                e
+            ))
+        })?;
+    writeln!(f, "{line}")
+        .map_err(|e| FogError::new(format!("could not write {}: {}", path.display(), e)))
 }
 
 /// Builds the argument vectors `sudo_write` invokes: `install(1)` to move the
@@ -335,7 +348,7 @@ fn sudo_write_argv(tmp: &Path, path: &Path) -> [Vec<String>; 2] {
 /// Writes `content` to `path`, escalating to `sudo` when the path is not
 /// writable. In non-interactive mode sudo runs with `-n` so it cannot block on
 /// a password prompt.
-fn sudo_write(path: &Path, content: &str, non_interactive: bool) -> Result<(), String> {
+fn sudo_write(path: &Path, content: &str, non_interactive: bool) -> FogResult<()> {
     if let Some(parent) = path.parent()
         && !parent.exists()
     {
@@ -354,7 +367,8 @@ fn sudo_write(path: &Path, content: &str, non_interactive: bool) -> Result<(), S
             .unwrap_or_default()
             .as_nanos()
     ));
-    fs::write(&tmp, content).map_err(|e| format!("could not stage {}: {}", tmp.display(), e))?;
+    fs::write(&tmp, content)
+        .map_err(|e| FogError::new(format!("could not stage {}: {}", tmp.display(), e)))?;
     // Run as argv, never through a shell, so a config-derived `path` cannot
     // inject commands into a root shell.
     let argv = sudo_write_argv(&tmp, path);
@@ -367,12 +381,15 @@ fn sudo_write(path: &Path, content: &str, non_interactive: bool) -> Result<(), S
         Ok(())
     } else {
         let _ = fs::remove_file(&tmp);
-        Err(format!("sudo write to {} failed", path.display()))
+        Err(FogError::new(format!(
+            "sudo write to {} failed",
+            path.display()
+        )))
     }
 }
 
 #[cfg(target_os = "linux")]
-fn sudo_read_contains(path: &Path, needle: &str, non_interactive: bool) -> Result<bool, String> {
+fn sudo_read_contains(path: &Path, needle: &str, non_interactive: bool) -> FogResult<bool> {
     // A missing file means "route not configured yet" — the caller will write
     // it, rather than this being treated as an error.
     let exists = run_sudo_output(&["test", "-e", &path.to_string_lossy()], non_interactive).is_ok();
@@ -516,7 +533,7 @@ fn service_dnsmasq(action: &str, non_interactive: bool, messages: &mut Vec<Strin
 /// Boots out any user-level `homebrew.mxcl.dnsmasq` LaunchAgent so it cannot
 /// compete with (or shadow) the root LaunchDaemon draining :53.
 #[cfg(target_os = "macos")]
-fn bootout_user_agent(non_interactive: bool) -> Result<(), String> {
+fn bootout_user_agent(non_interactive: bool) -> FogResult<()> {
     let domain = format!("gui/{}", unsafe { libc::getuid() });
     // Only try to unload if it is actually registered; otherwise bootout fails
     // with a confusing error.
@@ -536,34 +553,40 @@ fn bootout_user_agent(non_interactive: bool) -> Result<(), String> {
     c.args(["launchctl", "bootout", &domain, "homebrew.mxcl.dnsmasq"]);
     match c.status() {
         Ok(s) if s.success() => Ok(()),
-        Ok(_) | Err(_) => Err("launchctl bootout homebrew.mxcl.dnsmasq failed".to_string()),
+        Ok(_) | Err(_) => Err(FogError::new(
+            "launchctl bootout homebrew.mxcl.dnsmasq failed".to_string(),
+        )),
     }
 }
 
-fn run_sudo(args: &[&str], non_interactive: bool) -> Result<(), String> {
+fn run_sudo(args: &[&str], non_interactive: bool) -> FogResult<()> {
     let mut cmd = Command::new("sudo");
     if non_interactive {
         cmd.arg("-n");
     }
     cmd.args(args);
-    let status = cmd.status().map_err(|e| format!("sudo: {e}"))?;
+    let status = cmd
+        .status()
+        .map_err(|e| FogError::new(format!("sudo: {e}")))?;
     if status.success() {
         Ok(())
     } else {
-        Err(format!("sudo exited with {}", status))
+        Err(FogError::new(format!("sudo exited with {}", status)))
     }
 }
 
 #[cfg(target_os = "linux")]
-fn run_sudo_output(args: &[&str], non_interactive: bool) -> Result<String, String> {
+fn run_sudo_output(args: &[&str], non_interactive: bool) -> FogResult<String> {
     let mut cmd = Command::new("sudo");
     if non_interactive {
         cmd.arg("-n");
     }
     cmd.args(args);
-    let out = cmd.output().map_err(|e| format!("sudo: {e}"))?;
+    let out = cmd
+        .output()
+        .map_err(|e| FogError::new(format!("sudo: {e}")))?;
     if !out.status.success() {
-        return Err(format!("sudo exited with {}", out.status));
+        return Err(FogError::new(format!("sudo exited with {}", out.status)));
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
@@ -623,7 +646,9 @@ mod tests {
 
     #[test]
     fn test_validate_domain_rejects_shell_injection() {
-        let err = validate_domain("x'; touch /tmp/pwned; '").unwrap_err();
+        let err = validate_domain("x'; touch /tmp/pwned; '")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("invalid domain"), "unexpected error: {err}");
         assert!(validate_domain("../etc/passwd").is_err());
         assert!(validate_domain("").is_err());

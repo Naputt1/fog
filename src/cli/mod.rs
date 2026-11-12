@@ -2,6 +2,7 @@
 
 #![deny(unsafe_op_in_unsafe_fn)]
 
+use crate::error::{FogError, FogResult};
 use clap::parser::ValueSource;
 use clap::{CommandFactory, FromArgMatches, Parser};
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
@@ -222,7 +223,7 @@ fn load_config(path: &Path) -> Config {
     }
     let config = match crate::config::load(path) {
         Ok(c) => c,
-        Err(e) => fail(&e),
+        Err(e) => fail(e),
     };
     let issues = config.validate();
     if !issues.is_empty() {
@@ -232,15 +233,16 @@ fn load_config(path: &Path) -> Config {
             eprintln!("{} {issue}", error_label());
         }
         die(
-            &format!(
+            FogError::new(format!(
                 "config '{}' has {} problem{}",
                 path.display(),
                 issues.len(),
                 if issues.len() == 1 { "" } else { "s" }
-            ),
-            Some(
+            ))
+            .with_hint(
                 "fix the paths above; the config reference is https://naputt1.github.io/fog/configuration",
             ),
+            None,
             1,
         );
     }
@@ -684,22 +686,25 @@ fn error_label() -> String {
 
 /// Prints `error: <message>` and an optional `hint:` line to stderr, then
 /// exits with `code`.
-fn die(message: &str, hint: Option<&str>, code: i32) -> ! {
+fn die(error: impl Into<FogError>, hint: Option<&str>, code: i32) -> ! {
+    let error = error.into();
     let tty = stderr_color_enabled();
-    eprintln!("{} {message}", error_label());
-    if let Some(hint) = hint {
+    eprintln!("{} {}", error_label(), error.message());
+    // An error that carries its own hint owns the recovery advice; the
+    // explicit `hint` argument is for callers that only compute one.
+    if let Some(hint) = error.hint().or(hint) {
         eprintln!("{} {hint}", colored("hint:", MARKER_BLUE, tty));
     }
     std::process::exit(code);
 }
 
 /// A runtime failure (the command was understood but could not run).
-fn fail(message: &str) -> ! {
-    die(message, None, 1)
+fn fail(error: impl Into<FogError>) -> ! {
+    die(error, None, 1)
 }
 
 /// Bad or conflicting flags: exits with clap's usage exit code.
-fn usage_error(message: &str, hint: &str) -> ! {
+fn usage_error(message: impl Into<FogError>, hint: &str) -> ! {
     die(message, Some(hint), 2)
 }
 
@@ -1554,16 +1559,18 @@ fn select_targets(
     all: bool,
     local_dir: Option<&Path>,
     cmd: &str,
-) -> Result<Vec<(u32, PathBuf)>, String> {
+) -> FogResult<Vec<(u32, PathBuf)>> {
     if let Some(pid) = pid {
         if all {
-            return Err(format!("--all cannot be used with a PID (got {pid})"));
+            return Err(FogError::new(format!(
+                "--all cannot be used with a PID (got {pid})"
+            )));
         }
         return instances
             .iter()
             .find(|(p, _)| *p == pid)
             .map(|(p, path)| vec![(*p, path.clone())])
-            .ok_or_else(|| format!("no fog instance with pid {pid}"));
+            .ok_or_else(|| FogError::new(format!("no fog instance with pid {pid}")));
     }
 
     if all {
@@ -1580,10 +1587,10 @@ fn select_targets(
                     .map(|(p, path)| (*p, path.clone()))
                     .collect();
                 if matched.is_empty() {
-                    return Err(format!(
+                    return Err(FogError::new(format!(
                         "no fog instances from this config ({}); nothing to apply --all to",
                         dir.display()
-                    ));
+                    )));
                 }
                 return Ok(matched);
             }
@@ -1623,7 +1630,7 @@ fn select_targets(
                         n = matched.len()
                     ));
                 }
-                return Err(msg);
+                return Err(FogError::new(msg));
             }
         }
     }
@@ -1635,7 +1642,7 @@ fn select_targets(
         for (p, _) in instances {
             msg.push_str(&format!("\n  fog {cmd} {p}"));
         }
-        Err(msg)
+        Err(FogError::new(msg))
     }
 }
 
@@ -1651,7 +1658,7 @@ fn resolve_targets(
     let statuses = query_statuses(instances);
     match select_targets(instances, &statuses, pid, all, local.as_deref(), cmd) {
         Ok(targets) => targets,
-        Err(message) => fail(&message),
+        Err(message) => fail(message),
     }
 }
 
@@ -1753,7 +1760,7 @@ enum LineRange {
 }
 
 /// Parses `--head`: `N` (first N) or `-N` (all but the last N).
-fn parse_head_spec(s: &str) -> Result<LineRange, String> {
+fn parse_head_spec(s: &str) -> FogResult<LineRange> {
     let (digits, make): (&str, fn(usize) -> LineRange) = match s.strip_prefix('-') {
         Some(rest) => (rest, LineRange::ExceptLast),
         None => (s, LineRange::First),
@@ -1761,11 +1768,11 @@ fn parse_head_spec(s: &str) -> Result<LineRange, String> {
     digits
         .parse::<usize>()
         .map(make)
-        .map_err(|_| format!("invalid --head value '{s}': expected N or -N"))
+        .map_err(|_| FogError::new(format!("invalid --head value '{s}': expected N or -N")))
 }
 
 /// Parses `--tail`: `N`/`-N` (last N) or `+N` (from line N to the end).
-fn parse_tail_spec(s: &str) -> Result<LineRange, String> {
+fn parse_tail_spec(s: &str) -> FogResult<LineRange> {
     let (digits, make): (&str, fn(usize) -> LineRange) = match s.strip_prefix('+') {
         Some(rest) => (rest, LineRange::From),
         None => (s.strip_prefix('-').unwrap_or(s), LineRange::Last),
@@ -1773,7 +1780,7 @@ fn parse_tail_spec(s: &str) -> Result<LineRange, String> {
     digits
         .parse::<usize>()
         .map(make)
-        .map_err(|_| format!("invalid --tail value '{s}': expected N, -N or +N"))
+        .map_err(|_| FogError::new(format!("invalid --tail value '{s}': expected N, -N or +N")))
 }
 
 /// Resolves a window against a file of `total` lines into a half-open
@@ -3802,15 +3809,18 @@ mod tests {
     #[test]
     fn test_select_targets_unknown_pid_errors() {
         let (instances, statuses) = target_fixtures();
-        let err =
-            select_targets(&instances, &statuses, Some(999), false, None, "kill").unwrap_err();
+        let err = select_targets(&instances, &statuses, Some(999), false, None, "kill")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("no fog instance with pid 999"));
     }
 
     #[test]
     fn test_select_targets_pid_and_all_conflict() {
         let (instances, statuses) = target_fixtures();
-        let err = select_targets(&instances, &statuses, Some(101), true, None, "kill").unwrap_err();
+        let err = select_targets(&instances, &statuses, Some(101), true, None, "kill")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("--all cannot be used with a PID"));
     }
 
@@ -3839,8 +3849,9 @@ mod tests {
     fn test_select_targets_all_local_no_match_errors() {
         let (instances, statuses) = target_fixtures();
         let local = temp_dir();
-        let err =
-            select_targets(&instances, &statuses, None, true, Some(&local), "kill").unwrap_err();
+        let err = select_targets(&instances, &statuses, None, true, Some(&local), "kill")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("no fog instances from this config"));
         let _ = fs::remove_dir_all(&local);
     }
@@ -3875,8 +3886,9 @@ mod tests {
         let (instances, statuses) = target_fixtures();
         // dir of pid 101/102: recover from statuses.
         let local = PathBuf::from(statuses[&101].config_dir.as_deref().unwrap());
-        let err =
-            select_targets(&instances, &statuses, None, false, Some(&local), "kill").unwrap_err();
+        let err = select_targets(&instances, &statuses, None, false, Some(&local), "kill")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("multiple fog instances from this config"));
         assert!(err.contains("fog kill 101"));
         assert!(err.contains("fog kill 102"));
@@ -3891,8 +3903,9 @@ mod tests {
     fn test_select_targets_pidless_multi_local_logs_has_no_all_hint() {
         let (instances, statuses) = target_fixtures();
         let local = PathBuf::from(statuses[&101].config_dir.as_deref().unwrap());
-        let err =
-            select_targets(&instances, &statuses, None, false, Some(&local), "logs").unwrap_err();
+        let err = select_targets(&instances, &statuses, None, false, Some(&local), "logs")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("fog logs 101"));
         assert!(!err.contains("--all"));
     }
@@ -3925,7 +3938,8 @@ mod tests {
         statuses.insert(42, status_with_dir(Some(&dir_b.to_string_lossy())));
         let elsewhere = temp_dir();
         let err = select_targets(&instances, &statuses, None, false, Some(&elsewhere), "kill")
-            .unwrap_err();
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("multiple fog instances running"));
         assert!(err.contains("fog kill 41"));
         assert!(err.contains("fog kill 42"));

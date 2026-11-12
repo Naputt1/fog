@@ -1,4 +1,5 @@
 use crate::config::RouterConfig;
+use crate::error::{FogError, FogResult};
 use crate::process::run_with_timeout;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -485,7 +486,7 @@ fn ensure_named_cert(
     cert_dir: &Path,
     dynamic_dir: &Path,
     messages: &mut Vec<String>,
-) -> Result<(), String> {
+) -> FogResult<()> {
     let cert_file = cert_dir.join(format!("{name}.pem"));
     let key_file = cert_dir.join(format!("{name}-key.pem"));
     let sans_file = cert_dir.join(format!("{name}.sans"));
@@ -507,8 +508,9 @@ fn ensure_named_cert(
             .map(|c| c != content)
             .unwrap_or(true)
         {
-            fs::write(&dyn_file, &content)
-                .map_err(|e| format!("could not write {}: {}", dyn_file.display(), e))?;
+            fs::write(&dyn_file, &content).map_err(|e| {
+                FogError::new(format!("could not write {}: {}", dyn_file.display(), e))
+            })?;
         }
         return Ok(());
     }
@@ -527,15 +529,15 @@ fn ensure_named_cert(
     match status {
         Ok(s) if s.success() => {}
         Ok(_) | Err(_) => {
-            return Err(format!("mkcert failed for {name}"));
+            return Err(FogError::new(format!("mkcert failed for {name}")));
         }
     }
 
     fs::write(&sans_file, &desired)
-        .map_err(|e| format!("could not write {}: {}", sans_file.display(), e))?;
+        .map_err(|e| FogError::new(format!("could not write {}: {}", sans_file.display(), e)))?;
     // Rewrite (touch) the dynamic config so Traefik hot-reloads the new cert.
     fs::write(&dyn_file, &content)
-        .map_err(|e| format!("could not write {}: {}", dyn_file.display(), e))?;
+        .map_err(|e| FogError::new(format!("could not write {}: {}", dyn_file.display(), e)))?;
     Ok(())
 }
 
@@ -551,22 +553,22 @@ fn ensure_tls(
     cfg: &RouterConfig,
     domains: &[String],
     messages: &mut Vec<String>,
-) -> Result<(PathBuf, PathBuf), String> {
+) -> FogResult<(PathBuf, PathBuf)> {
     if !command_exists("mkcert") {
-        return Err(
+        return Err(FogError::new(
             "mkcert is not installed; install it with `brew install mkcert` and run \
              `mkcert -install` once"
                 .to_string(),
-        );
+        ));
     }
 
     let cert_dir = PathBuf::from(&cfg.tls.cert_dir);
     fs::create_dir_all(&cert_dir)
-        .map_err(|e| format!("could not create {}: {}", cert_dir.display(), e))?;
+        .map_err(|e| FogError::new(format!("could not create {}: {}", cert_dir.display(), e)))?;
     // Traefik file-provider dynamic config, mounted read-only into the container.
     let dynamic_dir = cert_dir.join("dynamic");
     fs::create_dir_all(&dynamic_dir)
-        .map_err(|e| format!("could not create {}: {}", dynamic_dir.display(), e))?;
+        .map_err(|e| FogError::new(format!("could not create {}: {}", dynamic_dir.display(), e)))?;
 
     // Hostnames already routed through the file provider, used to discover
     // nested service subdomains that need their own wildcard SAN.
@@ -620,24 +622,30 @@ fn command_exists(name: &str) -> bool {
     crate::process::command_exists(name)
 }
 
-fn network_exists(name: &str) -> Result<bool, String> {
+fn network_exists(name: &str) -> FogResult<bool> {
     let mut cmd = Command::new("docker");
     cmd.args(["network", "inspect", name]);
     match run_with_timeout(cmd, DOCKER_CMD_TIMEOUT) {
         Some(out) => Ok(out.status.success()),
-        None => Err(docker_timeout_msg("network inspect", DOCKER_CMD_TIMEOUT)),
+        None => Err(FogError::new(docker_timeout_msg(
+            "network inspect",
+            DOCKER_CMD_TIMEOUT,
+        ))),
     }
 }
 
-fn create_network(name: &str) -> Result<(), String> {
+fn create_network(name: &str) -> FogResult<()> {
     let mut cmd = Command::new("docker");
     cmd.args(["network", "create", name]);
     let out = run_with_timeout(cmd, DOCKER_CMD_TIMEOUT)
-        .ok_or_else(|| docker_timeout_msg("network create", DOCKER_CMD_TIMEOUT))?;
+        .ok_or_else(|| FogError::new(docker_timeout_msg("network create", DOCKER_CMD_TIMEOUT)))?;
     if out.status.success() {
         Ok(())
     } else {
-        Err(format!("docker network create exited with {}", out.status))
+        Err(FogError::new(format!(
+            "docker network create exited with {}",
+            out.status
+        )))
     }
 }
 
@@ -672,15 +680,18 @@ fn container_tls_enabled(name: &str) -> bool {
     }
 }
 
-fn remove_container(name: &str) -> Result<(), String> {
+fn remove_container(name: &str) -> FogResult<()> {
     let mut cmd = Command::new("docker");
     cmd.args(["rm", "-f", name]);
     let out = run_with_timeout(cmd, DOCKER_CMD_TIMEOUT)
-        .ok_or_else(|| docker_timeout_msg("rm", DOCKER_CMD_TIMEOUT))?;
+        .ok_or_else(|| FogError::new(docker_timeout_msg("rm", DOCKER_CMD_TIMEOUT)))?;
     if out.status.success() {
         Ok(())
     } else {
-        Err(format!("docker rm exited with {}", out.status))
+        Err(FogError::new(format!(
+            "docker rm exited with {}",
+            out.status
+        )))
     }
 }
 
@@ -699,11 +710,7 @@ fn should_recreate(running: bool, running_tls: bool, tls_requested: bool) -> boo
 /// Starts the router container. When TLS is enabled, mounts the cert dir
 /// (`/certs`) and the file-provider dynamic dir (`/etc/fog/dynamic`) read-only,
 /// adds a `websecure` entrypoint on `:443`, and publishes `443:443`.
-fn start_router(
-    cfg: &RouterConfig,
-    container: &str,
-    tls: Option<(&Path, &Path)>,
-) -> Result<(), String> {
+fn start_router(cfg: &RouterConfig, container: &str, tls: Option<(&Path, &Path)>) -> FogResult<()> {
     let dashboard_port = cfg.dashboard_port.unwrap_or(8080).to_string();
     // Docker CLI flags come before the image; everything after the image name
     // is Traefik's own command line, so the provider/entrypoint flags must be
@@ -763,11 +770,14 @@ fn start_router(
         .arg("--api.insecure")
         .arg("--log.level=ERROR");
     let out = run_with_timeout(cmd, DOCKER_RUN_TIMEOUT)
-        .ok_or_else(|| docker_timeout_msg("run", DOCKER_RUN_TIMEOUT))?;
+        .ok_or_else(|| FogError::new(docker_timeout_msg("run", DOCKER_RUN_TIMEOUT)))?;
     if out.status.success() {
         Ok(())
     } else {
-        Err(format!("docker run exited with {}", out.status))
+        Err(FogError::new(format!(
+            "docker run exited with {}",
+            out.status
+        )))
     }
 }
 

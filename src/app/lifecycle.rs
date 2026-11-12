@@ -320,7 +320,7 @@ impl App {
                 *self.ipc_state.proxy_logs.lock().expect("mutex poisoned") =
                     self.proxy.as_ref().map(|p| p.logs_handle());
             }
-            Err(e) => self.note_error(e),
+            Err(e) => self.note_error(e.to_string()),
         }
     }
 

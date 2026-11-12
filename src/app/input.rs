@@ -351,9 +351,9 @@ impl App {
                     let result = self.switch_worktree(&wt);
                     if let Err(e) = result {
                         if let Some(p) = &mut self.switch_popup {
-                            p.status = Some(e);
+                            p.status = Some(e.to_string());
                         } else {
-                            self.note_error(e);
+                            self.note_error(e.to_string());
                         }
                     } else {
                         self.switch_popup = None;

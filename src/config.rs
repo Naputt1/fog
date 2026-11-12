@@ -1,3 +1,4 @@
+use crate::error::{FogError, FogResult};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
@@ -559,7 +560,7 @@ impl Config {
             ) {
                 issues.push(ConfigIssue {
                     path: format!("native_routes[{i}]"),
-                    message,
+                    message: message.to_string(),
                 });
             }
         }
@@ -694,7 +695,7 @@ fn validate_script(
     {
         issues.push(ConfigIssue {
             path: base.to_string(),
-            message,
+            message: message.to_string(),
         });
     }
 }
@@ -781,7 +782,7 @@ fn validate_services(entries: &[ConfigEntry], base: &str, issues: &mut Vec<Confi
     if let Err(message) = crate::runtime::resolve_dep_order(&graph) {
         issues.push(ConfigIssue {
             path: format!("{base}.service"),
-            message,
+            message: message.to_string(),
         });
     }
 }
@@ -829,7 +830,7 @@ fn resolve_template_issue(
     if let Err(message) = crate::ports::resolve_template(value, port_map, Some(VALIDATION_BRANCH)) {
         issues.push(ConfigIssue {
             path: path.to_string(),
-            message,
+            message: message.to_string(),
         });
     }
 }
@@ -854,7 +855,7 @@ fn port_map_with_external_refs(
         }
         Err(message) => issues.push(ConfigIssue {
             path: path.to_string(),
-            message,
+            message: message.to_string(),
         }),
     }
     map
@@ -887,12 +888,12 @@ pub fn load_global_config() -> Option<Config> {
     }
 }
 
-/// Loads and parses a config file, returning a human-readable error on failure.
-pub fn load(path: &Path) -> Result<Config, String> {
+/// Loads and parses a config file, returning a [`FogError`] on failure.
+pub fn load(path: &Path) -> FogResult<Config> {
     let contents = std::fs::read_to_string(path)
-        .map_err(|e| format!("could not read config '{}': {}", path.display(), e))?;
+        .map_err(|e| FogError::new(format!("could not read config '{}': {}", path.display(), e)))?;
     serde_json::from_str(&contents)
-        .map_err(|e| format!("invalid config '{}': {}", path.display(), e))
+        .map_err(|e| FogError::new(format!("invalid config '{}': {}", path.display(), e)))
 }
 
 #[cfg(test)]
@@ -903,7 +904,7 @@ mod tests {
     fn test_load_missing_file_errors() {
         let path =
             std::env::temp_dir().join(format!("fog-config-missing-{}.json", std::process::id()));
-        let err = load(&path).unwrap_err();
+        let err = load(&path).unwrap_err().to_string();
         assert!(err.contains("could not read config"), "{err}");
     }
 
@@ -912,7 +913,7 @@ mod tests {
         let path =
             std::env::temp_dir().join(format!("fog-config-invalid-{}.json", std::process::id()));
         std::fs::write(&path, "{ not json").unwrap();
-        let err = load(&path).unwrap_err();
+        let err = load(&path).unwrap_err().to_string();
         assert!(err.contains("invalid config"), "{err}");
         let _ = std::fs::remove_file(&path);
     }

@@ -17,6 +17,7 @@
 //! temp directory, namespaced by a hash of the (project, script, branch)
 //! identity.
 
+use crate::error::FogResult;
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -253,7 +254,7 @@ impl OwnerLock {
         project: &str,
         script: &str,
         branch: Option<&str>,
-    ) -> io::Result<AcquireResult> {
+    ) -> FogResult<AcquireResult> {
         let path = owner_lock_path(project, script, branch);
         let started = std::time::Instant::now();
         let hash = identity_hash(project, script, branch);
@@ -294,7 +295,7 @@ impl OwnerLock {
         script: &str,
         branch: Option<&str>,
         timeout: Duration,
-    ) -> io::Result<Option<OwnerLock>> {
+    ) -> FogResult<Option<OwnerLock>> {
         let deadline = std::time::Instant::now() + timeout;
         let started = std::time::Instant::now();
         let hash = identity_hash(project, script, branch);

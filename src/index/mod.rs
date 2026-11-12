@@ -1,4 +1,5 @@
 use crate::config::RouterConfig;
+use crate::error::{FogError, FogResult};
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
@@ -252,7 +253,7 @@ pub fn kill_for_config(cfg: &crate::config::Config) -> bool {
 }
 
 /// Restart the index server for a full `Config`.
-pub fn restart_for_config(cfg: &crate::config::Config) -> Result<u16, String> {
+pub fn restart_for_config(cfg: &crate::config::Config) -> FogResult<u16> {
     let _ = kill_for_config(cfg);
     std::thread::sleep(std::time::Duration::from_millis(300));
     ensure_for_config(cfg);
@@ -260,7 +261,7 @@ pub fn restart_for_config(cfg: &crate::config::Config) -> Result<u16, String> {
     if server_started(port) {
         return Ok(port);
     }
-    Err(format!("server did not start on :{port}"))
+    Err(FogError::new(format!("server did not start on :{port}")))
 }
 
 /// Unconditionally kill the index server on `port` (or default when `cfg` is
@@ -295,7 +296,7 @@ pub fn kill_server(cfg: Option<&RouterConfig>) -> bool {
 }
 
 /// Kill then re-ensure the index server, returning the port it now serves on.
-pub fn restart_server(cfg: Option<&RouterConfig>) -> Result<u16, String> {
+pub fn restart_server(cfg: Option<&RouterConfig>) -> FogResult<u16> {
     let _ = kill_server(cfg);
     // Give the OS a moment to release the port.
     std::thread::sleep(std::time::Duration::from_millis(300));
@@ -315,7 +316,7 @@ pub fn restart_server(cfg: Option<&RouterConfig>) -> Result<u16, String> {
         if server_started(port) {
             return Ok(port);
         }
-        return Err(format!("server did not start on :{port}"));
+        return Err(FogError::new(format!("server did not start on :{port}")));
     }
     // No config: start with defaults on 18080.
     let fallback = RouterConfig::default();
@@ -324,7 +325,7 @@ pub fn restart_server(cfg: Option<&RouterConfig>) -> Result<u16, String> {
     if server_started(port) {
         Ok(port)
     } else {
-        Err(format!("server did not start on :{port}"))
+        Err(FogError::new(format!("server did not start on :{port}")))
     }
 }
 
@@ -471,7 +472,7 @@ pub fn serve_foreground(port: u16, network: String) -> io::Result<()> {
 /// Launches the index server as a detached background process (`fog index
 /// serve --foreground` as the child), so it survives any individual fog
 /// instance exiting. If it is already running this is a no-op.
-fn spawn_server(cfg: &RouterConfig) -> Result<(), String> {
+fn spawn_server(cfg: &RouterConfig) -> FogResult<()> {
     let port = cfg.index_port.unwrap_or(DEFAULT_INDEX_PORT);
     if server_started(port) {
         return Ok(());
@@ -511,7 +512,7 @@ fn spawn_server(cfg: &RouterConfig) -> Result<(), String> {
     crate::process::detach_command(&mut cmd);
     let mut child = cmd
         .spawn()
-        .map_err(|e| format!("could not spawn index server: {e}"))?;
+        .map_err(|e| FogError::new(format!("could not spawn index server: {e}")))?;
     let pid = child.id();
     // Record the pid so `fog index kill/restart` can find it later.
     let _ = std::fs::write(index_pid_path(port), pid.to_string());
@@ -522,7 +523,9 @@ fn spawn_server(cfg: &RouterConfig) -> Result<(), String> {
         }
         if child.try_wait().ok().flatten().is_some() {
             let _ = std::fs::remove_file(index_pid_path(port));
-            return Err(format!("index server (pid {pid}) exited during startup"));
+            return Err(FogError::new(format!(
+                "index server (pid {pid}) exited during startup"
+            )));
         }
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
@@ -530,7 +533,9 @@ fn spawn_server(cfg: &RouterConfig) -> Result<(), String> {
     if !server_started(port) {
         let _ = std::fs::remove_file(index_pid_path(port));
     }
-    Err(format!("index server (pid {pid}) did not bind within 5s"))
+    Err(FogError::new(format!(
+        "index server (pid {pid}) did not bind within 5s"
+    )))
 }
 
 /// Entry point for the `fog index serve` subcommand without flags.
@@ -1860,11 +1865,15 @@ mod tests {
 
         // Missing path and a dir without a fog.json are rejected with messages
         // the form can show inline.
-        let err = inspect_launch_target("/nonexistent/zz/does-not-exist").unwrap_err();
+        let err = inspect_launch_target("/nonexistent/zz/does-not-exist")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("config directory not found"), "{err}");
 
         let empty = test_dir("inspect-empty");
-        let err = inspect_launch_target(empty.to_str().unwrap()).unwrap_err();
+        let err = inspect_launch_target(empty.to_str().unwrap())
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("no fog.json with scripts"), "{err}");
         let _ = std::fs::remove_dir_all(&empty);
 
@@ -1913,9 +1922,11 @@ mod tests {
         );
 
         // Errors the picker shows inline.
-        let missing = list_dirs(&base.join("nope").to_string_lossy()).unwrap_err();
+        let missing = list_dirs(&base.join("nope").to_string_lossy())
+            .unwrap_err()
+            .to_string();
         assert!(missing.contains("directory not found"), "{missing}");
-        let relative = list_dirs("relative/dir").unwrap_err();
+        let relative = list_dirs("relative/dir").unwrap_err().to_string();
         assert!(relative.contains("path must be absolute"), "{relative}");
 
         let _ = std::fs::remove_dir_all(&base);
@@ -1942,12 +1953,16 @@ mod tests {
         // A dir without a fog.json could never launch, so it is refused.
         let plain = base.join("plain");
         std::fs::create_dir_all(&plain).unwrap();
-        let err = add_to(&registry, plain.to_str().unwrap()).unwrap_err();
+        let err = add_to(&registry, plain.to_str().unwrap())
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("no fog.json"), "{err}");
 
         forget_from(&registry, project.to_str().unwrap()).unwrap();
         assert!(load_from(&registry).is_empty());
-        let err = forget_from(&registry, project.to_str().unwrap()).unwrap_err();
+        let err = forget_from(&registry, project.to_str().unwrap())
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("not registered"), "{err}");
 
         // A remembered dir that later disappears is not offered any more, even

@@ -1,6 +1,7 @@
 use super::{App, Mode};
 use crate::click_tab::ClickTab;
 use crate::config_watcher;
+use crate::error::{FogError, FogResult};
 use crate::ipc;
 use crate::runtime;
 use crate::worktree;
@@ -153,7 +154,7 @@ impl App {
     ///
     /// Returns `Ok(())` on success (popup should be closed) or `Err(msg)` on
     /// failure (caller should keep the popup open and show `msg` as status).
-    pub(crate) fn switch_worktree(&mut self, wt: &Worktree) -> Result<(), String> {
+    pub(crate) fn switch_worktree(&mut self, wt: &Worktree) -> FogResult<()> {
         // Guard against switching to the worktree we are already on.
         let current_dir = self.config_path.parent().unwrap_or_else(|| Path::new("."));
         let already_here = if let Some(list) = worktree::list(current_dir) {
@@ -162,7 +163,7 @@ impl App {
             wt.contains(current_dir)
         };
         if already_here {
-            return Err("already on this branch".to_string());
+            return Err(FogError::new("already on this branch"));
         }
         // Resolve and validate the target worktree's config first, so a failure
         // leaves the current instance untouched.
@@ -216,21 +217,21 @@ impl App {
         } else {
             wt.path.join(&self.config_rel)
         };
-        let config =
-            crate::config::load(&config_path).map_err(|e| format!("switch worktree: {e}"))?;
+        let config = crate::config::load(&config_path)
+            .map_err(|e| FogError::new(format!("switch worktree: {e}")))?;
         let script_name = self.ipc_state.script.clone();
         let Some(script) = config.scripts.get(&script_name) else {
-            return Err(format!(
+            return Err(FogError::new(format!(
                 "switch worktree: script '{}' not found in '{}'",
                 script_name,
                 config_path.display()
-            ));
+            )));
         };
         // Validate the dependency graph up front so a bad target script leaves
         // the current instance untouched instead of tearing it down first.
         let entries = script.service.clone().unwrap_or_default();
         if let Err(e) = runtime::resolve_dep_order(&entries) {
-            return Err(format!("switch worktree: {e}"));
+            return Err(FogError::new(format!("switch worktree: {e}")));
         }
         let config_path = config_path.canonicalize().unwrap_or(config_path);
         let config_dir = config_path
@@ -243,7 +244,7 @@ impl App {
         let branch_for_ports = runtime::resolve_branch(&config_dir);
         let port_map = if let Some(specs) = &config.ports {
             crate::ports::allocate_ports(specs)
-                .map_err(|e| format!("switch worktree: port allocation: {e}"))?
+                .map_err(|e| FogError::new(format!("switch worktree: port allocation: {e}")))?
         } else {
             std::collections::HashMap::new()
         };
@@ -252,7 +253,7 @@ impl App {
             script,
             config.native_routes.as_ref(),
         ) {
-            return Err(format!("switch worktree: {e}"));
+            return Err(FogError::new(format!("switch worktree: {e}")));
         }
         // Adopt the live ports of a sibling that already owns a shared service
         // on the target branch, so its dependents resolve to the real port.
@@ -282,7 +283,7 @@ impl App {
             &mut port_map,
             &mut Vec::new(),
         ) {
-            return Err(format!("switch worktree: {e}"));
+            return Err(FogError::new(format!("switch worktree: {e}")));
         }
 
         // Build the new runtime *before* tearing down the old one, so a
@@ -321,7 +322,7 @@ impl App {
                 for (_, handoff) in adopted.drain() {
                     crate::fds::close(handoff.fd);
                 }
-                return Err(format!("switch worktree: {e}"));
+                return Err(FogError::new(format!("switch worktree: {e}")));
             }
         };
 

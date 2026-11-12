@@ -6,6 +6,7 @@
 //! user launched or picked by hand (the same idea as OpenChamber's project
 //! registry) and discovery merges them back in as ordinary roots.
 
+use crate::error::{FogError, FogResult};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -149,27 +150,31 @@ pub(super) fn remember_in(path: &Path, dir: &Path) -> Option<RegisteredProject> 
 
 /// Adds a user-picked config dir, rejecting paths that fog could not launch
 /// (missing dir, or no `fog.json` in it).
-pub(super) fn add_to(path: &Path, raw: &str) -> Result<RegisteredProject, String> {
+pub(super) fn add_to(path: &Path, raw: &str) -> FogResult<RegisteredProject> {
     let dir = expand_home(raw);
     if !dir.is_absolute() {
-        return Err(format!("path must be absolute: {raw}"));
+        return Err(FogError::new(format!("path must be absolute: {raw}")));
     }
     if !dir.is_dir() {
-        return Err(format!("config directory not found: {raw}"));
+        return Err(FogError::new(format!("config directory not found: {raw}")));
     }
     let canon = dir
         .canonicalize()
-        .map_err(|_| format!("config directory not found: {raw}"))?;
+        .map_err(|_| FogError::new(format!("config directory not found: {raw}")))?;
     if !canon.join("fog.json").is_file() {
-        return Err(format!("no fog.json in {}", canon.to_string_lossy()));
+        return Err(FogError::new(format!(
+            "no fog.json in {}",
+            canon.to_string_lossy()
+        )));
     }
-    remember_in(path, &canon).ok_or_else(|| format!("could not add {}", canon.to_string_lossy()))
+    remember_in(path, &canon)
+        .ok_or_else(|| FogError::new(format!("could not add {}", canon.to_string_lossy())))
 }
 
-pub(super) fn forget_from(path: &Path, raw: &str) -> Result<(), String> {
+pub(super) fn forget_from(path: &Path, raw: &str) -> FogResult<()> {
     let target = expand_home(raw);
     if !target.is_absolute() {
-        return Err(format!("path must be absolute: {raw}"));
+        return Err(FogError::new(format!("path must be absolute: {raw}")));
     }
     // Compare canonically when the path exists, lexically otherwise, so a dir
     // that was deleted can still be forgotten.
@@ -185,10 +190,11 @@ pub(super) fn forget_from(path: &Path, raw: &str) -> Result<(), String> {
         .cloned()
         .collect();
     if kept.len() == projects.len() {
-        return Err(format!("project not registered: {raw}"));
+        return Err(FogError::new(format!("project not registered: {raw}")));
     }
     crate::lock::with_file_lock(&lock_path(path), || {
-        write_to(path, &kept).map_err(|e| format!("could not update the project registry: {e}"))
+        write_to(path, &kept)
+            .map_err(|e| FogError::new(format!("could not update the project registry: {e}")))
     })
 }
 
@@ -247,12 +253,12 @@ pub(crate) fn registered_config_dirs() -> Vec<PathBuf> {
 }
 
 /// Adds a user-picked config dir to the registry.
-pub(super) fn add(raw: &str) -> Result<RegisteredProject, String> {
+pub(super) fn add(raw: &str) -> FogResult<RegisteredProject> {
     add_to(&registry_path(), raw)
 }
 
 /// Forgets one registered config dir.
-pub(super) fn forget(raw: &str) -> Result<(), String> {
+pub(super) fn forget(raw: &str) -> FogResult<()> {
     forget_from(&registry_path(), raw)
 }
 
@@ -293,7 +299,7 @@ pub(super) fn handle_launch_projects_request(
             }
             match add(&parsed.path) {
                 Ok(project) => json_response(&serde_json::json!({ "project": project })),
-                Err(message) => api_error(StatusCode::BAD_REQUEST, &message),
+                Err(message) => api_error(StatusCode::BAD_REQUEST, message.message()),
             }
         }
         hyper::Method::DELETE => {
@@ -303,7 +309,7 @@ pub(super) fn handle_launch_projects_request(
             }
             match forget(path.trim()) {
                 Ok(()) => json_response(&serde_json::json!({ "ok": true })),
-                Err(message) => api_error(StatusCode::BAD_REQUEST, &message),
+                Err(message) => api_error(StatusCode::BAD_REQUEST, message.message()),
             }
         }
         _ => api_not_found(),

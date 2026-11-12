@@ -1,6 +1,7 @@
 //! Launch flow: `GET /api/launch/targets` discovery and `POST /api/launch`
 //! spawning, plus the git-aware project/worktree grouping.
 
+use crate::error::{FogError, FogResult};
 use hyper::{Response, StatusCode};
 use std::io;
 use std::path::PathBuf;
@@ -171,16 +172,16 @@ pub(super) struct LaunchInspect {
 /// Inspects one config dir for the launch form: its scripts, the branch checked
 /// out there, and its repo's worktrees.
 ///
-/// Returns a human-readable error when the path is not a directory or nothing
+/// Returns a [`FogError`] when the path is not a directory or nothing
 /// under it has a readable `fog.json`.
-pub(super) fn inspect_launch_target(raw: &str) -> Result<LaunchInspect, String> {
+pub(super) fn inspect_launch_target(raw: &str) -> FogResult<LaunchInspect> {
     let dir = std::path::Path::new(raw);
     if !dir.is_dir() {
-        return Err(format!("config directory not found: {raw}"));
+        return Err(FogError::new(format!("config directory not found: {raw}")));
     }
     let canon = dir
         .canonicalize()
-        .map_err(|_| format!("config directory not found: {raw}"))?;
+        .map_err(|_| FogError::new(format!("config directory not found: {raw}")))?;
 
     let project = launch_project_for(&canon);
     let branch = crate::worktree::list(&canon).and_then(|worktrees| {
@@ -189,10 +190,10 @@ pub(super) fn inspect_launch_target(raw: &str) -> Result<LaunchInspect, String> 
 
     let scripts = worktree_scripts(&canon);
     if scripts.is_empty() && project.worktrees.iter().all(|w| w.scripts.is_empty()) {
-        return Err(format!(
+        return Err(FogError::new(format!(
             "no fog.json with scripts in {}",
             canon.to_string_lossy()
-        ));
+        )));
     }
 
     Ok(LaunchInspect {
@@ -221,7 +222,7 @@ pub(super) fn api_launch_inspect_method(
     }
     match inspect_launch_target(path.trim()) {
         Ok(inspect) => json_response(&inspect),
-        Err(message) => api_error(StatusCode::BAD_REQUEST, &message),
+        Err(message) => api_error(StatusCode::BAD_REQUEST, message.message()),
     }
 }
 
@@ -326,7 +327,7 @@ const LAUNCH_READY_TIMEOUT_SECS: u64 = 60;
 /// against the config's `scripts`, returning a human-readable error message on
 /// failure. Mirrors `run_script`'s config resolution so the web UI launches
 /// exactly what the CLI would.
-fn resolve_launch_target(body: &LaunchBody) -> Result<PathBuf, String> {
+fn resolve_launch_target(body: &LaunchBody) -> FogResult<PathBuf> {
     let config_dir = std::path::Path::new(&body.config_dir);
     // Accept a directory (config dir) or a direct path to `fog.json`.
     let config_path = if config_dir.is_dir() {
@@ -336,7 +337,10 @@ fn resolve_launch_target(body: &LaunchBody) -> Result<PathBuf, String> {
     };
     // The config dir must exist (or the `<dir>/fog.json` path must exist).
     if !config_path.exists() {
-        return Err(format!("config directory not found: {}", body.config_dir));
+        return Err(FogError::new(format!(
+            "config directory not found: {}",
+            body.config_dir
+        )));
     }
 
     // If a branch is requested, resolve it to a worktree and point the config
@@ -346,16 +350,24 @@ fn resolve_launch_target(body: &LaunchBody) -> Result<PathBuf, String> {
         if let Some(branch) = body.branch.as_deref().filter(|b| !b.trim().is_empty()) {
             match crate::worktree::resolve(config_dir, branch) {
                 Some(wt) => wt.path.join("fog.json"),
-                None => return Err(format!("no worktree is checked out on branch '{branch}'")),
+                None => {
+                    return Err(FogError::new(format!(
+                        "no worktree is checked out on branch '{branch}'"
+                    )));
+                }
             }
         } else {
             config_path
         };
 
-    let cfg = crate::config::load(&effective_config)
-        .map_err(|_| format!("could not read config '{}'", effective_config.display()))?;
+    let cfg = crate::config::load(&effective_config).map_err(|_| {
+        FogError::new(format!(
+            "could not read config '{}'",
+            effective_config.display()
+        ))
+    })?;
     if !cfg.scripts.contains_key(&body.script) {
-        return Err(format!("unknown script '{}'", body.script));
+        return Err(FogError::new(format!("unknown script '{}'", body.script)));
     }
     Ok(effective_config)
 }
@@ -411,7 +423,7 @@ pub(super) async fn handle_launch_request(
 
     let config_path = match resolve_launch_target(&parsed) {
         Ok(p) => p,
-        Err(msg) => return api_error(StatusCode::BAD_REQUEST, &msg),
+        Err(msg) => return api_error(StatusCode::BAD_REQUEST, msg.message()),
     };
 
     let script = parsed.script.clone();

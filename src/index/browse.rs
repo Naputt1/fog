@@ -5,6 +5,7 @@
 //! entries are git repositories and which hold a `fog.json`, so the picker can
 //! show the same affordances the CLI user would look for.
 
+use crate::error::{FogError, FogResult};
 use hyper::{Response, StatusCode};
 
 use super::registry::expand_home;
@@ -39,22 +40,22 @@ pub(super) struct BrowseListing {
     pub(super) entries: Vec<BrowseEntry>,
 }
 
-/// Lists the subdirectories of `raw` (`~` allowed). Returns a human-readable
-/// error when the path is not absolute, not a directory, or unreadable.
-pub(super) fn list_dirs(raw: &str) -> Result<BrowseListing, String> {
+/// Lists the subdirectories of `raw` (`~` allowed). Returns a [`FogError`]
+/// when the path is not absolute, not a directory, or unreadable.
+pub(super) fn list_dirs(raw: &str) -> FogResult<BrowseListing> {
     let dir = expand_home(raw);
     if !dir.is_absolute() {
-        return Err(format!("path must be absolute: {raw}"));
+        return Err(FogError::new(format!("path must be absolute: {raw}")));
     }
     if !dir.is_dir() {
-        return Err(format!("directory not found: {raw}"));
+        return Err(FogError::new(format!("directory not found: {raw}")));
     }
     let canon = dir
         .canonicalize()
-        .map_err(|e| format!("could not read {}: {e}", dir.display()))?;
+        .map_err(|e| FogError::new(format!("could not read {}: {e}", dir.display())))?;
 
     let read = std::fs::read_dir(&canon)
-        .map_err(|e| format!("could not read {}: {e}", canon.display()))?;
+        .map_err(|e| FogError::new(format!("could not read {}: {e}", canon.display())))?;
     let mut entries: Vec<BrowseEntry> = Vec::new();
     for entry in read.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -103,6 +104,6 @@ pub(super) fn api_fs_list_method(
         .unwrap_or_else(|| "~".to_string());
     match list_dirs(&dir) {
         Ok(listing) => json_response(&listing),
-        Err(message) => api_error(StatusCode::BAD_REQUEST, &message),
+        Err(message) => api_error(StatusCode::BAD_REQUEST, message.message()),
     }
 }

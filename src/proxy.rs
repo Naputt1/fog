@@ -1,3 +1,4 @@
+use crate::error::{FogError, FogResult};
 use http_body_util::combinators::UnsyncBoxBody;
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
@@ -80,24 +81,22 @@ fn is_hop_by_hop_response(name: &hyper::header::HeaderName) -> bool {
 trait IoBox: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
 impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> IoBox for T {}
 
-fn load_tls_config(
-    cert_path: &str,
-    key_path: &str,
-) -> Result<TlsAcceptor, Box<dyn std::error::Error>> {
+fn load_tls_config(cert_path: &str, key_path: &str) -> FogResult<TlsAcceptor> {
     let cert_file = &mut std::io::BufReader::new(fs::File::open(cert_path)?);
     let key_file = &mut std::io::BufReader::new(fs::File::open(key_path)?);
 
     let cert_chain: Vec<rustls::pki_types::CertificateDer<'_>> =
         certs(cert_file).filter_map(Result::ok).collect();
     if cert_chain.is_empty() {
-        return Err("no certificates found".into());
+        return Err(FogError::new("no certificates found"));
     }
     // `private_key` accepts PKCS#8, PKCS#1 (RSA), and SEC1 (EC) encodings.
-    let key = private_key(key_file)?.ok_or_else(|| "no private keys found".to_string())?;
+    let key = private_key(key_file)?.ok_or_else(|| FogError::new("no private keys found"))?;
 
     let config = ServerConfig::builder()
         .with_no_client_auth()
-        .with_single_cert(cert_chain, key)?;
+        .with_single_cert(cert_chain, key)
+        .map_err(|e| FogError::new(e.to_string()))?;
 
     Ok(TlsAcceptor::from(Arc::new(config)))
 }
@@ -571,11 +570,7 @@ fn match_host(incoming_host: Option<&str>, route_host: &Option<String>) -> bool 
     }
 }
 
-fn build_upstream_uri(
-    upstream: &str,
-    suffix: &str,
-    query: Option<&str>,
-) -> Result<hyper::Uri, String> {
+fn build_upstream_uri(upstream: &str, suffix: &str, query: Option<&str>) -> FogResult<hyper::Uri> {
     let base = upstream.trim_end_matches('/');
     let path = format!("{}{}", base, suffix);
     let s = match query {
@@ -583,7 +578,7 @@ fn build_upstream_uri(
         _ => path,
     };
     s.parse()
-        .map_err(|_| format!("invalid upstream URI: {}", s))
+        .map_err(|_| FogError::new(format!("invalid upstream URI: {}", s)))
 }
 
 fn forward_headers(incoming: &hyper::HeaderMap) -> hyper::HeaderMap {
@@ -697,25 +692,25 @@ fn build_ws_request(
 async fn connect_ws_upstream(
     upstream_host: &str,
     request_bytes: &[u8],
-) -> Result<(tokio::net::TcpStream, ResponseHead), String> {
+) -> FogResult<(tokio::net::TcpStream, ResponseHead)> {
     let connect = tokio::time::timeout(UPSTREAM_TIMEOUT, TcpStream::connect(upstream_host)).await;
     let mut stream = match connect {
         Ok(Ok(s)) => s,
-        Ok(Err(e)) => return Err(format!("connect: {}", e)),
-        Err(_) => return Err("connect timed out".to_string()),
+        Ok(Err(e)) => return Err(FogError::new(format!("connect: {}", e))),
+        Err(_) => return Err(FogError::new("connect timed out")),
     };
     let write = tokio::time::timeout(UPSTREAM_TIMEOUT, stream.write_all(request_bytes)).await;
     match write {
         Ok(Ok(_)) => {}
-        Ok(Err(e)) => return Err(format!("write: {}", e)),
-        Err(_) => return Err("write timed out".to_string()),
+        Ok(Err(e)) => return Err(FogError::new(format!("write: {}", e))),
+        Err(_) => return Err(FogError::new("write timed out")),
     }
     let read = tokio::time::timeout(UPSTREAM_TIMEOUT, read_ws_handshake(&mut stream)).await;
     match read {
         Ok(Ok(Some(head))) => Ok((stream, head)),
-        Ok(Ok(None)) => Err("upstream closed the connection".to_string()),
-        Ok(Err(e)) => Err(format!("read: {}", e)),
-        Err(_) => Err("handshake timed out".to_string()),
+        Ok(Ok(None)) => Err(FogError::new("upstream closed the connection")),
+        Ok(Err(e)) => Err(FogError::new(format!("read: {}", e))),
+        Err(_) => Err(FogError::new("handshake timed out")),
     }
 }
 
@@ -1002,7 +997,7 @@ async fn handle_http(
             }
             return Ok(Response::builder()
                 .status(StatusCode::BAD_GATEWAY)
-                .body(body_full(Bytes::from(e)))
+                .body(body_full(Bytes::from(e.to_string())))
                 .expect("response builder failed"));
         }
     };

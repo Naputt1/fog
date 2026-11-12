@@ -1,3 +1,4 @@
+use crate::error::{FogError, FogResult};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,13 +22,13 @@ fn proxy_from_config(
     terminal_cfg: Option<crate::config::TerminalConfig>,
     ports: &crate::ports::PortMap,
     branch: Option<&str>,
-) -> Result<ProxyInstance, String> {
+) -> FogResult<ProxyInstance> {
     let mut routes = Vec::with_capacity(pc.routes.len());
     for r in &pc.routes {
         let mut upstream = r.upstream.clone();
         if crate::ports::has_template(&upstream) {
             upstream = crate::ports::resolve_template(&upstream, ports, branch)
-                .map_err(|e| format!("proxy upstream template error: {e}"))?;
+                .map_err(|e| FogError::new(format!("proxy upstream template error: {e}")))?;
         }
         let mut host = r.host.clone();
         if let Some(h) = &host
@@ -35,7 +36,7 @@ fn proxy_from_config(
         {
             host = Some(
                 crate::ports::resolve_template(h, ports, branch)
-                    .map_err(|e| format!("proxy host template error: {e}"))?,
+                    .map_err(|e| FogError::new(format!("proxy host template error: {e}")))?,
             );
         }
         routes.push(RouteEntry {
@@ -165,18 +166,18 @@ pub fn reload_config(
     theme: &mut Theme,
     ports: &crate::ports::PortMap,
     branch: Option<&str>,
-) -> Result<Config, String> {
+) -> FogResult<Config> {
     let contents = std::fs::read_to_string(config_path).map_err(|e| {
-        format!(
+        FogError::new(format!(
             "config reload: cannot read '{}': {e}",
             config_path.display()
-        )
+        ))
     })?;
     let config: Config = serde_json::from_str(&contents).map_err(|e| {
-        format!(
+        FogError::new(format!(
             "config reload: invalid JSON in '{}': {e}",
             config_path.display()
-        )
+        ))
     })?;
 
     let pc = config
@@ -248,7 +249,7 @@ mod tests {
         let err = reload_config(&path, "dev", &mut proxy, &mut theme, &ports, None)
             .expect_err("invalid JSON must surface an error");
         assert!(
-            err.contains("invalid JSON") && err.contains("fog.json"),
+            err.to_string().contains("invalid JSON") && err.to_string().contains("fog.json"),
             "error should name the cause and path: {err}"
         );
         // Nothing was mutated: no proxy was started from the bad config.

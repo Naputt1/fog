@@ -9,6 +9,7 @@ pub mod config_watcher;
     allow(dead_code, unused_variables, unused_imports, clippy::ptr_arg)
 )]
 pub mod dnsmasq;
+pub mod error;
 pub mod fds;
 pub mod index;
 pub mod ipc;

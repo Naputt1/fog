@@ -1,5 +1,6 @@
 use crate::app::PendingService;
 use crate::config::{ConfigEntry, HealthCheckConfig, HealthCheckSpec, ScriptConfig};
+use crate::error::{FogError, FogResult};
 use crate::ipc::HandoffItem;
 use crate::proxy::{ProxyInstance, RouteEntry};
 use crate::terminal::{Terminal, health_checks_pass};
@@ -62,7 +63,7 @@ pub struct TerminalSpawnOpts {
 /// Resolves service startup order using topological sort (Kahn's algorithm).
 /// Returns indices into `entries` in dependency order, or an error if there
 /// is a cycle or a dependency references an unknown service name.
-pub fn resolve_dep_order(entries: &[ConfigEntry]) -> Result<Vec<usize>, String> {
+pub fn resolve_dep_order(entries: &[ConfigEntry]) -> FogResult<Vec<usize>> {
     let mut name_to_idx: HashMap<String, usize> = HashMap::with_capacity(entries.len());
     for (i, e) in entries.iter().enumerate() {
         // The effective name is the explicit `name`, or the path basename.
@@ -74,9 +75,9 @@ pub fn resolve_dep_order(entries: &[ConfigEntry]) -> Result<Vec<usize>, String> 
                 .into_owned()
         });
         if let Some(prev) = name_to_idx.insert(name.clone(), i) {
-            return Err(format!(
+            return Err(FogError::new(format!(
                 "duplicate service name '{name}' (entries {prev} and {i})"
-            ));
+            )));
         }
     }
 
@@ -91,10 +92,10 @@ pub fn resolve_dep_order(entries: &[ConfigEntry]) -> Result<Vec<usize>, String> 
                             .to_str()
                             .unwrap_or("?")
                     });
-                    return Err(format!(
+                    return Err(FogError::new(format!(
                         "service '{}' depends on unknown service '{}'",
                         entry_name, dep
-                    ));
+                    )));
                 }
             }
         }
@@ -128,7 +129,9 @@ pub fn resolve_dep_order(entries: &[ConfigEntry]) -> Result<Vec<usize>, String> 
     }
 
     if order.len() != n {
-        return Err("circular dependency detected between services".to_string());
+        return Err(FogError::new(
+            "circular dependency detected between services",
+        ));
     }
 
     Ok(order)
@@ -363,19 +366,19 @@ fn resolve_templated(
     ports: &crate::ports::PortMap,
     branch: Option<&str>,
     describe: impl FnOnce() -> String,
-) -> Result<String, String> {
+) -> FogResult<String> {
     if !crate::ports::has_template(value) {
         return Ok(value.to_string());
     }
     crate::ports::resolve_template(value, ports, branch)
-        .map_err(|err| format!("{}: {}", describe(), err))
+        .map_err(|err| FogError::new(format!("{}: {}", describe(), err)))
 }
 
 fn resolve_service_templates(
     entry: &ConfigEntry,
     ports: &crate::ports::PortMap,
     branch: Option<&str>,
-) -> Result<ConfigEntry, String> {
+) -> FogResult<ConfigEntry> {
     let mut e = entry.clone();
     let name = e.name.clone().unwrap_or_else(|| "?".to_string());
     let svc = |field: &str| format!("service '{name}' {field} template error");
@@ -397,7 +400,7 @@ fn resolve_service_templates(
         }
         e.env = Some(resolved);
     }
-    let resolve_one = |c: &HealthCheckConfig| -> Result<HealthCheckConfig, String> {
+    let resolve_one = |c: &HealthCheckConfig| -> FogResult<HealthCheckConfig> {
         let mut nc = c.clone();
         nc.target = resolve_templated(&nc.target, ports, branch, || svc("health_check.target"))?;
         if let Some(f) = &nc.compose_file {
@@ -535,7 +538,7 @@ pub fn endpoint_route_infos(items: &[Terminal]) -> Vec<crate::ipc::NativeRouteIn
 /// This is shared by CLI startup and in-place worktree switches.
 ///
 /// # Errors
-/// Returns an error string when the script's dependency graph is invalid (a
+/// Returns a [`FogError`] when the script's dependency graph is invalid (a
 /// cycle or a dependency on an unknown service).
 #[allow(clippy::too_many_arguments)]
 pub fn build(
@@ -547,7 +550,7 @@ pub fn build(
     scrollback: usize,
     log_dir: Option<std::path::PathBuf>,
     adopted: &mut HashMap<String, HandoffItem>,
-) -> Result<Runtime, String> {
+) -> FogResult<Runtime> {
     let owned_shared = std::collections::HashSet::new();
     build_with_ports(
         script,
@@ -583,7 +586,7 @@ pub fn build_with_ports(
     ports: &crate::ports::PortMap,
     branch_override: Option<String>,
     owned_shared: &std::collections::HashSet<String>,
-) -> Result<Runtime, String> {
+) -> FogResult<Runtime> {
     build_with_opts(BuildOpts {
         script,
         script_name,
@@ -620,7 +623,7 @@ pub fn build_with_ports_no_share(
     no_share: bool,
     takeover: bool,
     owned_shared: &std::collections::HashSet<String>,
-) -> Result<Runtime, String> {
+) -> FogResult<Runtime> {
     build_with_opts(BuildOpts {
         script,
         script_name,
@@ -648,7 +651,7 @@ fn resolve_entries(
     script: &ScriptConfig,
     ports: &crate::ports::PortMap,
     branch: Option<&str>,
-) -> Result<(Vec<ConfigEntry>, Vec<usize>), String> {
+) -> FogResult<(Vec<ConfigEntry>, Vec<usize>)> {
     // A `${ports.*}` template cannot resolve without a top-level `ports`,
     // whether or not a branch is present.
     if ports.is_empty() {
@@ -672,7 +675,7 @@ fn resolve_entries(
     skip_all,
     fields(script = opts.script_name, project = opts.project.as_deref().unwrap_or("-"))
 )]
-pub fn build_with_opts(opts: BuildOpts) -> Result<Runtime, String> {
+pub fn build_with_opts(opts: BuildOpts) -> FogResult<Runtime> {
     let started = std::time::Instant::now();
     let BuildOpts {
         script,
@@ -1102,7 +1105,7 @@ mod tests {
     #[test]
     fn test_resolve_dep_order_duplicate_explicit_name() {
         let entries = vec![entry("svc", None), entry("svc", None)];
-        let err = resolve_dep_order(&entries).unwrap_err();
+        let err = resolve_dep_order(&entries).unwrap_err().to_string();
         assert!(err.contains("duplicate service name 'svc'"), "{err}");
     }
 
@@ -1115,7 +1118,7 @@ mod tests {
         let mut b = entry("ignored", None);
         b.name = None;
         b.path = "b/svc".to_string();
-        let err = resolve_dep_order(&[a, b]).unwrap_err();
+        let err = resolve_dep_order(&[a, b]).unwrap_err().to_string();
         assert!(err.contains("duplicate service name 'svc'"), "{err}");
     }
 
@@ -1138,7 +1141,7 @@ mod tests {
         let dir = std::env::temp_dir();
         let err = match build(&script, "dev", &dir, None, false, 100, None, &mut adopted) {
             Ok(_) => panic!("a ${{ports.*}} template without 'ports' must fail"),
-            Err(e) => e,
+            Err(e) => e.to_string(),
         };
         assert!(err.contains("'ports' is not defined"), "{err}");
     }

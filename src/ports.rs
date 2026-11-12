@@ -1,3 +1,4 @@
+use crate::error::{FogError, FogResult};
 use std::collections::HashMap;
 use std::net::TcpListener;
 
@@ -8,8 +9,8 @@ pub type PortMap = HashMap<String, u16>;
 ///
 /// `specs` is the top-level `ports` map: `0` means pick a free port via
 /// `bind("127.0.0.1:0")`, `1-65535` is used verbatim (and warned if already
-/// in use). Returns the resolved map or a human-readable error string.
-pub fn allocate_ports(specs: &HashMap<String, u16>) -> Result<PortMap, String> {
+/// in use). Returns the resolved map or a [`FogError`] naming the port.
+pub fn allocate_ports(specs: &HashMap<String, u16>) -> FogResult<PortMap> {
     let mut out = HashMap::new();
     // Keep listeners alive until all allocations are done to avoid reusing same
     // free port when two names both request random.
@@ -26,20 +27,24 @@ pub fn allocate_ports(specs: &HashMap<String, u16>) -> Result<PortMap, String> {
         .iter()
         .find(|name| name.contains('@') || name.contains(':'))
     {
-        return Err(format!(
+        return Err(FogError::new(format!(
             "port name '{name}' must not contain '@' or ':' (reserved for cross-instance \
              references like ${{ports.api@my-repo:main}})"
-        ));
+        )));
     }
 
     for name in names {
         let spec = specs[name];
         if spec == 0 {
-            let listener = TcpListener::bind("127.0.0.1:0")
-                .map_err(|e| format!("could not allocate random port for '{}': {}", name, e))?;
+            let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| {
+                FogError::new(format!(
+                    "could not allocate random port for '{}': {}",
+                    name, e
+                ))
+            })?;
             let port = listener
                 .local_addr()
-                .map_err(|e| format!("could not read port for '{}': {}", name, e))?
+                .map_err(|e| FogError::new(format!("could not read port for '{}': {}", name, e)))?
                 .port();
             _holders.push(listener);
             out.insert(name.clone(), port);
@@ -60,10 +65,10 @@ pub fn allocate_ports(specs: &HashMap<String, u16>) -> Result<PortMap, String> {
             if let Ok(listener) = TcpListener::bind(format!("127.0.0.1:{}", port)) {
                 drop(listener);
             } else {
-                return Err(format!(
+                return Err(FogError::new(format!(
                     "port {} for '{}' is already in use; use 0 for random or pick a free port",
                     port, name
-                ));
+                )));
             }
         }
     }
@@ -74,10 +79,10 @@ pub fn allocate_ports(specs: &HashMap<String, u16>) -> Result<PortMap, String> {
         let mut seen: HashMap<u16, String> = HashMap::new();
         for (name, port) in &out {
             if let Some(other) = seen.get(port) {
-                return Err(format!(
+                return Err(FogError::new(format!(
                     "ports '{}' and '{}' both map to {} — duplicate port",
                     other, name, port
-                ));
+                )));
             }
             seen.insert(*port, name.clone());
         }
@@ -96,43 +101,49 @@ pub fn allocate_ports(specs: &HashMap<String, u16>) -> Result<PortMap, String> {
 ///
 /// Each entry must be `NAME=PORT` with a non-empty name and a `u16` port
 /// (`0` re-randomizes). Duplicate names are rejected so the effective override
-/// is unambiguous. Returns a human-readable error string on malformed input.
+/// is unambiguous. Returns a [`FogError`] on malformed input.
 ///
 /// The result is merged onto the config's `ports` map before allocation; a
 /// name absent from the config defines a new port for this run. A
 /// cross-instance key (`api@repo:branch`) pins that reference.
-pub fn parse_port_overrides(raw: &[String]) -> Result<HashMap<String, u16>, String> {
+pub fn parse_port_overrides(raw: &[String]) -> FogResult<HashMap<String, u16>> {
     let mut out = HashMap::new();
     for item in raw {
         let Some((name, value)) = item.split_once('=') else {
-            return Err(format!(
+            return Err(FogError::new(format!(
                 "invalid --port '{item}' (expected NAME=PORT, e.g. --port api=4000)"
-            ));
+            )));
         };
         let name = name.trim();
         if name.is_empty() {
-            return Err(format!("invalid --port '{item}': port name is empty"));
+            return Err(FogError::new(format!(
+                "invalid --port '{item}': port name is empty"
+            )));
         }
         if let Some(parsed) = parse_external_port_key(name)
             && let Err(e) = parsed
         {
-            return Err(format!("invalid --port '{item}': {e}"));
+            return Err(FogError::new(format!("invalid --port '{item}': {e}")));
         }
         let value = value.trim();
         let port = value.parse::<u16>().map_err(|_| {
-            format!("invalid --port '{item}': '{value}' is not a valid port (0-65535)")
+            FogError::new(format!(
+                "invalid --port '{item}': '{value}' is not a valid port (0-65535)"
+            ))
         })?;
         // A parent cannot allocate or re-randomize a port it does not own: a
         // live target keeps its value and a cold-started target allocates its
         // own. Only a fixed value is meaningful for an external reference.
         if port == 0 && parse_external_port_key(name).is_some() {
-            return Err(format!(
+            return Err(FogError::new(format!(
                 "invalid --port '{item}': a cross-instance port needs a fixed value (1-65535); \
                  the owning instance allocates its own port"
-            ));
+            )));
         }
         if out.insert(name.to_string(), port).is_some() {
-            return Err(format!("duplicate --port override for '{name}'"));
+            return Err(FogError::new(format!(
+                "duplicate --port override for '{name}'"
+            )));
         }
     }
     Ok(out)
@@ -192,16 +203,16 @@ impl ExternalPortRef {
 /// cross-instance reference (`api@cinema_ticket:main` or
 /// `api@cinema_ticket:main:dev`), and `Some(Err(..))` when the atom looks
 /// cross-instance but is malformed.
-pub fn parse_external_port_key(key: &str) -> Option<Result<ExternalPortRef, String>> {
+pub fn parse_external_port_key(key: &str) -> Option<FogResult<ExternalPortRef>> {
     const EXPECTED: &str = "expected '${ports.<name>@<repo>:<branch>}' or \
                             '${ports.<name>@<repo>:<branch>:<script>}'";
     let (name, rest) = key.split_once('@')?;
     let parts: Vec<&str> = rest.split(':').collect();
     if !(2..=3).contains(&parts.len()) {
-        return Some(Err(format!(
+        return Some(Err(FogError::new(format!(
             "invalid cross-instance port reference '${{ports.{key}}}' ({EXPECTED}, e.g. \
              '${{ports.api@my-repo:main}}' or '${{ports.api@my-repo:main:dev}}')"
-        )));
+        ))));
     }
     let name = name.trim();
     let project = parts[0].trim();
@@ -212,10 +223,10 @@ pub fn parse_external_port_key(key: &str) -> Option<Result<ExternalPortRef, Stri
         || branch.is_empty()
         || script.is_some_and(str::is_empty)
     {
-        return Some(Err(format!(
+        return Some(Err(FogError::new(format!(
             "invalid cross-instance port reference '${{ports.{key}}}': name, repo, branch and \
              script must all be non-empty ({EXPECTED})"
-        )));
+        ))));
     }
     // `?` (same branch in the target, else its main worktree), `*` (the
     // target's main worktree) and branch atoms such as `${branch}` are resolved
@@ -226,9 +237,9 @@ pub fn parse_external_port_key(key: &str) -> Option<Result<ExternalPortRef, Stri
         && !branch.contains("${")
         && let Err(e) = branch_slug(branch)
     {
-        return Some(Err(format!(
+        return Some(Err(FogError::new(format!(
             "invalid branch in cross-instance port reference '${{ports.{key}}}': {e}"
-        )));
+        ))));
     }
     Some(Ok(ExternalPortRef {
         name: name.to_string(),
@@ -321,20 +332,20 @@ fn slugify(input: &str) -> String {
 /// - replaces `/` and any non-`[a-z0-9-]` with `-`
 /// - collapses consecutive `-` and trims leading/trailing `-`
 /// - errors if empty or >63 chars (DNS label limit)
-pub fn branch_slug(branch: &str) -> Result<String, String> {
+pub fn branch_slug(branch: &str) -> FogResult<String> {
     let trimmed = slugify(branch);
     if trimmed.is_empty() {
-        return Err(format!(
+        return Err(FogError::new(format!(
             "branch '{}' sanitizes to empty (no alphanumeric characters)",
             branch
-        ));
+        )));
     }
     if trimmed.len() > 63 {
-        return Err(format!(
+        return Err(FogError::new(format!(
             "branch slug '{}' too long for DNS label ({} > 63 chars); use a shorter branch name",
             trimmed,
             trimmed.len()
-        ));
+        )));
     }
     Ok(trimmed)
 }
@@ -400,15 +411,15 @@ pub fn sanitize_hostname(host: &str) -> String {
 ///
 /// Any `${ports.X}` where `X` not in `port_map` returns `Err`.
 /// Unknown atoms also error. Literal `${` without closing `}` errors.
-pub fn resolve_template(s: &str, ports: &PortMap, branch: Option<&str>) -> Result<String, String> {
+pub fn resolve_template(s: &str, ports: &PortMap, branch: Option<&str>) -> FogResult<String> {
     let mut out = String::with_capacity(s.len());
     let mut i = 0;
     let bytes = s.as_bytes();
     while i < bytes.len() {
         if bytes[i] == b'$' && i + 1 < bytes.len() && bytes[i + 1] == b'{' {
             let start = i + 2;
-            let end =
-                template_end(s, start).ok_or_else(|| format!("unclosed template in '{}'", s))?;
+            let end = template_end(s, start)
+                .ok_or_else(|| FogError::new(format!("unclosed template in '{}'", s)))?;
             let key = &s[start..start + end];
             let repl = resolve_atom(key.trim(), ports, branch)?;
             out.push_str(&repl);
@@ -427,10 +438,10 @@ pub fn resolve_template(s: &str, ports: &PortMap, branch: Option<&str>) -> Resul
     Ok(out)
 }
 
-fn resolve_atom(atom: &str, ports: &PortMap, branch: Option<&str>) -> Result<String, String> {
+fn resolve_atom(atom: &str, ports: &PortMap, branch: Option<&str>) -> FogResult<String> {
     if let Some(name) = atom.strip_prefix("ports.") {
         if name.is_empty() {
-            return Err(format!("empty port name in '${{{}}}'", atom));
+            return Err(FogError::new(format!("empty port name in '${{{}}}'", atom)));
         }
         if let Some(parsed) = parse_external_port_key(name) {
             let reference = parsed?;
@@ -451,37 +462,43 @@ fn resolve_atom(atom: &str, ports: &PortMap, branch: Option<&str>) -> Result<Str
                         reference.key()
                     )
                 };
-                format!(
+                FogError::new(format!(
                     "cross-instance port '${{{}}}' was not resolved ({hint})",
                     atom
-                )
+                ))
             })?;
             return Ok(port.to_string());
         }
         let port = ports.get(name).ok_or_else(|| {
-            format!(
+            FogError::new(format!(
                 "unknown port '{}' in '${{{}}}' (available: {})",
                 name,
                 atom,
                 port_keys(ports)
-            )
+            ))
         })?;
         return Ok(port.to_string());
     }
     if atom == "branch" || atom == "FOG_BRANCH" {
-        return branch
-            .map(branch_slug)
-            .ok_or_else(|| format!("'${{{}}}' requires a git branch (not in a worktree)", atom))?;
+        return branch.map(branch_slug).ok_or_else(|| {
+            FogError::new(format!(
+                "'${{{}}}' requires a git branch (not in a worktree)",
+                atom
+            ))
+        })?;
     }
     if atom == "branch_raw" || atom == "FOG_BRANCH_RAW" {
-        return branch
-            .map(|b| b.to_string())
-            .ok_or_else(|| format!("'${{{}}}' requires a git branch (not in a worktree)", atom));
+        return branch.map(|b| b.to_string()).ok_or_else(|| {
+            FogError::new(format!(
+                "'${{{}}}' requires a git branch (not in a worktree)",
+                atom
+            ))
+        });
     }
-    Err(format!(
+    Err(FogError::new(format!(
         "unknown template '${{{}}}' (expected '${{ports.<name}}', '${{branch}}' or '${{branch_raw}}')",
         atom
-    ))
+    )))
 }
 
 fn port_keys(ports: &PortMap) -> String {
@@ -527,7 +544,7 @@ pub fn has_local_port_template(s: &str) -> bool {
 /// Calls `f` with every `${ports.<atom>}` atom in `s` (the part after
 /// `ports.`), so callers can classify local names and cross-instance
 /// references identically.
-fn scan_port_atoms(s: &str, f: &mut dyn FnMut(&str) -> Result<(), String>) -> Result<(), String> {
+fn scan_port_atoms(s: &str, f: &mut dyn FnMut(&str) -> FogResult<()>) -> FogResult<()> {
     const PREFIX: &str = "${ports.";
     let mut rest = s;
     while let Some(start) = rest.find(PREFIX) {
@@ -637,8 +654,8 @@ fn collect_health_check_ports(
 fn for_each_script_string(
     script: &crate::config::ScriptConfig,
     native_routes: Option<&Vec<crate::config::NativeRouteConfig>>,
-    f: &mut dyn FnMut(&str) -> Result<(), String>,
-) -> Result<(), String> {
+    f: &mut dyn FnMut(&str) -> FogResult<()>,
+) -> FogResult<()> {
     if let Some(entries) = &script.service {
         for entry in entries {
             f(&entry.cmd)?;
@@ -687,9 +704,9 @@ fn for_each_script_string(
 
 fn for_each_health_check_string(
     spec: Option<&crate::config::HealthCheckSpec>,
-    f: &mut dyn FnMut(&str) -> Result<(), String>,
-) -> Result<(), String> {
-    let mut one = |check: &crate::config::HealthCheckConfig| -> Result<(), String> {
+    f: &mut dyn FnMut(&str) -> FogResult<()>,
+) -> FogResult<()> {
+    let mut one = |check: &crate::config::HealthCheckConfig| -> FogResult<()> {
         f(&check.target)?;
         if let Some(file) = &check.compose_file {
             f(file)?;
@@ -714,7 +731,7 @@ fn for_each_health_check_string(
 pub fn collect_external_port_refs(
     script: &crate::config::ScriptConfig,
     native_routes: Option<&Vec<crate::config::NativeRouteConfig>>,
-) -> Result<Vec<ExternalPortRef>, String> {
+) -> FogResult<Vec<ExternalPortRef>> {
     let mut refs: std::collections::BTreeMap<String, ExternalPortRef> =
         std::collections::BTreeMap::new();
     for_each_script_string(script, native_routes, &mut |s| {
@@ -736,7 +753,7 @@ pub fn referenced_local_port_names(
     native_routes: Option<&Vec<crate::config::NativeRouteConfig>>,
 ) -> std::collections::BTreeSet<String> {
     let mut names = std::collections::BTreeSet::new();
-    let mut collect = |s: &str| -> Result<(), String> {
+    let mut collect = |s: &str| -> FogResult<()> {
         scan_port_atoms(s, &mut |atom| {
             if parse_external_port_key(atom).is_none() {
                 names.insert(atom.to_string());
@@ -929,9 +946,9 @@ pub fn format_pick_failure(reference: &ExternalPortRef, failure: &PickFailure) -
 pub fn pick_external_port(
     reference: &ExternalPortRef,
     instances: &[LiveInstance],
-) -> Result<u16, String> {
+) -> FogResult<u16> {
     pick_external_port_detailed(reference, instances)
-        .map_err(|failure| format_pick_failure(reference, &failure))
+        .map_err(|failure| FogError::new(format_pick_failure(reference, &failure)))
 }
 
 /// Inserts resolved cross-instance ports into `ports`. A key already present
@@ -940,7 +957,7 @@ pub fn apply_external_refs(
     refs: &[ExternalPortRef],
     instances: &[LiveInstance],
     ports: &mut PortMap,
-) -> Result<usize, String> {
+) -> FogResult<usize> {
     let mut resolved = 0;
     for reference in refs {
         if ports.contains_key(&reference.key()) {
@@ -959,7 +976,7 @@ pub fn resolve_external_refs(
     script: &crate::config::ScriptConfig,
     native_routes: Option<&Vec<crate::config::NativeRouteConfig>>,
     ports: &mut PortMap,
-) -> Result<usize, String> {
+) -> FogResult<usize> {
     let refs = collect_external_port_refs(script, native_routes)?;
     if refs.is_empty() {
         return Ok(0);
@@ -973,32 +990,32 @@ pub fn validate_native_routes(
     routes: &[crate::config::NativeRouteConfig],
     port_map: &PortMap,
     branch: Option<&str>,
-) -> Result<(), String> {
+) -> FogResult<()> {
     for r in routes {
         if r.port.contains("${ports.") && r.port.contains('}') {
             resolve_template(&r.port, port_map, branch).map_err(|e| {
-                format!(
+                FogError::new(format!(
                     "native_routes port template error for service '{}': {}",
                     r.service, e
-                )
+                ))
             })?;
         } else if r.port.trim().parse::<u16>().is_ok() {
             // literal port (whitespace-padded numerics included) — ok
         } else if r.port.trim().is_empty() {
-            return Err(format!(
+            return Err(FogError::new(format!(
                 "native_routes for service '{}' has invalid port '{}'",
                 r.service, r.port
-            ));
+            )));
         } else if r.port.contains("${") {
-            return Err(format!(
+            return Err(FogError::new(format!(
                 "native_routes for service '{}' port '{}' must be '${{ports.<name>}}' or literal port",
                 r.service, r.port
-            ));
+            )));
         } else {
-            return Err(format!(
+            return Err(FogError::new(format!(
                 "native_routes for service '{}' has invalid port '{}'",
                 r.service, r.port
-            ));
+            )));
         }
     }
     Ok(())
@@ -1027,7 +1044,7 @@ pub fn validate_endpoints(
     script: &crate::config::ScriptConfig,
     port_map: &PortMap,
     branch: Option<&str>,
-) -> Result<(), String> {
+) -> FogResult<()> {
     let Some(entries) = script.service.as_ref() else {
         return Ok(());
     };
@@ -1039,31 +1056,31 @@ pub fn validate_endpoints(
         let mut seen = std::collections::HashSet::new();
         for sub in subs {
             if sub.name.trim().is_empty() {
-                return Err(format!(
+                return Err(FogError::new(format!(
                     "service '{service}' has a endpoint with an empty name"
-                ));
+                )));
             }
             if !seen.insert(sub.name.clone()) {
-                return Err(format!(
+                return Err(FogError::new(format!(
                     "service '{service}' has duplicate endpoint name '{}'",
                     sub.name
-                ));
+                )));
             }
             let Some(port) = sub.port.as_deref() else {
                 continue;
             };
             if has_template(port) {
                 resolve_template(port, port_map, branch).map_err(|e| {
-                    format!(
+                    FogError::new(format!(
                         "service '{service}' endpoint '{}' port template error: {e}",
                         sub.name
-                    )
+                    ))
                 })?;
             } else if port.parse::<u16>().is_err() {
-                return Err(format!(
+                return Err(FogError::new(format!(
                     "service '{service}' endpoint '{}' port '{}' must be a '${{ports.<name>}}' template or literal port",
                     sub.name, port
-                ));
+                )));
             }
         }
     }
@@ -1080,7 +1097,7 @@ pub fn ensure_ports_defined(
     config_ports: Option<&std::collections::HashMap<String, u16>>,
     script: &crate::config::ScriptConfig,
     native_routes: Option<&Vec<crate::config::NativeRouteConfig>>,
-) -> Result<(), String> {
+) -> FogResult<()> {
     if config_ports.is_some() {
         return Ok(());
     }
@@ -1114,7 +1131,9 @@ pub fn ensure_ports_defined(
             .any(|r| has_local_port_template(&r.port) || has_local_port_template(&r.host))
     });
     if has_template {
-        return Err("config uses ${ports.*} but top-level 'ports' is not defined".to_string());
+        return Err(FogError::new(
+            "config uses ${ports.*} but top-level 'ports' is not defined".to_string(),
+        ));
     }
     Ok(())
 }
@@ -1146,7 +1165,7 @@ mod tests {
         let p = l.local_addr().unwrap().port();
         specs.insert("a".into(), p);
         // While listener alive, allocation should error
-        let err = allocate_ports(&specs).unwrap_err();
+        let err = allocate_ports(&specs).unwrap_err().to_string();
         assert!(err.contains("already in use"), "{err}");
     }
 
@@ -1155,7 +1174,7 @@ mod tests {
         let mut specs = HashMap::new();
         specs.insert("a".into(), 41234);
         specs.insert("b".into(), 41234);
-        let err = allocate_ports(&specs).unwrap_err();
+        let err = allocate_ports(&specs).unwrap_err().to_string();
         assert!(err.contains("duplicate"), "{err}");
     }
 
@@ -1176,13 +1195,17 @@ mod tests {
 
     #[test]
     fn test_parse_port_overrides_missing_equals_errors() {
-        let err = parse_port_overrides(&["api".to_string()]).unwrap_err();
+        let err = parse_port_overrides(&["api".to_string()])
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("NAME=PORT"), "{err}");
     }
 
     #[test]
     fn test_parse_port_overrides_empty_name_errors() {
-        let err = parse_port_overrides(&["=4000".to_string()]).unwrap_err();
+        let err = parse_port_overrides(&["=4000".to_string()])
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("empty"), "{err}");
     }
 
@@ -1190,7 +1213,9 @@ mod tests {
     fn test_parse_port_overrides_bad_port_errors() {
         for value in ["abc", "-1", "65536", ""] {
             let item = format!("api={value}");
-            let err = parse_port_overrides(std::slice::from_ref(&item)).unwrap_err();
+            let err = parse_port_overrides(std::slice::from_ref(&item))
+                .unwrap_err()
+                .to_string();
             assert!(err.contains("not a valid port"), "{value}: {err}");
         }
     }
@@ -1198,7 +1223,7 @@ mod tests {
     #[test]
     fn test_parse_port_overrides_duplicate_name_errors() {
         let raw = vec!["api=4000".to_string(), "api=4001".to_string()];
-        let err = parse_port_overrides(&raw).unwrap_err();
+        let err = parse_port_overrides(&raw).unwrap_err().to_string();
         assert!(err.contains("duplicate"), "{err}");
     }
 
@@ -1236,7 +1261,9 @@ mod tests {
     #[test]
     fn test_resolve_unknown_port_errors() {
         let m = pm(&[("api", 1234)]);
-        let err = resolve_template("${ports.missing}", &m, None).unwrap_err();
+        let err = resolve_template("${ports.missing}", &m, None)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("unknown port"), "{err}");
         // Must list available
         assert!(err.contains("api"), "{err}");
@@ -1251,7 +1278,9 @@ mod tests {
     #[test]
     fn test_resolve_unknown_atom_errors() {
         let m = pm(&[]);
-        let err = resolve_template("${unknown}", &m, None).unwrap_err();
+        let err = resolve_template("${unknown}", &m, None)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("unknown template"), "{err}");
     }
 
@@ -1312,28 +1341,36 @@ mod tests {
     #[test]
     fn test_validate_endpoints_duplicate_name_errors() {
         let script = script_with_subs(vec![sub("web", None, None), sub("web", None, None)]);
-        let err = validate_endpoints(&script, &pm(&[]), None).unwrap_err();
+        let err = validate_endpoints(&script, &pm(&[]), None)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("duplicate"), "{err}");
     }
 
     #[test]
     fn test_validate_endpoints_bad_port_errors() {
         let script = script_with_subs(vec![sub("web", Some("web.acme"), Some("nope"))]);
-        let err = validate_endpoints(&script, &pm(&[]), None).unwrap_err();
+        let err = validate_endpoints(&script, &pm(&[]), None)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("literal port"), "{err}");
     }
 
     #[test]
     fn test_validate_endpoints_unknown_port_template_errors() {
         let script = script_with_subs(vec![sub("web", None, Some("${ports.missing}"))]);
-        let err = validate_endpoints(&script, &pm(&[("web", 1)]), None).unwrap_err();
+        let err = validate_endpoints(&script, &pm(&[("web", 1)]), None)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("unknown port"), "{err}");
     }
 
     #[test]
     fn test_ensure_ports_defined_detects_endpoint_template() {
         let script = script_with_subs(vec![sub("web", None, Some("${ports.web}"))]);
-        let err = ensure_ports_defined(None, &script, None).unwrap_err();
+        let err = ensure_ports_defined(None, &script, None)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("'ports' is not defined"), "{err}");
         // With a ports map present it passes.
         let ports = std::collections::HashMap::from([("web".to_string(), 8080u16)]);
@@ -1404,7 +1441,9 @@ mod tests {
     fn test_validate_native_routes_rejects_invalid_literal_ports() {
         let m = pm(&[]);
         for port in ["nope", "80x", "80 < 90", "  "] {
-            let err = validate_native_routes(&[route("api", port)], &m, None).unwrap_err();
+            let err = validate_native_routes(&[route("api", port)], &m, None)
+                .unwrap_err()
+                .to_string();
             assert!(err.contains("invalid port"), "{port}: {err}");
         }
     }
@@ -1443,7 +1482,10 @@ mod tests {
     #[test]
     fn test_parse_external_port_key_local_and_malformed() {
         assert!(parse_external_port_key("api").is_none());
-        let err = parse_external_port_key("api@repo").unwrap().unwrap_err();
+        let err = parse_external_port_key("api@repo")
+            .unwrap()
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("expected"), "{err}");
         for key in [
             "@repo:main",
@@ -1452,7 +1494,10 @@ mod tests {
             "api@repo:main:",
             "api@repo:main:dev:extra",
         ] {
-            let err = parse_external_port_key(key).unwrap().unwrap_err();
+            let err = parse_external_port_key(key)
+                .unwrap()
+                .unwrap_err()
+                .to_string();
             assert!(
                 err.contains("non-empty") || err.contains("expected"),
                 "{key}: {err}"
@@ -1479,17 +1524,25 @@ mod tests {
         let m = parse_port_overrides(&raw).unwrap();
         assert_eq!(m["api@repo:main"], 4000);
         assert_eq!(m["api@repo:main:dev"], 4001);
-        let err = parse_port_overrides(&["api@repo=4000".to_string()]).unwrap_err();
+        let err = parse_port_overrides(&["api@repo=4000".to_string()])
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("cross-instance"), "{err}");
-        let err = parse_port_overrides(&["api@repo:main:=4000".to_string()]).unwrap_err();
+        let err = parse_port_overrides(&["api@repo:main:=4000".to_string()])
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("non-empty"), "{err}");
     }
 
     #[test]
     fn test_parse_port_overrides_rejects_zero_for_external_key() {
-        let err = parse_port_overrides(&["api@repo:main=0".to_string()]).unwrap_err();
+        let err = parse_port_overrides(&["api@repo:main=0".to_string()])
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("fixed value"), "{err}");
-        let err = parse_port_overrides(&["api@repo:main:dev=0".to_string()]).unwrap_err();
+        let err = parse_port_overrides(&["api@repo:main:dev=0".to_string()])
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("fixed value"), "{err}");
         // A local name may still be re-randomized for the run.
         let m = parse_port_overrides(&["api=0".to_string()]).unwrap();
@@ -1500,7 +1553,7 @@ mod tests {
     fn test_allocate_ports_rejects_reserved_name_characters() {
         for name in ["api@repo", "api:main"] {
             let specs = HashMap::from([(name.to_string(), 0)]);
-            let err = allocate_ports(&specs).unwrap_err();
+            let err = allocate_ports(&specs).unwrap_err().to_string();
             assert!(err.contains("reserved"), "{name}: {err}");
         }
     }
@@ -1582,18 +1635,24 @@ mod tests {
     #[test]
     fn test_resolve_external_atom_unresolved_errors() {
         let m = pm(&[]);
-        let err = resolve_template("${ports.api@cinema_ticket:main}", &m, None).unwrap_err();
+        let err = resolve_template("${ports.api@cinema_ticket:main}", &m, None)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("not resolved"), "{err}");
         assert!(err.contains("cinema_ticket"), "{err}");
         assert!(err.contains(":script"), "{err}");
-        let err = resolve_template("${ports.api@cinema_ticket:main:dev}", &m, None).unwrap_err();
+        let err = resolve_template("${ports.api@cinema_ticket:main:dev}", &m, None)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("cinema_ticket:main:dev"), "{err}");
     }
 
     #[test]
     fn test_resolve_external_atom_malformed_errors() {
         let m = pm(&[("api@repo", 1)]);
-        let err = resolve_template("${ports.api@repo}", &m, None).unwrap_err();
+        let err = resolve_template("${ports.api@repo}", &m, None)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("invalid cross-instance"), "{err}");
     }
 
@@ -1672,7 +1731,9 @@ mod tests {
         let branch_only = script_with_env(&[("HOST", "http://${branch}.acme")]);
         assert!(ensure_ports_defined(None, &branch_only, None).is_ok());
         let local = script_with_env(&[("API", "http://localhost:${ports.api}")]);
-        let err = ensure_ports_defined(None, &local, None).unwrap_err();
+        let err = ensure_ports_defined(None, &local, None)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("'ports' is not defined"), "{err}");
     }
 
@@ -1706,7 +1767,9 @@ mod tests {
         assert_eq!(refs[0].key(), "cache@repo:main:dev");
         // A malformed reference surfaces as an error.
         let bad = script_with_env(&[("A", "${ports.api@repo}")]);
-        let err = collect_external_port_refs(&bad, None).unwrap_err();
+        let err = collect_external_port_refs(&bad, None)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("expected"), "{err}");
     }
 
@@ -1801,7 +1864,7 @@ mod tests {
     #[test]
     fn test_pick_external_port_no_instance_errors() {
         let reference = parse_external_port_key("api@repo:main").unwrap().unwrap();
-        let err = pick_external_port(&reference, &[]).unwrap_err();
+        let err = pick_external_port(&reference, &[]).unwrap_err().to_string();
         assert!(err.contains("running fog instance"), "{err}");
         assert!(err.contains("--port api@repo:main=PORT"), "{err}");
         assert!(err.contains(":script"), "{err}");
@@ -1812,7 +1875,7 @@ mod tests {
         let script = parse_external_port_key("api@repo:main:dev")
             .unwrap()
             .unwrap();
-        let err = pick_external_port(&script, &[]).unwrap_err();
+        let err = pick_external_port(&script, &[]).unwrap_err().to_string();
         assert!(err.contains("repo:main:dev"), "{err}");
     }
 
@@ -1826,7 +1889,9 @@ mod tests {
             Some("main"),
             &[("api", 8080), ("web", 5173)],
         )];
-        let err = pick_external_port(&reference, &instances).unwrap_err();
+        let err = pick_external_port(&reference, &instances)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("api, web"), "{err}");
     }
 
@@ -1837,7 +1902,9 @@ mod tests {
             instance(1, "dev", "/tmp/repo/.git", Some("main"), &[("api", 8080)]),
             instance(2, "alt", "/tmp/repo/.git", Some("main"), &[("api", 8081)]),
         ];
-        let err = pick_external_port(&reference, &instances).unwrap_err();
+        let err = pick_external_port(&reference, &instances)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("ambiguous"), "{err}");
         assert!(err.contains("8080") && err.contains("8081"), "{err}");
     }
