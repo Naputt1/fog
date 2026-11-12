@@ -91,9 +91,11 @@ fn read_line_nobuf(stream: &mut Stream) -> io::Result<String> {
 
 /// Waits for the App to prepare handoffs, then sends each one (metadata line
 /// followed by the fd via SCM_RIGHTS) and finally the kill response.
+#[tracing::instrument(skip_all, fields(pid = std::process::id()))]
 pub(crate) fn send_handoffs(mut stream: Stream, state: Arc<super::types::IpcState>) {
     // Wait for the App to prepare the handoffs. An empty result set after
     // preparation legitimately means "no live services to hand over".
+    let started = std::time::Instant::now();
     let deadline = std::time::Instant::now() + Duration::from_secs(HANDOFF_PREPARE_TIMEOUT_SECS);
     loop {
         if state
@@ -106,9 +108,19 @@ pub(crate) fn send_handoffs(mut stream: Stream, state: Arc<super::types::IpcStat
         thread::sleep(Duration::from_millis(20));
     }
 
+    let prepared = state
+        .handoff_prepared
+        .load(std::sync::atomic::Ordering::SeqCst);
+    tracing::debug!(
+        prepared,
+        waited_ms = started.elapsed().as_millis() as u64,
+        "handoff preparation finished"
+    );
+
     let mut results = std::mem::take(&mut *state.handoff_results.lock().expect("mutex poisoned"));
 
     let mut ok = true;
+    let mut sent = 0usize;
     while let Some(item) = results.pop() {
         let msg = HandoffMsg {
             r#type: "handoff".to_string(),
@@ -124,6 +136,7 @@ pub(crate) fn send_handoffs(mut stream: Stream, state: Arc<super::types::IpcStat
         let line = match serde_json::to_string(&msg) {
             Ok(l) => l,
             Err(_) => {
+                tracing::warn!(service = %msg.name, pid = msg.pid, "handoff message could not be encoded");
                 // SAFETY: the fd was dupped for transfer; close it if unsent.
                 crate::fds::close(item.fd);
                 continue;
@@ -135,10 +148,13 @@ pub(crate) fn send_handoffs(mut stream: Stream, state: Arc<super::types::IpcStat
             || crate::fds::send_fd(&stream, item.fd).is_err()
         {
             ok = false;
+            tracing::warn!(service = %msg.name, pid = msg.pid, "handoff fd transfer failed");
             // SAFETY: the fd was dupped for transfer; close it if unsent.
             crate::fds::close(item.fd);
             break;
         }
+        sent += 1;
+        tracing::debug!(service = %msg.name, pid = msg.pid, "handoff fd sent");
     }
     // Close any fds that were never sent (transfer aborted mid-way).
     for item in results {
@@ -160,6 +176,12 @@ pub(crate) fn send_handoffs(mut stream: Stream, state: Arc<super::types::IpcStat
     state
         .handoff_done
         .store(true, std::sync::atomic::Ordering::SeqCst);
+    tracing::debug!(
+        ok,
+        sent,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "handoff send finished"
+    );
 }
 
 /// Requests a graceful shutdown of an instance while reclaiming live services.
@@ -171,10 +193,14 @@ pub(crate) fn send_handoffs(mut stream: Stream, state: Arc<super::types::IpcStat
 /// If the transfer is cut short, any already-received handoffs are still
 /// returned (alongside `incomplete`), and a process whose fd could not be
 /// transferred is killed to avoid leaving an orphan behind.
+#[tracing::instrument(skip(reuse), fields(reuse = reuse.len(), force))]
 pub fn reclaim(path: &Path, reuse: &[String], force: bool) -> ReclaimOutcome {
     let mut stream = match super::transport::connect(path) {
         Ok(s) => s,
-        Err(e) => return ReclaimOutcome::failed(format!("connection failed: {e}")),
+        Err(e) => {
+            tracing::warn!(target = %path.display(), error = %e, "reclaim connection failed");
+            return ReclaimOutcome::failed(format!("connection failed: {e}"));
+        }
     };
     // The replaced instance may take up to HANDOFF_PREPARE_TIMEOUT_SECS to
     // prepare and send its handoffs before replying, so the client's read
@@ -196,8 +222,10 @@ pub fn reclaim(path: &Path, reuse: &[String], force: bool) -> ReclaimOutcome {
     }
     payload.push_str("}\n");
     if stream.write_all(payload.as_bytes()).is_err() || stream.flush().is_err() {
+        tracing::warn!(target = %path.display(), "reclaim request could not be sent");
         return ReclaimOutcome::failed("could not send reclaim request");
     }
+    tracing::debug!(target = %path.display(), "reclaim request sent");
 
     let mut handoffs = Vec::new();
     loop {
@@ -219,6 +247,7 @@ pub fn reclaim(path: &Path, reuse: &[String], force: bool) -> ReclaimOutcome {
         if let Ok(reply) = serde_json::from_str::<HandoffMsgReply>(line.trim()) {
             match crate::fds::recv_fd(&stream) {
                 Ok(fd) => {
+                    tracing::debug!(service = %reply.name, pid = reply.pid, "handoff fd received");
                     let history = base64::Engine::decode(
                         &base64::engine::general_purpose::STANDARD,
                         &reply.history,
@@ -237,6 +266,12 @@ pub fn reclaim(path: &Path, reuse: &[String], force: bool) -> ReclaimOutcome {
                     // The old instance extracted this process but we could not
                     // receive its fd: kill it so it does not run on as an
                     // unmanaged orphan.
+                    tracing::warn!(
+                        service = %reply.name,
+                        pid = reply.pid,
+                        error = %e,
+                        "handoff fd could not be received; killing the orphan"
+                    );
                     crate::process::try_kill_process_group(reply.pid, crate::process::Signal::Term);
                     thread::sleep(Duration::from_millis(300));
                     crate::process::try_kill_process_group(reply.pid, crate::process::Signal::Kill);
@@ -251,6 +286,11 @@ pub fn reclaim(path: &Path, reuse: &[String], force: bool) -> ReclaimOutcome {
         }
         if let Ok(reply) = serde_json::from_str::<KillReply>(line.trim()) {
             if reply.ok {
+                tracing::debug!(
+                    target = %path.display(),
+                    transferred = handoffs.len(),
+                    "reclaim complete"
+                );
                 return ReclaimOutcome {
                     handoffs,
                     incomplete: false,
@@ -262,8 +302,13 @@ pub fn reclaim(path: &Path, reuse: &[String], force: bool) -> ReclaimOutcome {
             } else {
                 reply.reason
             };
+            tracing::warn!(target = %path.display(), reason = %reason, "reclaim refused");
             return ReclaimOutcome::failed(reason);
         }
+        tracing::warn!(
+            target = %path.display(),
+            "unexpected response from fog instance"
+        );
         return ReclaimOutcome::failed("unexpected response from fog instance");
     }
 }

@@ -36,6 +36,11 @@ pub fn spawn_server(state: Arc<IpcState>) -> io::Result<()> {
     }
 
     let listener = Listener::bind(&path)?;
+    tracing::info!(
+        socket = %path.display(),
+        pid = std::process::id(),
+        "ipc server listening"
+    );
 
     thread::spawn(move || {
         for conn in listener.incoming() {
@@ -58,6 +63,7 @@ pub fn cleanup_socket() {
 }
 
 /// Handles a single IPC connection: reads one request line and writes a response.
+#[tracing::instrument(skip_all, fields(pid = std::process::id()))]
 pub(crate) fn handle_connection(mut stream: Stream, state: Arc<IpcState>) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(super::READ_TIMEOUT_SECS)));
     let mut reader = match stream.try_clone() {
@@ -116,6 +122,7 @@ pub(crate) fn handle_connection(mut stream: Stream, state: Arc<IpcState>) {
             let _ = writeln!(writer, "{resp}");
         }
         Request::Kill { reuse, force } => {
+            tracing::debug!(reuse = ?reuse, force, "kill requested");
             // A full-session takeover (TUI detach/reattach) lifts the
             // `reuse`/`share` gate in the App's handoff step.
             state.handoff_all.store(force, Ordering::SeqCst);
@@ -135,6 +142,7 @@ pub(crate) fn handle_connection(mut stream: Stream, state: Arc<IpcState>) {
             // reclaimers are refused instead of racing for the same live
             // processes.
             if state.handoff_claimed.swap(true, Ordering::SeqCst) {
+                tracing::warn!("handoff already claimed by another reclaimer");
                 let resp = serde_json::to_string(&KillResponse {
                     ok: false,
                     reason: "instance is already being replaced".to_string(),
@@ -150,6 +158,7 @@ pub(crate) fn handle_connection(mut stream: Stream, state: Arc<IpcState>) {
             *state.handoff_req.lock().expect("mutex poisoned") = Some(reuse);
             state.kill_flag.store(true, Ordering::SeqCst);
             super::handoff::send_handoffs(stream, state);
+            tracing::debug!("handoff phase complete");
         }
         Request::Logs {
             service,
