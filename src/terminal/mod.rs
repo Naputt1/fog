@@ -1208,7 +1208,13 @@ impl Terminal {
         }
     }
 
-    fn kill_inner(&mut self) {
+    /// Signals this terminal's process tree and reports how it ended:
+    /// `"graceful"` when the tree exited within the SIGTERM grace period,
+    /// `"sigkill"` when SIGKILL was needed, `"handed-off"` when the live
+    /// process now belongs to another instance, and `"already-exited"` when
+    /// nothing was alive to signal.
+    fn kill_inner(&mut self) -> &'static str {
+        let mut outcome = "already-exited";
         // Signal the reader thread to stop reading so it releases its fd.
         #[cfg(unix)]
         if let Some(stop) = self.stop_w.take() {
@@ -1231,13 +1237,14 @@ impl Terminal {
                 let _ = handler.join();
             }
             self.process_running = false;
-            return;
+            return "handed-off";
         }
 
         // An adopted terminal: kill the process group by the stored PID. The
         // adopted PID is not a child, so probe liveness with `kill(pid, 0)`.
         if let Some(pid) = self.owned_pid {
             if process::is_pid_alive(pid) {
+                outcome = "graceful";
                 // Snapshot the tree before signaling the leader: backgrounded
                 // grandchildren in their own pgid (shell job control) survive
                 // kill(-pgid), and orphans reparent once the leader exits, so
@@ -1245,6 +1252,7 @@ impl Terminal {
                 process::signal_tree(pid, Signal::Term);
                 thread::sleep(Duration::from_millis(500));
                 if process::is_pid_alive(pid) {
+                    outcome = "sigkill";
                     process::signal_tree(pid, Signal::Kill);
                 }
                 process::kill_descendants(pid);
@@ -1258,11 +1266,15 @@ impl Terminal {
             && let Some(ref child) = self.child
             && let Some(pid) = child.process_id()
         {
+            outcome = "graceful";
             process::signal_tree(pid, Signal::Term);
             thread::sleep(Duration::from_millis(500));
             match process::waitpid_nohang(pid) {
                 Ok(Some(_)) => self.child_reaped = true,
-                Ok(None) => process::signal_tree(pid, Signal::Kill),
+                Ok(None) => {
+                    outcome = "sigkill";
+                    process::signal_tree(pid, Signal::Kill);
+                }
                 Err(_) => self.child_reaped = true,
             }
             process::kill_descendants(pid);
@@ -1272,6 +1284,7 @@ impl Terminal {
             && !self.child_reaped
         {
             let pid = child.process_id();
+            outcome = "sigkill";
             let _ = child.kill();
             // Reap with a bounded wait. A process stuck in an uninterruptible
             // exit state can defer even SIGKILL, so a bare blocking `wait()`
@@ -1301,6 +1314,7 @@ impl Terminal {
         }
 
         self.process_running = false;
+        outcome
     }
 
     /// Restarts the command process in this terminal.
@@ -1667,6 +1681,14 @@ impl Terminal {
         if self.torn_down {
             return;
         }
+        let started = Instant::now();
+        // The child is dropped by `kill_inner`, so read its pid up front for
+        // the teardown log.
+        let pid = self
+            .child
+            .as_ref()
+            .and_then(|child| child.process_id())
+            .or(self.owned_pid);
         self.torn_down = true;
         // Stop the health-check thread so it does not outlive this terminal
         // (relevant when services are replaced by an in-place worktree switch).
@@ -1681,7 +1703,7 @@ impl Terminal {
             let text = self.get_all_lines().join("\n");
             let _ = fs::write(format!("temp/{}.txt", self.name), &text);
         }
-        self.kill_inner();
+        let outcome = self.kill_inner();
         // Run the shutdown command unless the live process was handed off to a
         // live successor (handover in a reclaim/worktree switch). A borrowed or
         // assumed-up reuse service with no successor must still be torn down,
@@ -1709,6 +1731,13 @@ impl Terminal {
         if !self.handed_off && last_instance {
             self.run_shutdown_cmd();
         }
+        tracing::debug!(
+            service = %self.name,
+            pid,
+            outcome,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "service torn down"
+        );
     }
 }
 
