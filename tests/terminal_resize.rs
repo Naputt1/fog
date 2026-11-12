@@ -6,6 +6,10 @@
 //! destroyed by resizing the pane. These tests pin that contract; the 0.16
 //! parser dropped those rows and grew back into blank lines.
 
+// Integration tests may panic on setup mistakes, and `allow-unwrap-in-tests`
+// only covers `#[test]` fns, not the helpers beside them.
+#![allow(clippy::unwrap_used)]
+
 #[cfg(unix)]
 mod unix {
     use fog::terminal::Terminal;

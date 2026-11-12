@@ -106,8 +106,7 @@ async fn handle_terminal_route(
     let service = query_param(req.uri().query(), "service");
     let live = query_param(req.uri().query(), "live")
         .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
-    if live && service.is_some() {
-        let svc = service.clone().unwrap();
+    if live && let Some(svc) = service.clone() {
         // Live attach must be a known running service, else 404.
         let running = discover_fog_instances()
             .iter()

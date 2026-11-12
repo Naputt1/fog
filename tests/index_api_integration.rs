@@ -6,6 +6,10 @@
 //! Assertions target status codes, content types, and JSON *shape* — never
 //! container/service names — so they stay green without Docker or a git repo.
 
+// Integration tests may panic on setup mistakes, and `allow-unwrap-in-tests`
+// only covers `#[test]` fns, not the helpers beside them.
+#![allow(clippy::unwrap_used)]
+
 use std::net::TcpListener;
 use std::sync::OnceLock;
 use std::time::Duration;

@@ -7,6 +7,10 @@
 //! down immediately after the upgrade response, and the auth tests reject
 //! before any PTY is spawned.
 
+// Integration tests may panic on setup mistakes, and `allow-unwrap-in-tests`
+// only covers `#[test]` fns, not the helpers beside them.
+#![allow(clippy::unwrap_used)]
+
 use fog::config::TerminalConfig;
 use fog::proxy::ProxyInstance;
 use std::io::{Read, Write};

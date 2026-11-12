@@ -416,7 +416,10 @@ pub fn resolve_template(s: &str, ports: &PortMap, branch: Option<&str>) -> Resul
         } else {
             // Advance by a whole char, not a byte: `bytes[i] as char` would
             // corrupt any UTF-8 continuation byte (e.g. `é` → `Ã©`).
-            let ch = s[i..].chars().next().unwrap();
+            let ch = s[i..]
+                .chars()
+                .next()
+                .expect("i is a char boundary inside s");
             out.push(ch);
             i += ch.len_utf8();
         }

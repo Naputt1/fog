@@ -1,0 +1,7 @@
+# Tests are allowed to panic on setup mistakes: a failing assertion is the
+# point, and `let x = setup().unwrap()` reads better than an expect dance.
+# Production code is not: a panic in the TUI thread takes down every service
+# the instance owns, and a panic in the proxy thread silently drops the
+# listener. See `unwrap_used` in Cargo.toml's `[lints.clippy]`.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true

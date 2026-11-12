@@ -77,3 +77,13 @@ strip = "symbols"
 [build-dependencies]
 brotli = "9.0.0"
 flate2 = "1.1.10"
+
+[lints.clippy]
+# Production code never unwraps: a panic in the TUI thread takes every service
+# the instance owns down with it, and one in the proxy thread silently drops
+# the listener. Tests are exempt via `clippy.toml` (`allow-unwrap-in-tests`).
+unwrap_used = "warn"
+# `correctness` findings are real bugs by definition, so they fail the build
+# instead of scrolling past in a warning list. The lower priority is required
+# because a group and a single lint cannot share one.
+correctness = { level = "deny", priority = -1 }

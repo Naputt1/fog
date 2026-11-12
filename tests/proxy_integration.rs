@@ -1,3 +1,7 @@
+// Integration tests may panic on setup mistakes, and `allow-unwrap-in-tests`
+// only covers `#[test]` fns, not the helpers beside them.
+#![allow(clippy::unwrap_used)]
+
 use fog::proxy::{ProxyInstance, RouteEntry};
 use std::io::{Read, Write};
 use std::net::TcpListener;
