@@ -3,6 +3,7 @@ import { useHealth } from "@/lib/hooks";
 import type { HealthItem } from "@/lib/api";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page-state";
 import { StatusBadge } from "@/components/status-badge";
+import { parseServiceState, serviceStateKey } from "@/lib/service-state";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -19,8 +20,6 @@ export const Route = createFileRoute("/health")({
   component: HealthPage,
 });
 
-const KNOWN_HEALTH = ["running", "healthy", "starting", "stopped", "unhealthy"];
-
 /** Health detail badge: maps known states to styled badges, null → "unknown". */
 function HealthBadge({ health }: { health: string | null }) {
   if (!health) {
@@ -31,8 +30,7 @@ function HealthBadge({ health }: { health: string | null }) {
       </Badge>
     );
   }
-  const key = health.toLowerCase();
-  return <StatusBadge status={KNOWN_HEALTH.includes(key) ? key : health} />;
+  return <StatusBadge status={serviceStateKey(health)} />;
 }
 
 function StatChip({
@@ -103,18 +101,13 @@ function HealthPage() {
   const results = data?.health ?? [];
   const total = results.length;
   const running = results.filter((h) => h.running).length;
-  const healthy = results.filter(
-    (h) => h.health?.toLowerCase() === "healthy"
-  ).length;
-  const unhealthy = results.filter(
-    (h) => h.health?.toLowerCase() === "unhealthy"
-  ).length;
+  const stateOf = (h: HealthItem) =>
+    h.health ? parseServiceState(h.health) : null;
+  const healthy = results.filter((h) => stateOf(h) === "healthy").length;
+  const unhealthy = results.filter((h) => stateOf(h) === "unhealthy").length;
   const unknown = results.filter((h) => !h.health).length;
   const other = results.filter(
-    (h) =>
-      h.health &&
-      h.health.toLowerCase() !== "healthy" &&
-      h.health.toLowerCase() !== "unhealthy"
+    (h) => !!h.health && stateOf(h) !== "healthy" && stateOf(h) !== "unhealthy"
   ).length;
 
   return (

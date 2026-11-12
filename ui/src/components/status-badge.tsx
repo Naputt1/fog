@@ -1,41 +1,22 @@
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
-import type { ServiceStatus } from "@/lib/api";
+import { serviceStateStyle } from "@/lib/service-state";
 
-const STATUS_DOT: Record<string, string> = {
-  running: "bg-primary",
-  healthy: "bg-success",
-  starting: "bg-info",
-  stopped: "bg-muted-foreground",
-  stopping: "bg-warning",
-  killing: "bg-warning",
-  unhealthy: "bg-destructive",
-};
-
-const STATUS_TONES = [
-  "running",
-  "healthy",
-  "starting",
-  "stopped",
-  "stopping",
-  "killing",
-  "unhealthy",
-] as const;
-type StatusTone = (typeof STATUS_TONES)[number] | "unknown";
-
-export function StatusBadge({ status }: { status: ServiceStatus }) {
-  const dot = STATUS_DOT[status] ?? "bg-muted-foreground";
-  const tone: StatusTone = (STATUS_TONES as readonly string[]).includes(status)
-    ? (status as (typeof STATUS_TONES)[number])
-    : "unknown";
+/**
+ * A service-state pill. Known states get their tone and dot from the single
+ * state table; an unrecognized wire string keeps its own text with the neutral
+ * style, so a newer backend state is never hidden behind a generic label.
+ */
+export function StatusBadge({ status }: { status: string }) {
+  const style = serviceStateStyle(status);
   return (
     <Badge
       variant="outline"
-      tone={tone}
+      tone={style.tone}
       size="status"
       className="max-w-full min-w-0"
     >
-      <span className={cn("size-1.5 shrink-0 rounded-full", dot)} />
+      <span className={cn("size-1.5 shrink-0 rounded-full", style.dot)} />
       <span className="truncate">{status}</span>
     </Badge>
   );

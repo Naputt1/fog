@@ -2,6 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useStatus, useInstanceKillState } from "@/lib/hooks";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page-state";
 import { StatusBadge } from "@/components/status-badge";
+import { serviceStateKey } from "@/lib/service-state";
 import { ServiceActions } from "@/components/service-actions";
 import { InstanceKillButton } from "@/components/instance-kill-button";
 import { LaunchCard } from "@/components/launch-instance";
@@ -21,8 +22,6 @@ export const Route = createFileRoute("/status")({
   component: StatusPage,
 });
 
-const KNOWN_HEALTH = ["running", "healthy", "starting", "stopped", "unhealthy"];
-
 /** Health detail badge: maps known states to styled badges, null → "unknown". */
 function HealthBadge({ health }: { health: string | null }) {
   if (!health) {
@@ -33,8 +32,7 @@ function HealthBadge({ health }: { health: string | null }) {
       </Badge>
     );
   }
-  const key = health.toLowerCase();
-  return <StatusBadge status={KNOWN_HEALTH.includes(key) ? key : health} />;
+  return <StatusBadge status={serviceStateKey(health)} />;
 }
 
 /** Declared endpoints of one service, as a compact health list. */
