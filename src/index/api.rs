@@ -568,6 +568,7 @@ pub fn load_runtime_config() -> crate::config::Config {
         }
     }
     crate::config::Config {
+        schema: None,
         scripts: std::collections::HashMap::new(),
         ports: None,
         native_routes: None,

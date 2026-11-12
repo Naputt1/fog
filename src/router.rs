@@ -867,6 +867,7 @@ mod tests {
 
     fn native_cfg(cert_dir: &std::path::Path) -> crate::config::Config {
         crate::config::Config {
+            schema: None,
             scripts: std::collections::HashMap::new(),
             ports: None,
             native_routes: None,

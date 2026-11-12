@@ -13,6 +13,7 @@ pub enum HealthCheckKind {
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct HealthCheckConfig {
     pub kind: HealthCheckKind,
     /// For `tcp`/`http`: the address to check (e.g. `localhost:8080`).
@@ -36,6 +37,7 @@ pub struct HealthCheckConfig {
     pub retries: Option<u32>,
 }
 #[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct ThemeConfig {
     /// App background.
     pub bg: Option<String>,
@@ -73,11 +75,37 @@ pub struct ThemeConfig {
 }
 
 /// Accepts either a single health check object or an array of health checks.
-#[derive(Debug, Deserialize, Clone)]
-#[serde(untagged)]
+#[derive(Debug, Clone)]
 pub enum HealthCheckSpec {
     Single(HealthCheckConfig),
     Multiple(Vec<HealthCheckConfig>),
+}
+
+impl<'de> Deserialize<'de> for HealthCheckSpec {
+    /// Dispatches on the JSON shape instead of using `#[serde(untagged)]`.
+    ///
+    /// An untagged enum reports every failure as "data did not match any
+    /// variant", which hides *which* key was wrong when a health check has a
+    /// typo (`healt_check`). Since [`HealthCheckConfig`] rejects unknown fields,
+    /// picking the variant up front keeps the inner error, and its field name,
+    /// intact. A config is only ever JSON, so `serde_json::Value` is the right
+    /// intermediate here.
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error as _;
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if value.is_array() {
+            serde_json::from_value(value)
+                .map(Self::Multiple)
+                .map_err(D::Error::custom)
+        } else {
+            serde_json::from_value(value)
+                .map(Self::Single)
+                .map_err(D::Error::custom)
+        }
+    }
 }
 
 /// A single native-to-Traefik route for a non-container service.
@@ -87,6 +115,7 @@ pub enum HealthCheckSpec {
 /// template (or literal port); `host` may contain `${branch}` / `${FOG_BRANCH}`
 /// (DNS-safe slug, `/` → `-`) or `${branch_raw}` / `${FOG_BRANCH_RAW}` (raw).
 #[derive(Debug, Deserialize, Clone, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct NativeRouteConfig {
     /// Host rule, e.g. `"${branch}.acme"` or `"api.${branch}.acme"`.
     pub host: String,
@@ -118,6 +147,7 @@ pub struct NativeRouteConfig {
 /// `port`); the rest are display + health only. `port` is a host-published
 /// port because generated routes target `host.docker.internal:<port>`.
 #[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct EndpointConfig {
     /// Display name for this endpoint (e.g. the compose service name).
     /// Must be unique within the owning service.
@@ -136,6 +166,7 @@ pub struct EndpointConfig {
 
 /// A single service entry in the config file.
 #[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct ConfigEntry {
     /// Optional display name for the service tab.
     pub name: Option<String>,
@@ -179,6 +210,7 @@ pub struct ConfigEntry {
 
 /// A route definition for the reverse proxy.
 #[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct ProxyRoute {
     /// The incoming path prefix to match against.
     /// Supports `*` wildcards (e.g. `/api/*` matches `/api/foo`).
@@ -195,6 +227,7 @@ pub struct ProxyRoute {
 
 /// Reverse proxy configuration.
 #[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct ProxyConfig {
     /// The port the reverse proxy listens on.
     pub port: u16,
@@ -214,6 +247,7 @@ pub struct ProxyConfig {
 
 /// Sidebar width configuration.
 #[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct SidebarConfig {
     /// Minimum sidebar width in columns (default: 12).
     pub min_width: Option<u16>,
@@ -240,6 +274,7 @@ fn default_dnsmasq_port() -> u16 {
 /// privileged port; the per-zone `/etc/resolver/<domain>` file then only
 /// needs a plain `nameserver` line.
 #[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct DnsmasqConfig {
     /// Domains to wildcard-map to `address`.
     #[serde(default)]
@@ -267,7 +302,7 @@ fn default_true() -> bool {
 /// directory + web UI + JSON API) on `port`. Default `enabled: true` so every
 /// `fog <script>` brings the index up unless explicitly disabled per-project.
 #[derive(Debug, Deserialize, Clone)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct IndexConfig {
     /// Whether to serve the index server when this project starts.
     /// Default `true`.
@@ -295,7 +330,7 @@ impl Default for IndexConfig {
 /// cap the size of a single inbound frame, bound the idle timeout, and
 /// optionally require a shared `auth_token` passed as a query parameter.
 #[derive(Debug, Deserialize, Clone, PartialEq)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct TerminalConfig {
     /// Maximum number of concurrent terminal sessions per client IP (default
     /// `8`). Exceeding it returns `429 Too Many Requests`.
@@ -323,6 +358,7 @@ impl Default for TerminalConfig {
 
 /// UI metadata for this project shown in the index web UI.
 #[derive(Debug, Deserialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
 pub struct ProjectConfig {
     /// Image URL (`http(s)://`) or `data:image/…` URI used as this project's
     /// icon on the index project list page. Falls back to the built-in icon
@@ -332,6 +368,7 @@ pub struct ProjectConfig {
 
 /// A named script: a full set of services and optional proxy configuration.
 #[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct ScriptConfig {
     /// Optional list of service entries to manage.
     pub service: Option<Vec<ConfigEntry>>,
@@ -375,7 +412,7 @@ fn default_router_cert_dir() -> String {
 /// hostnames. Nested service subdomains also get `*.<service>.<domain>`. HTTP on
 /// `:80` keeps working alongside HTTPS.
 #[derive(Debug, Deserialize, Clone)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct RouterTlsConfig {
     /// Enable HTTPS termination on the central router (default: false).
     pub enabled: bool,
@@ -403,7 +440,7 @@ impl Default for RouterTlsConfig {
 /// Apps opt into routing by placing Traefik container labels on their services
 /// and attaching them to the shared network named by `shared_network`.
 #[derive(Debug, Deserialize, Clone)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct RouterConfig {
     /// Traefik image to run (default: `traefik:v3`).
     pub image: String,
@@ -437,7 +474,13 @@ impl Default for RouterConfig {
 
 /// Top-level application configuration loaded from `fog.json`.
 #[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
+    /// Editor autocomplete pointer (`"$schema": "https://…/fog.schema.json"`).
+    /// The README's agent onboarding and the docs both tell users to set it,
+    /// so it has to be a known field even though fog never reads it.
+    #[serde(default, rename = "$schema")]
+    pub schema: Option<String>,
     /// Named scripts, each defining its own services and proxy.
     #[serde(default)]
     pub scripts: HashMap<String, ScriptConfig>,

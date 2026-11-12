@@ -3,6 +3,10 @@
   "type": "object",
   "required": ["scripts"],
   "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Editor autocomplete pointer, e.g. https://raw.githubusercontent.com/Naputt1/fog/main/fog.schema.json. fog itself never reads it; every key is still validated when the config loads."
+    },
     "scripts": {
       "type": "object",
       "additionalProperties": {
@@ -148,13 +152,23 @@
                 }
               },
               "tls_cert": { "type": "string" },
-              "tls_key": { "type": "string" }
+              "tls_key": { "type": "string" },
+              "max_log_entries": {
+                "type": "integer",
+                "minimum": 1,
+                "default": 1000,
+                "description": "Maximum number of proxy log entries kept for the log view (default: 1000)."
+              }
             }
           },
           "concurrent": {
             "type": "boolean",
             "default": true,
             "description": "Allow multiple concurrent instances of this script in the same project+branch. When true (default), running the script again starts alongside existing instances instead of killing them; services flagged share: true are shared between those instances. When false, only one instance runs and a new run kills the previous one first (with reuse: true services handed over)."
+          },
+          "terminal": {
+            "description": "Hardening limits and authentication for the built-in terminal WebSocket gateway (/ws/terminal). Built-in defaults apply when omitted.",
+            "$ref": "#/definitions/terminal"
           }
         }
       }
@@ -392,6 +406,35 @@
         "health_check": {
           "$ref": "#/definitions/healthCheck",
           "description": "Health check for this endpoint, tracked independently (preferred location for health). The service's own health is the AND of all its endpoints' health checks plus any service-level health_check."
+        }
+      }
+    },
+    "terminal": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Hardening limits and auth for the built-in terminal WebSocket gateway (/ws/terminal).",
+      "properties": {
+        "max_sessions_per_ip": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 8,
+          "description": "Maximum concurrent terminal sessions per client IP (default 8); exceeding it returns 429."
+        },
+        "max_message_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 65536,
+          "description": "Maximum size in bytes of one inbound frame (default 65536, 64 KiB); larger frames close the socket with code 1009."
+        },
+        "idle_timeout_secs": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 900,
+          "description": "Session idle timeout in seconds (default 900, i.e. 15 minutes)."
+        },
+        "auth_token": {
+          "type": "string",
+          "description": "Shared secret required as the auth_token query parameter. When set, a request without a matching token is rejected with 401; required when the proxy binds a non-loopback host."
         }
       }
     }
