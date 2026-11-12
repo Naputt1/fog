@@ -62,6 +62,24 @@ mod unix {
         false
     }
 
+    /// Waits until `needle` occupies a line of its own.
+    ///
+    /// A spawned command is typed into an interactive shell, so the first
+    /// thing on screen is the echo of the command line itself ("seq 1 40").
+    /// A substring match is satisfied by that echo before the shell has even
+    /// finished starting up, which would let a test resize and assert on an
+    /// empty screen; requiring a whole line waits for the program's output.
+    fn wait_for_line(t: &Terminal, needle: &str, secs: u64) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(secs);
+        while Instant::now() < deadline {
+            if t.get_all_lines().iter().any(|l| l.trim() == needle) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(80));
+        }
+        false
+    }
+
     /// Waits until the parser has stopped changing for a moment, so assertions
     /// do not race a redraw the resize just triggered.
     fn settle(t: &Terminal) {
@@ -88,7 +106,10 @@ mod unix {
     fn shrink_then_grow_keeps_every_printed_line() {
         let dir = temp_dir("scrollback");
         let mut terminal = spawn(&dir, "seq 1 40", "seq");
-        assert!(wait_for(&terminal, "40", 15), "seq output never arrived");
+        assert!(
+            wait_for_line(&terminal, "40", 15),
+            "seq output never arrived"
+        );
 
         for rows in [8, 30, 24] {
             terminal.resize(80, rows);
@@ -134,7 +155,10 @@ mod unix {
             "printf '\\033[?1049h'; seq 1 30; sleep 10",
             "altscreen",
         );
-        assert!(wait_for(&terminal, "30", 15), "alt screen never filled");
+        assert!(
+            wait_for_line(&terminal, "30", 15),
+            "alt screen never filled"
+        );
 
         for rows in [10u16, 24, 40] {
             terminal.resize(80, rows);
