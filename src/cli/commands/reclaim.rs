@@ -19,23 +19,22 @@ const LOCK_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a replacer waits for the old instance to fully exit.
 const RECLAIM_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Names of reuse-flagged services in a script.
-pub(crate) fn reuse_names(script: &crate::config::ScriptConfig) -> Vec<String> {
+/// Names of the services a single-instance run hands over: `reuse`-flagged
+/// ones plus any named by `--share`.
+pub(crate) fn reuse_names(
+    script: &crate::config::ScriptConfig,
+    config_dir: &Path,
+    share: &crate::runtime::SharePolicy,
+) -> Vec<String> {
     script
         .service
         .as_ref()
         .map(|entries| {
             entries
                 .iter()
-                .filter(|e| e.reuse)
-                .map(|e| {
-                    e.name.clone().unwrap_or_else(|| {
-                        Path::new(&e.path)
-                            .file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .into_owned()
-                    })
+                .filter_map(|e| {
+                    let name = crate::runtime::entry_name(e, config_dir);
+                    share.shared(&name, e.reuse).then_some(name)
                 })
                 .collect()
         })
@@ -52,22 +51,17 @@ pub(crate) fn reuse_names(script: &crate::config::ScriptConfig) -> Vec<String> {
 /// The caller is expected to hold the per-(project, script, branch) owner lock.
 /// Names of every service in a script: the set a detach takeover hands over,
 /// regardless of `reuse`/`share` configuration.
-pub(crate) fn all_service_names(script: &crate::config::ScriptConfig) -> Vec<String> {
+pub(crate) fn all_service_names(
+    script: &crate::config::ScriptConfig,
+    config_dir: &Path,
+) -> Vec<String> {
     script
         .service
         .as_ref()
         .map(|entries| {
             entries
                 .iter()
-                .map(|e| {
-                    e.name.clone().unwrap_or_else(|| {
-                        Path::new(&e.path)
-                            .file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .into_owned()
-                    })
-                })
+                .map(|e| crate::runtime::entry_name(e, config_dir))
                 .collect()
         })
         .unwrap_or_default()

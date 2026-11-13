@@ -86,12 +86,15 @@ pub fn current_socket_path() -> PathBuf {
 /// `io::Error` on spawn failure or if the child exits / never becomes ready
 /// during startup.
 ///
-/// `branch` is passed through as `--branch` when set; `extra_env` is added to
-/// the child's environment (used to carry the cross-instance start chain).
+/// `branch` is passed through as `--branch` when set; `extra_args` are appended
+/// to the child's command line (used by `fog restart` to replay `--share`), and
+/// `extra_env` is added to the child's environment (used to carry the
+/// cross-instance start chain).
 pub fn spawn_detached(
     config_path: &Path,
     script: &str,
     branch: Option<&str>,
+    extra_args: &[String],
     extra_env: &[(&str, String)],
     timeout: Duration,
 ) -> io::Result<u32> {
@@ -108,6 +111,7 @@ pub fn spawn_detached(
     if let Some(b) = branch {
         cmd.arg("--branch").arg(b);
     }
+    cmd.args(extra_args);
     for (key, value) in extra_env {
         cmd.env(key, value);
     }

@@ -116,6 +116,12 @@ struct Cli {
     #[arg(long)]
     no_share: bool,
 
+    /// Treat a service as shared for this run even when its config does not set
+    /// `share:true` (concurrent scripts) or `reuse:true` (single-instance).
+    /// Repeatable. The service still needs a `health_check` to be borrowed.
+    #[arg(long, value_name = "SERVICE", conflicts_with = "no_share")]
+    share: Vec<String>,
+
     /// Override a top-level `ports` entry for this run, e.g. `--port api=4000`.
     /// Repeatable; use `0` to re-randomize. Names not in the config `ports` map
     /// are added for this run. Only applies when running a script.

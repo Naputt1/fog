@@ -248,6 +248,12 @@ Services flagged `"share": true` are **shared between all concurrent instances**
 
 > `reuse` and `share` are mutually exclusive across modes: `reuse` is only honored when `"concurrent": false` (single-instance), and `share` is only honored when `"concurrent": true`. Set `"concurrent": false` to restore the old behavior where a re-run kills the previous instance first (handing over `reuse` services).
 
+### Overriding sharing for one run
+
+`--share <SERVICE>` (repeatable) turns sharing on for the named service, whatever its config says: `share` behavior in a concurrent script, `reuse` behavior in a single-instance one. It exists for a resource that is safe to share (a database, a compose stack) when the config left the flag off. `--no-share` is the opposite: it starts every service fresh for the run. The two flags conflict.
+
+A forced service is still held to the same rules: it needs a `health_check` to be verified and borrowed (without one fog warns and starts it), and it is only borrowed when a same-branch sibling already owns it. The name must be one the script defines — an explicit `name`, else the `path` basename — otherwise fog exits `2` with the list of valid names. The override survives detach and worktree switches, and `fog attach` replays it.
+
 ### `FOG_BRANCH` environment variable
 
 When fog runs a script in a git worktree (via `--branch` or an in-place worktree switch), it injects `FOG_BRANCH` (DNS-safe **slug**, `/` → `-`, lowercased, `feat/book` → `feat-book`) and `FOG_BRANCH_RAW` (original `feat/book`) into every service process, plus `FOG_BRANCH_SLUG` as an alias for the slug. This lets a compose file derive per-branch names — compose project, container hostnames, and host ports — so multiple branches of the same repo never collide. Templates `${branch}` / `${FOG_BRANCH}` resolve to the slug; `${branch_raw}` / `${FOG_BRANCH_RAW}` resolve to the raw name:
