@@ -126,6 +126,21 @@ pub(crate) fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>)
         Some(s) => s,
         None => list_scripts_and_exit(&config, &format!("unknown script '{name}'")),
     };
+    let config_path = config_path
+        .canonicalize()
+        .unwrap_or_else(|_| config_path.clone());
+    let config_dir = config_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .to_path_buf();
+    // `--no-share` / `--share` overrides for this run, resolved against the
+    // script that is actually about to start. A bad `--share` name is a usage
+    // error, reported before anything is torn down or allocated.
+    let share = crate::runtime::SharePolicy {
+        no_share: cli.no_share,
+        forced: cli.share.iter().cloned().collect(),
+    };
+    validate_forced_share(&share, script, name, &config_dir);
 
     // Setup diagnostics are collected rather than printed immediately: in
     // interactive mode the TUI takes the screen moments later, so warnings are
@@ -161,14 +176,6 @@ pub(crate) fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>)
         note_phase(&mut progress, "index server");
         startup_messages.extend(crate::index::ensure_for_config(&config));
     }
-
-    let config_path = config_path
-        .canonicalize()
-        .unwrap_or_else(|_| config_path.clone());
-    let config_dir = config_path
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."))
-        .to_path_buf();
 
     // Every start — TUI, daemon or worktree switch — keeps the project in the
     // index's "known project" list after it stops. Only launchable configs
@@ -207,7 +214,7 @@ pub(crate) fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>)
         // every live service (not just `reuse` ones) so the session keeps
         // running.
         note_phase(&mut progress, "adopting services");
-        match reclaim_takeover(from_pid, &all_service_names(script)) {
+        match reclaim_takeover(from_pid, &all_service_names(script, &config_dir)) {
             Some(handoffs) => adopted = handoffs,
             None => std::process::exit(1),
         }
@@ -216,11 +223,11 @@ pub(crate) fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>)
         // same project+script instead of replacing them, so no coordination or
         // reclaim happens. Only single-instance scripts take over from a previous
         // run (handing over `reuse` services). `--no-share` disables reuse handoff.
-        if !script.concurrent && !cli.no_share {
-            let reuse = reuse_names(script);
+        if !script.concurrent && !share.no_share {
+            let reuse = reuse_names(script, &config_dir, &share);
             note_phase(&mut progress, "reclaiming previous instance");
             (adopted, owner_lock) = reconcile_instance(project, name, branch.as_deref(), &reuse);
-        } else if !script.concurrent && cli.no_share {
+        } else if !script.concurrent && share.no_share {
             // Still reclaim the old instance (single-instance semantics) but
             // without adopting any services.
             note_phase(&mut progress, "reclaiming previous instance");
@@ -245,10 +252,12 @@ pub(crate) fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>)
         name.to_string(),
         project.clone(),
         branch.clone(),
-        cli.no_share,
+        share.no_share,
     );
     ipc_state.config_dir = Some(config_dir.to_string_lossy().into_owned());
     ipc_state.config_path = Some(config_path.to_string_lossy().into_owned());
+    // Publish the forced names so `fog attach` can rebuild this invocation.
+    ipc_state.forced_share = share.forced.iter().cloned().collect();
     // Cold-start provenance: `references::resolve` passes the parent's pid and
     // identity when it spawns this instance, so `fog ls` and `fog kill` can
     // show and optionally stop instances this one caused to start.
@@ -308,11 +317,13 @@ pub(crate) fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>)
     // per-(project, script, branch) owner lock so a racing sibling adopts the
     // winner's ports instead of allocating divergent ones. Single-instance mode
     // already holds this lock (from reclaim) and is released after startup.
-    let has_shared = script
-        .service
-        .as_ref()
-        .is_some_and(|s| s.iter().any(|e| e.share));
-    let startup_lock = if script.concurrent && !cli.no_share && has_shared {
+    let has_shared = script.service.as_ref().is_some_and(|s| {
+        s.iter().any(|e| {
+            let name = crate::runtime::entry_name(e, &config_dir);
+            share.shared(&name, e.share)
+        })
+    });
+    let startup_lock = if script.concurrent && !share.no_share && has_shared {
         project.as_ref().and_then(|p| {
             crate::lock::OwnerLock::acquire_with_timeout(
                 p,
@@ -358,8 +369,30 @@ pub(crate) fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>)
     }
     let ports_defined = config.ports.is_some() || !port_specs.is_empty();
 
-    let mut port_map = if !port_specs.is_empty() {
-        match crate::ports::allocate_ports(&port_specs) {
+    // Adopt the live ports of a sibling that already owns a shared service
+    // *before* allocating: a shared resource with a fixed port keeps listening
+    // on it in the sibling, so allocating (and probing) that port locally would
+    // fail with "already in use" even though this instance is about to borrow
+    // it. Names adopted here are skipped by allocation; the sibling's values win
+    // over local allocation and `--port` overrides, because they are where the
+    // resource actually listens.
+    let mut adopted_ports = std::collections::HashMap::new();
+    let owned_shared = crate::runtime::adopt_shared_ports(
+        script,
+        name,
+        &config_dir,
+        project.as_deref(),
+        branch_for_ports.as_deref(),
+        &mut adopted_ports,
+        &share,
+    );
+    let local_specs: std::collections::HashMap<String, u16> = port_specs
+        .iter()
+        .filter(|(key, _)| !adopted_ports.contains_key(*key))
+        .map(|(key, port)| (key.clone(), *port))
+        .collect();
+    let mut port_map = if !local_specs.is_empty() {
+        match crate::ports::allocate_ports(&local_specs) {
             Ok(m) => m,
             Err(e) => {
                 if !detached {
@@ -386,20 +419,11 @@ pub(crate) fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>)
     // An explicit `--port api@repo:branch[=PORT]` wins over lookup and
     // auto-start; references already present in `port_map` are left untouched.
     port_map.extend(external_overrides);
-    // Adopt the live ports of a sibling that already owns a shared service, so
-    // dependent services resolve `${ports.*}` to the borrowed resource's real
-    // port instead of this instance's freshly allocated one. Adoption and
+    // Adopted sibling ports land last: they are the borrowed resource's real
+    // address, which dependent templates must resolve to. Adoption and
     // cross-instance resolution run before validation so every template sees
     // its final port.
-    let owned_shared = crate::runtime::adopt_shared_ports(
-        script,
-        name,
-        &config_dir,
-        project.as_deref(),
-        branch_for_ports.as_deref(),
-        &mut port_map,
-        cli.no_share,
-    );
+    port_map.extend(adopted_ports);
     // Resolve `${ports.<name>@<repo>:<branch>[:<script>]}` against live fog
     // instances; a `:script` reference may start its target when it is not
     // running. An explicit `--port <key>=PORT` already in `port_map` wins.
@@ -506,7 +530,7 @@ pub(crate) fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>)
     }
 
     note_phase(&mut progress, "starting services");
-    let runtime = crate::runtime::build_with_ports_no_share(
+    let runtime = crate::runtime::build_with_share_policy(
         script,
         name,
         &config_dir,
@@ -517,7 +541,7 @@ pub(crate) fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>)
         &mut adopted,
         &port_map,
         branch_for_ports.clone(),
-        cli.no_share,
+        share.clone(),
         takeover,
         &owned_shared,
     )
@@ -632,6 +656,13 @@ pub(crate) fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>)
         if cli.verbose {
             args.push(OsString::from("--verbose"));
         }
+        // Keep the forced services across a detach: the successor rebuilds the
+        // run from these args, so dropping them would restart a borrowed
+        // resource instead of taking it over.
+        for service in &share.forced {
+            args.push(OsString::from("--share"));
+            args.push(OsString::from(service));
+        }
         Some(crate::app::DetachSpawn::new(exe, args, std::process::id()))
     };
 
@@ -650,7 +681,7 @@ pub(crate) fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>)
         ipc_state,
         config_rel: cli.config.clone(),
         save_logs: cli.save_logs,
-        no_share: cli.no_share,
+        share: share.clone(),
         verbose: cli.verbose,
         detach,
         startup_messages: startup_warnings,
@@ -730,4 +761,41 @@ pub(crate) fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>)
     // SPA can launch the next one; stop it with `fog index kill`.
 
     Ok(())
+}
+
+/// Rejects a `--share NAME` the script does not define, before the run touches
+/// any instance, port or route. `SERVICE` is the name the TUI shows (an
+/// explicit `name`, else the `path` basename).
+fn validate_forced_share(
+    share: &crate::runtime::SharePolicy,
+    script: &crate::config::ScriptConfig,
+    script_name: &str,
+    config_dir: &std::path::Path,
+) {
+    if share.forced.is_empty() {
+        return;
+    }
+    let known = all_service_names(script, config_dir);
+    let unknown: Vec<&str> = share
+        .forced
+        .iter()
+        .map(String::as_str)
+        .filter(|name| !known.iter().any(|k| k.as_str() == *name))
+        .collect();
+    if unknown.is_empty() {
+        return;
+    }
+    let hint = if known.is_empty() {
+        format!("script '{script_name}' has no services")
+    } else {
+        format!("services in '{script_name}': {}", known.join(", "))
+    };
+    let quoted: Vec<String> = unknown.iter().map(|n| format!("'{n}'")).collect();
+    crate::cli::usage_error(
+        crate::error::FogError::new(format!(
+            "--share: unknown service {} in script '{script_name}'",
+            quoted.join(", ")
+        )),
+        &hint,
+    );
 }

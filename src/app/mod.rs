@@ -168,9 +168,10 @@ pub struct App {
     /// `ipc_state.branch` (which is set once at startup) so a worktree switch
     /// updates the title without changing the instance's IPC identity.
     title_branch: Option<String>,
-    /// Whether `--no-share` was passed: when true shared/reuse services are
-    /// always started fresh instead of borrowed/handed over.
-    no_share: bool,
+    /// `--no-share` / `--share` overrides for this run: which services are
+    /// shared even when their config does not say so, and whether sharing is
+    /// disabled entirely.
+    share: crate::runtime::SharePolicy,
     /// Whether `--verbose` was passed: gates informational setup output.
     verbose: bool,
     /// Set once a `d` detach has launched a detached successor; the run loop
@@ -216,7 +217,9 @@ pub struct AppCreateOpts {
     pub ipc_state: Arc<IpcState>,
     pub config_rel: PathBuf,
     pub save_logs: bool,
-    pub no_share: bool,
+    /// `--no-share` / `--share` overrides carried into worktree switches and
+    /// detach handling.
+    pub share: crate::runtime::SharePolicy,
     pub verbose: bool,
     /// Detach spawn recipe; `None` outside an interactive run.
     pub detach: Option<DetachSpawn>,
@@ -243,7 +246,7 @@ impl App {
             ipc_state,
             config_rel,
             save_logs,
-            no_share,
+            share,
             verbose,
             detach,
             startup_messages,
@@ -299,7 +302,7 @@ impl App {
             auto_scroll_col: 0,
             content_layout: Vec::new(),
             switch_popup: None,
-            no_share,
+            share,
             verbose,
             detaching: false,
             detach_pid: None,
@@ -330,7 +333,7 @@ impl App {
             self.note_error("detach is not supported on this platform".to_string());
             return;
         }
-        if self.no_share {
+        if self.share.no_share {
             self.note_error("cannot detach with --no-share: live handoff is disabled".to_string());
             return;
         }
@@ -448,7 +451,7 @@ mod tests {
             auto_scroll_col: 0,
             content_layout: Vec::new(),
             switch_popup: None,
-            no_share: false,
+            share: crate::runtime::SharePolicy::default(),
             verbose: false,
             detaching: false,
             detach_pid: None,

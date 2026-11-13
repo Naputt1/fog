@@ -139,6 +139,7 @@ pub fn resolve(
                 &target.config_path,
                 &target.script,
                 None,
+                &[],
                 &[
                     (AUTOSTART_CHAIN_ENV, inherited.serialize()),
                     (AUTOSTART_BY_ENV, parent_pid.clone()),

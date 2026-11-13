@@ -26,6 +26,8 @@ Identity is `project = git rev-parse --git-common-dir` (shared by all worktrees)
 
 The other flag is ignored (`concurrent:true + reuse:true` just starts). Both warn if `health_check` missing and start normally. See [Configuration](/configuration) for full semantics.
 
+`fog <script> --share <service>` (repeatable) forces one service into its mode's behavior for a single run, even when the config omits the flag; it still needs a `health_check` to be borrowed. `--no-share` disables borrowing for the whole run, and conflicts with `--share`.
+
 ## Human + agent recipe (same branch)
 
 ```json

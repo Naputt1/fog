@@ -328,7 +328,7 @@ impl App {
     /// Extracts live services requested for handover by a replacing instance
     /// and publishes them for the IPC thread to send over the socket.
     pub(crate) fn perform_handoff(&mut self) {
-        if self.no_share {
+        if self.share.no_share {
             self.ipc_state
                 .handoff_prepared
                 .store(true, Ordering::SeqCst);

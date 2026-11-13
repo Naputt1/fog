@@ -90,12 +90,20 @@ pub(crate) fn cmd_attach(cli: &Cli) -> io::Result<()> {
         );
     };
 
-    let mut attach_cli = Cli::parse_from([
+    let mut argv: Vec<OsString> = vec![
         OsString::from("fog"),
         OsString::from(&status.script),
         OsString::from("--config"),
         OsString::from(&config_path),
-    ]);
+    ];
+    // Replay `--share` so the attached session keeps the same sharing behavior
+    // (borrowed services stay shared for teardown, and a detach successor
+    // rebuilds it too).
+    for service in &status.forced_share {
+        argv.push(OsString::from("--share"));
+        argv.push(OsString::from(service));
+    }
+    let mut attach_cli = Cli::parse_from(argv);
     attach_cli.verbose = cli.verbose;
     attach_cli.save_logs = cli.save_logs;
 
