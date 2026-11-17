@@ -19,6 +19,7 @@ import {
 import { ErrorState, LoadingState, PageHeader } from "@/components/page-state";
 import { InstanceKillButton } from "@/components/instance-kill-button";
 import { InstanceKillingBadge } from "@/components/instance-killing-badge";
+import { InstancePortsButton } from "@/components/instance-ports";
 import { LaunchPopup } from "@/components/launch-instance";
 import { Button } from "@/components/ui/button";
 import { useInstanceKillState } from "@/lib/hooks";
@@ -120,6 +121,7 @@ function ScriptInstanceRow({
           {killing ? "killing…" : `${running}/${inst.services.length}`}
         </span>
       </Link>
+      <InstancePortsButton inst={inst} />
       <InstanceKillingBadge pid={inst.pid} script={inst.script} />
       {inst.pid > 0 ? (
         <InstanceKillButton

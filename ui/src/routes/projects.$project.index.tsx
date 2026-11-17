@@ -22,6 +22,7 @@ import { useInstanceKillState } from "@/lib/hooks";
 import { PageHeader } from "@/components/page-state";
 import { InstanceKillButton } from "@/components/instance-kill-button";
 import { InstanceKillingBadge } from "@/components/instance-killing-badge";
+import { InstancePortsButton } from "@/components/instance-ports";
 import { LaunchPopup } from "@/components/launch-instance";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -87,6 +88,7 @@ function InstanceRow({
           {killing ? "killing…" : `${running}/${inst.services.length}`}
         </span>
       </Link>
+      <InstancePortsButton inst={inst} />
       <InstanceKillButton
         pid={inst.pid}
         script={inst.script}
@@ -126,7 +128,8 @@ function BranchCard({ bucket }: { bucket: BranchBucket }) {
             />
           </Link>
           {!multi && only ? (
-            <div className="flex shrink-0 items-center gap-2">
+            <div className="flex shrink-0 items-center gap-1.5">
+              <InstancePortsButton inst={only} />
               <InstanceKillingBadge pid={only.pid} script={only.script} />
               <InstanceKillButton
                 pid={only.pid}
@@ -159,12 +162,6 @@ function BranchCard({ bucket }: { bucket: BranchBucket }) {
                 {svc.name}
               </span>
             ))}
-          </div>
-        ) : null}
-
-        {stats.ports.length > 0 ? (
-          <div className="text-muted-foreground/80 text-2xs truncate font-mono">
-            {stats.ports.join("  ")}
           </div>
         ) : null}
 
