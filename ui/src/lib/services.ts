@@ -1,4 +1,5 @@
 import type {
+  InstancePort,
   InstanceStatus,
   Service,
   Endpoint,
@@ -242,6 +243,8 @@ export interface InstanceView {
   branch: string | null;
   /** Services in stable name order (running and stopped). */
   services: InstanceServiceView[];
+  /** Declared ports for this instance, locals first then external refs. */
+  ports: InstancePort[];
 }
 
 /** A branch (worktree) of a project and every instance serving it. */
@@ -307,10 +310,19 @@ export function buildInstanceViews(
   instances: InstanceStatus[],
   services: Service[]
 ): InstanceView[] {
-  const exact = new Map<string, Service>();
+  // Native rows are per fog instance and carry a pid; docker rows are
+  // host-wide and never do. Keep them apart so two instances in one worktree
+  // cannot resolve to the same service's port.
+  const byPid = new Map<string, Service>();
+  const byName = new Map<string, Service>();
   const byProjectService = new Map<string, Service[]>();
   for (const svc of services) {
-    exact.set(serviceKey(svc.project, svc.worktree, svc.service), svc);
+    const key = serviceKey(svc.project, svc.worktree, svc.service);
+    if (svc.pid != null) {
+      byPid.set(`${key}\u0000${svc.pid}`, svc);
+    } else {
+      byName.set(key, svc);
+    }
     const listKey = `${svc.project.toLowerCase()}\u0000${svc.service}`;
     const list = byProjectService.get(listKey);
     if (list) list.push(svc);
@@ -318,17 +330,22 @@ export function buildInstanceViews(
   }
 
   const lookup = (
+    pid: number,
     project: string,
     worktree: string,
     name: string
   ): Service | null => {
-    const hit = exact.get(serviceKey(project, worktree, name));
-    if (hit) return hit;
+    const key = serviceKey(project, worktree, name);
+    const owned = byPid.get(`${key}\u0000${pid}`);
+    if (owned) return owned;
+    const docker = byName.get(key);
+    if (docker) return docker;
     // Fallback: a unique directory entry for this project+service (covers
-    // docker/native worktree-token drift for the default checkout).
-    const candidates = byProjectService.get(
-      `${project.toLowerCase()}\u0000${name}`
-    );
+    // docker/native worktree-token drift for the default checkout). Rows
+    // owned by another instance are not candidates.
+    const candidates = byProjectService
+      .get(`${project.toLowerCase()}\u0000${name}`)
+      ?.filter((s) => s.pid == null || s.pid === pid);
     return candidates && candidates.length === 1 ? candidates[0] : null;
   };
 
@@ -340,7 +357,7 @@ export function buildInstanceViews(
         name: s.name,
         running: s.running,
         health: s.health,
-        service: lookup(project, worktree, s.name),
+        service: lookup(inst.pid, project, worktree, s.name),
         endpoints: s.endpoints ?? [],
       }))
       .sort((a, b) => a.name.localeCompare(b.name));
@@ -351,6 +368,7 @@ export function buildInstanceViews(
       worktree,
       branch: inst.branch ?? null,
       services: svcs,
+      ports: inst.ports ?? [],
     };
   });
 
@@ -441,6 +459,7 @@ export function branchInstances(
           service: s,
           endpoints: [],
         })),
+      ports: [],
     },
   ];
 }

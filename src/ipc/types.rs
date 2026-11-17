@@ -34,6 +34,14 @@ pub struct ServiceStatus {
     /// unset so older readers are unaffected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shutdown_cmd: Option<String>,
+    /// Whether this service is a shared resource (`share: true` in concurrent
+    /// mode, `reuse: true` otherwise). The index UI tags its ports with it.
+    #[serde(default)]
+    pub shared: bool,
+    /// Symbolic port names (`${ports.*}`) this service references. Used by the
+    /// index UI to attribute declared ports to services.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub port_names: Vec<String>,
 }
 
 /// Allocated port map for an instance (symbolic name -> host port).

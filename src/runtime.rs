@@ -698,14 +698,25 @@ pub fn build_with_opts(opts: BuildOpts) -> FogResult<Runtime> {
 
     // Clone and template-resolve entries when ports non-empty or branch present.
     let raw_entries = script.service.clone().unwrap_or_default();
+    // Symbolic port names each service references. Captured from the raw entries
+    // because `resolve_entries` substitutes them; the index UI reports these
+    // names so a port can be attributed to its service.
+    let referenced_ports: Vec<Vec<String>> = raw_entries
+        .iter()
+        .map(|e| {
+            crate::ports::entry_referenced_ports(e)
+                .into_iter()
+                .collect()
+        })
+        .collect();
     // Which services reference a `${ports.*}` name. Such a service can only be
     // safely borrowed when its live ports were adopted from the owning sibling
     // (`owned_shared`); otherwise dependents would resolve to our own fresh
     // allocation while the real resource listens elsewhere. Fixed-port services
     // are deterministic and need no adoption.
-    let templated_ports: Vec<bool> = raw_entries
+    let templated_ports: Vec<bool> = referenced_ports
         .iter()
-        .map(|e| !crate::ports::entry_referenced_ports(e).is_empty())
+        .map(|names| !names.is_empty())
         .collect();
     // Every fallible setup step runs before any terminal is built. Handed-off
     // PTY fds live in `adopted` until a terminal takes them; a failure here
@@ -977,6 +988,7 @@ pub fn build_with_opts(opts: BuildOpts) -> FogResult<Runtime> {
         if shared {
             terminal.shared = true;
         }
+        terminal.port_names = referenced_ports.get(idx).cloned().unwrap_or_default();
         // Declared endpoint endpoints (health tracked independently of the
         // parent). Started immediately so the index/UI has readings as soon as
         // the service appears; a pending service's endpoints simply report

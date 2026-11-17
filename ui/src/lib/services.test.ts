@@ -204,6 +204,88 @@ describe("buildInstanceViews", () => {
     expect(worker.running).toBe(false);
     expect(worker.service).toBeNull();
   });
+
+  it("keeps same-worktree instances on their own service rows", () => {
+    const instances: InstanceStatus[] = [10, 20].map((pid) => ({
+      pid,
+      script: "dev",
+      project: "retail",
+      branch: "deepvision-x",
+      services: [{ name: "web", running: true, health: "healthy" }],
+    }));
+    const directory = [
+      svc({
+        project: "retail",
+        worktree: "deepvision-x",
+        service: "web",
+        pid: 10,
+        ports: ["0.0.0.0:49571->49571/tcp"],
+      }),
+      svc({
+        project: "retail",
+        worktree: "deepvision-x",
+        service: "web",
+        pid: 20,
+        ports: ["0.0.0.0:57342->57342/tcp"],
+      }),
+    ];
+
+    const views = buildInstanceViews(instances, directory);
+    expect(views[0].services[0].service?.ports).toEqual([
+      "0.0.0.0:49571->49571/tcp",
+    ]);
+    expect(views[1].services[0].service?.ports).toEqual([
+      "0.0.0.0:57342->57342/tcp",
+    ]);
+  });
+
+  it("does not borrow another instance's native row", () => {
+    const instances: InstanceStatus[] = [10, 20].map((pid) => ({
+      pid,
+      script: "dev",
+      project: "retail",
+      branch: "deepvision-x",
+      services: [{ name: "web", running: true, health: "healthy" }],
+    }));
+    const directory = [
+      svc({
+        project: "retail",
+        worktree: "deepvision-x",
+        service: "web",
+        pid: 10,
+        ports: ["0.0.0.0:49571->49571/tcp"],
+      }),
+    ];
+
+    const views = buildInstanceViews(instances, directory);
+    expect(views[0].services[0].service?.pid).toBe(10);
+    expect(views[1].services[0].service).toBeNull();
+  });
+
+  it("carries each instance's declared ports", () => {
+    const instances: InstanceStatus[] = [
+      {
+        pid: 30,
+        script: "dev",
+        project: "retail",
+        branch: "deepvision-x",
+        services: [],
+        ports: [
+          {
+            name: "web",
+            port: 57342,
+            shared: false,
+            external: false,
+            services: ["web"],
+          },
+        ],
+      },
+    ];
+    const views = buildInstanceViews(instances, []);
+    expect(views[0].ports).toEqual(instances[0].ports);
+    // Older instances do not report ports; the view defaults to empty.
+    expect(buildInstanceViews(INSTANCES, DIRECTORY)[0].ports).toEqual([]);
+  });
 });
 
 describe("groupByBranch / findBranch", () => {

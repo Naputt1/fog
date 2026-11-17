@@ -305,12 +305,15 @@ fn synthesize_native_routes(
             .get(route.service.as_str())
             .copied()
             .unwrap_or(ServiceState::Unknown.as_str());
-        // Avoid duplicating a docker entry that already covers this host (e.g. if a
-        // service is both docker and native in different worktrees, keep both).
-        if list
-            .iter()
-            .any(|e| e.service == route.service && e.worktree == worktree && e.project == project)
-        {
+        // Avoid duplicating a docker entry that already covers this host, but
+        // keep one row per live instance: two concurrent instances in the same
+        // worktree each own their own port for the same service name.
+        if list.iter().any(|e| {
+            e.service == route.service
+                && e.worktree == worktree
+                && e.project == project
+                && (e.pid.is_none() || e.pid == Some(inst.pid))
+        }) {
             continue;
         }
         list.push(ApiService {
@@ -349,12 +352,27 @@ fn attach_declared_endpoints(
         let status = ServiceState::from_running(svc.running);
         let subs = api_endpoints_for(inst, &svc.name, all_docker, project, worktree);
         if !subs.is_empty() {
-            if let Some(existing) = list
-                .iter_mut()
-                .find(|e| e.service == svc.name && e.worktree == worktree && e.project == project)
-            {
-                if existing.endpoints.is_empty() {
-                    existing.endpoints = subs;
+            // Endpoints belong to the instance that declared them. Prefer its
+            // own row; a pid-less docker row is shared and may also carry them.
+            let pos = list
+                .iter()
+                .position(|e| {
+                    e.service == svc.name
+                        && e.worktree == worktree
+                        && e.project == project
+                        && e.pid == Some(inst.pid)
+                })
+                .or_else(|| {
+                    list.iter().position(|e| {
+                        e.service == svc.name
+                            && e.worktree == worktree
+                            && e.project == project
+                            && e.pid.is_none()
+                    })
+                });
+            if let Some(i) = pos {
+                if list[i].endpoints.is_empty() {
+                    list[i].endpoints = subs;
                 }
             } else {
                 list.push(ApiService {
@@ -377,10 +395,13 @@ fn attach_declared_endpoints(
         if inst.native_routes.iter().any(|r| r.service == svc.name) {
             continue;
         }
-        // Show native services not already listed.
-        let already = list
-            .iter()
-            .any(|e| e.service == svc.name && e.worktree == worktree && e.project == project);
+        // Show native services not already listed for this instance.
+        let already = list.iter().any(|e| {
+            e.service == svc.name
+                && e.worktree == worktree
+                && e.project == project
+                && (e.pid.is_none() || e.pid == Some(inst.pid))
+        });
         if already {
             continue;
         }
@@ -470,6 +491,21 @@ pub(super) fn api_services_with_query(_network: &str, query: Option<&str>) -> Re
     json_response(&list)
 }
 
+/// One declared port of a running instance, with its provenance.
+#[derive(serde::Serialize)]
+struct ApiPort {
+    /// Symbolic name (or cross-instance reference) from the port map.
+    name: String,
+    /// Host port assigned to this instance.
+    port: u16,
+    /// Whether a shared (`share`/`reuse`) service references this port.
+    shared: bool,
+    /// Whether the name is a cross-instance `${ports.x@repo:branch}` ref.
+    external: bool,
+    /// Services whose cmd/env/health check reference this port.
+    services: Vec<String>,
+}
+
 /// One running fog instance as reported by `GET /api/status`.
 #[derive(serde::Serialize)]
 struct ApiInstance {
@@ -480,18 +516,65 @@ struct ApiInstance {
     #[serde(skip_serializing_if = "Option::is_none")]
     branch: Option<String>,
     services: Vec<crate::ipc::ServiceStatus>,
+    /// Every port the instance declared, including adopted shared ports and
+    /// cross-instance references.
+    ports: Vec<ApiPort>,
+}
+
+/// Classifies an instance's allocated ports for the script page: shared
+/// resources, cross-instance references, and the services that use each port.
+///
+/// Local ports sort alphabetically before external references so the common
+/// per-instance names stay easy to scan.
+fn instance_ports(inst: &FogInstance) -> Vec<ApiPort> {
+    let mut ports: Vec<ApiPort> = inst
+        .ports
+        .iter()
+        .map(|(name, port)| {
+            let external = name.contains('@');
+            let mut services: Vec<String> = inst
+                .services
+                .iter()
+                .filter(|s| s.port_names.iter().any(|n| n == name))
+                .map(|s| s.name.clone())
+                .collect();
+            services.sort();
+            services.dedup();
+            ApiPort {
+                name: name.clone(),
+                port: *port,
+                shared: !external
+                    && inst
+                        .services
+                        .iter()
+                        .any(|s| s.shared && s.port_names.iter().any(|n| n == name)),
+                external,
+                services,
+            }
+        })
+        .collect();
+    ports.sort_by(|a, b| {
+        a.external
+            .cmp(&b.external)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    ports
 }
 
 /// `GET /api/status`: running fog instances (pid, script, service statuses).
 pub(super) fn api_status() -> Response<RespBody> {
     let list: Vec<ApiInstance> = discover_fog_instances()
         .into_iter()
-        .map(|i| ApiInstance {
-            pid: i.pid,
-            script: i.script,
-            project: i.project.map(|p| project_name_from_common_dir(&p)),
-            branch: i.branch,
-            services: i.services,
+        .map(|i| {
+            let ports = instance_ports(&i);
+            ApiInstance {
+                pid: i.pid,
+                script: i.script,
+                project: i.project.map(|p| project_name_from_common_dir(&p)),
+                branch: i.branch,
+                services: i.services,
+                ports,
+            }
         })
         .collect();
     json_response(&serde_json::json!({ "instances": list }))
@@ -582,7 +665,7 @@ pub fn load_runtime_config() -> crate::config::Config {
 
 #[cfg(test)]
 mod tests {
-    use super::{FogInstance, attach_declared_endpoints, synthesize_native_routes};
+    use super::{FogInstance, attach_declared_endpoints, instance_ports, synthesize_native_routes};
     use crate::ipc::{NativeRouteInfo, ServiceStatus};
 
     fn instance(services: Vec<ServiceStatus>, routes: Vec<NativeRouteInfo>) -> FogInstance {
@@ -605,6 +688,8 @@ mod tests {
             health: "unknown".to_string(),
             endpoints: Vec::new(),
             shutdown_cmd: None,
+            shared: false,
+            port_names: Vec::new(),
         }
     }
 
@@ -667,5 +752,119 @@ mod tests {
         assert_eq!(list[0].status.as_str(), "stopped");
         assert_eq!(list[0].url, "https://feat-x.red-fox/");
         assert_eq!(list[0].pid, Some(4321));
+    }
+
+    #[test]
+    fn instance_ports_classify_shared_external_and_consumers() {
+        let mut web = svc("web", true);
+        web.port_names = vec!["web".to_string(), "api@backend:?:dev".to_string()];
+        let mut db = svc("db", true);
+        db.shared = true;
+        db.port_names = vec!["db".to_string()];
+        let mut worker = svc("worker", true);
+        worker.port_names = vec!["metrics".to_string()];
+
+        let mut inst = instance(vec![web, db, worker], Vec::new());
+        inst.ports.insert("web".to_string(), 57342);
+        inst.ports.insert("db".to_string(), 5433);
+        inst.ports.insert("metrics".to_string(), 9100);
+        inst.ports.insert("unused".to_string(), 7000);
+        inst.ports.insert("api@backend:?:dev".to_string(), 61126);
+
+        let ports = instance_ports(&inst);
+        assert_eq!(
+            ports.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            ["db", "metrics", "unused", "web", "api@backend:?:dev"]
+        );
+
+        let db = &ports[0];
+        assert!(db.shared);
+        assert!(!db.external);
+        assert_eq!(db.services, ["db"]);
+
+        assert!(!ports[1].shared);
+        assert_eq!(ports[1].services, ["worker"]);
+
+        let unused = &ports[2];
+        assert!(!unused.shared);
+        assert!(!unused.external);
+        assert!(unused.services.is_empty());
+
+        assert_eq!(ports[3].services, ["web"]);
+
+        let external = &ports[4];
+        assert!(external.external);
+        assert!(!external.shared);
+        assert_eq!(external.port, 61126);
+        assert_eq!(external.services, ["web"]);
+    }
+
+    fn branch_instance(
+        pid: u32,
+        ports: &[(&str, u16)],
+        routes: Vec<NativeRouteInfo>,
+    ) -> FogInstance {
+        let mut inst = instance(vec![svc("web", true)], routes);
+        inst.pid = pid;
+        inst.project = Some("retail".to_string());
+        inst.branch = Some("deepvision-x".to_string());
+        for (name, port) in ports {
+            inst.ports.insert((*name).to_string(), *port);
+        }
+        inst
+    }
+
+    #[test]
+    fn same_worktree_instances_keep_their_own_service_rows() {
+        let route = NativeRouteInfo {
+            host: "${branch}.deepvision".to_string(),
+            service: "web".to_string(),
+            port: "${ports.web}".to_string(),
+            path_prefix: None,
+            endpoint: None,
+        };
+        let first = branch_instance(1001, &[("web", 49571)], vec![route.clone()]);
+        let second = branch_instance(1002, &[("web", 57342)], vec![route]);
+
+        let mut list = Vec::new();
+        for inst in [&first, &second] {
+            synthesize_native_routes(&mut list, inst, "retail", "deepvision-x");
+            attach_declared_endpoints(&mut list, inst, "retail", "deepvision-x", &[], &[]);
+        }
+
+        let rows: Vec<_> = list.iter().filter(|e| e.service == "web").collect();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].pid, Some(1001));
+        assert_eq!(rows[0].container, "fog-1001-web");
+        assert_eq!(rows[0].ports, vec!["0.0.0.0:49571->49571/tcp"]);
+        assert_eq!(rows[1].pid, Some(1002));
+        assert_eq!(rows[1].container, "fog-1002-web");
+        assert_eq!(rows[1].ports, vec!["0.0.0.0:57342->57342/tcp"]);
+    }
+
+    #[test]
+    fn same_worktree_instances_keep_their_own_endpoints() {
+        let route = NativeRouteInfo {
+            host: "${branch}.deepvision".to_string(),
+            service: "web".to_string(),
+            port: "${ports.metrics}".to_string(),
+            path_prefix: None,
+            endpoint: Some("metrics".to_string()),
+        };
+        let first = branch_instance(1001, &[("metrics", 61001)], vec![route.clone()]);
+        let second = branch_instance(1002, &[("metrics", 61002)], vec![route]);
+
+        let mut list = Vec::new();
+        for inst in [&first, &second] {
+            synthesize_native_routes(&mut list, inst, "retail", "deepvision-x");
+            attach_declared_endpoints(&mut list, inst, "retail", "deepvision-x", &[], &[]);
+        }
+
+        let rows: Vec<_> = list.iter().filter(|e| e.service == "web").collect();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].pid, Some(1001));
+        assert_eq!(rows[0].endpoints[0].port, "61001");
+        assert_eq!(rows[1].pid, Some(1002));
+        assert_eq!(rows[1].endpoints[0].port, "61002");
     }
 }

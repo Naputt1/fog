@@ -149,6 +149,10 @@ pub struct Terminal {
     /// `shutdown_cmd` is skipped on teardown while another instance on the
     /// same (project, script, branch) still serves it.
     pub shared: bool,
+    /// Symbolic port names (`${ports.*}`) this service references. The index
+    /// UI uses them to attribute a declared port to its service and to mark the
+    /// shared ones.
+    pub port_names: Vec<String>,
     /// When a reused service is adopted from another instance, the child PID
     /// to wait on / kill instead of a [`Child`] handle.
     owned_pid: Option<u32>,
@@ -319,6 +323,7 @@ impl Terminal {
             script: String::new(),
             reused: false,
             shared: false,
+            port_names: Vec::new(),
             owned_pid: None,
             raw_fd: None,
             reused_since: None,
@@ -385,6 +390,7 @@ impl Terminal {
             script: String::new(),
             reused: false,
             shared: false,
+            port_names: Vec::new(),
             owned_pid: None,
             raw_fd: None,
             reused_since: None,
@@ -449,6 +455,7 @@ impl Terminal {
             script: String::new(),
             reused: false,
             shared: false,
+            port_names: Vec::new(),
             owned_pid: None,
             raw_fd: None,
             reused_since: None,
@@ -510,6 +517,7 @@ impl Terminal {
             script: String::new(),
             reused: false,
             shared: false,
+            port_names: Vec::new(),
             owned_pid: None,
             raw_fd: None,
             reused_since: None,
@@ -571,6 +579,7 @@ impl Terminal {
             script: String::new(),
             reused: true,
             shared: false,
+            port_names: Vec::new(),
             owned_pid: None,
             raw_fd: None,
             reused_since: Some(Instant::now()),
@@ -719,6 +728,7 @@ impl Terminal {
             script: String::new(),
             reused: true,
             shared: false,
+            port_names: Vec::new(),
             owned_pid: Some(pid),
             endpoints: Vec::new(),
             raw_fd: Some(fd),

@@ -464,6 +464,8 @@ mod tests {
             health: health.to_string(),
             endpoints: Vec::new(),
             shutdown_cmd: None,
+            shared: false,
+            port_names: Vec::new(),
         }
     }
 

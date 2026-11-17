@@ -94,6 +94,20 @@ export interface InstanceServiceStatus {
   endpoints?: EndpointStatus[];
 }
 
+/** One declared port of a running instance, with its provenance. */
+export interface InstancePort {
+  /** Symbolic port name, or a cross-instance `${ports.x@repo:branch}` ref. */
+  name: string;
+  /** Host port assigned to this instance. */
+  port: number;
+  /** Whether a shared (`share`/`reuse`) service uses this port. */
+  shared: boolean;
+  /** Whether the name comes from another project/branch/instance. */
+  external: boolean;
+  /** Services whose cmd/env/health check reference this port. */
+  services: string[];
+}
+
 /** One IPC instance in the GET /api/status snapshot. */
 export interface InstanceStatus {
   /** Process id of the instance. */
@@ -106,6 +120,8 @@ export interface InstanceStatus {
   branch?: string | null;
   /** Services spawned by this instance. */
   services: InstanceServiceStatus[];
+  /** Every port this instance declared (empty for older instances). */
+  ports?: InstancePort[];
 }
 
 /** IPC status snapshot returned by GET /api/status. */

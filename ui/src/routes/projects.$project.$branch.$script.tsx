@@ -20,6 +20,7 @@ import {
 } from "@/lib/services";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page-state";
 import { StatusBadge } from "@/components/status-badge";
+import { Badge } from "@/components/ui/badge";
 import { ServiceUrl } from "@/components/service-url";
 import { ServiceActions } from "@/components/service-actions";
 import { InstanceKillButton } from "@/components/instance-kill-button";
@@ -128,6 +129,54 @@ function EndpointList({ svc }: { svc: InstanceServiceView }) {
         );
       })}
     </ul>
+  );
+}
+
+/**
+ * Declared ports of one instance: symbolic name, assigned port, and a badge
+ * when the port is a shared resource or a cross-instance reference. The tooltip
+ * lists the services that use it.
+ */
+function PortList({ ports }: { ports: InstanceView["ports"] }) {
+  if (ports.length === 0) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-1.5 font-mono text-xs">
+      <span className="text-muted-foreground text-2xs mr-0.5 tracking-wider uppercase">
+        ports
+      </span>
+      {ports.map((port) => {
+        const [name, source] = port.name.split("@", 2);
+        return (
+          <span
+            key={port.name}
+            title={
+              port.services.length
+                ? `used by ${port.services.join(", ")}`
+                : undefined
+            }
+            className="border-border/70 bg-card inline-flex max-w-full items-center gap-1.5 rounded-md border px-2 py-0.5"
+          >
+            <span className="min-w-0 truncate">
+              <span className="text-foreground">{name}</span>
+              {source ? (
+                <span className="text-muted-foreground">@{source}</span>
+              ) : null}
+              <span className="text-muted-foreground">:{port.port}</span>
+            </span>
+            {port.external ? (
+              <Badge variant="outline" tone="unknown" size="mono">
+                external
+              </Badge>
+            ) : null}
+            {port.shared ? (
+              <Badge variant="secondary" size="mono">
+                shared
+              </Badge>
+            ) : null}
+          </span>
+        );
+      })}
+    </div>
   );
 }
 
@@ -430,6 +479,8 @@ function ScriptServicesPage() {
               </span>
             </div>
           ) : null}
+
+          <PortList ports={inst.ports} />
 
           {inst.services.length === 0 ? (
             <Card>
