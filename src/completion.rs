@@ -79,7 +79,7 @@ _fog() {{
         return 0
     fi
 
-    opts="--config --save-logs --branch --detach --service --head --tail --all --force --no-share --port --dry-run --completions --verbose -c -d -s -v -h --help -V --version"
+    opts="--config --save-logs --branch --detach --service --head --tail --all --force --no-share --share --port --dry-run --completions --verbose -c -d -s -v -h --help -V --version"
     if [[ "$cur" == -* ]]; then
         COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
     else
@@ -127,6 +127,7 @@ _fog() {{
         '--all[Apply to every matching instance (kill/restart)]' \
         '--force[Escalate to SIGTERM/SIGKILL if it does not stop (kill/restart)]' \
         '--no-share[Ignore shared services]' \
+        '--share=[Treat a service as shared for this run]:service:' \
         '--port=[Override a top-level ports entry for this run]:port:' \
         '--dry-run[Report what would be removed without deleting anything (fog prune)]' \
         '--completions=[Generate a completion script]:shell:(bash zsh fish)' \
@@ -162,6 +163,7 @@ complete -c fog -l tail -d 'Last N lines, or from +N to the end (fog logs)' -r
 complete -c fog -l all -d 'Apply to every matching instance (kill/restart)'
 complete -c fog -l force -d 'Escalate to SIGTERM/SIGKILL if it does not stop (kill/restart)'
 complete -c fog -l no-share -d 'Ignore shared services'
+complete -c fog -l share -d 'Treat a service as shared for this run' -r
 complete -c fog -l port -d 'Override a top-level ports entry for this run (NAME=PORT)' -r
 complete -c fog -l dry-run -d 'Report what would be removed without deleting anything (fog prune)'
 complete -c fog -l completions -d 'Generate a completion script' -a 'bash zsh fish'
@@ -189,6 +191,7 @@ mod tests {
         assert!(out.contains("--head"));
         assert!(out.contains("--tail"));
         assert!(out.contains("--no-share"));
+        assert!(out.contains("--share"));
         assert!(out.contains("logs prune attach"));
         assert!(out.contains("--dry-run"));
         assert!(out.contains("serve kill restart"));
@@ -205,6 +208,7 @@ mod tests {
         assert!(out.contains("--head"));
         assert!(out.contains("--tail"));
         assert!(out.contains("--no-share"));
+        assert!(out.contains("--share"));
         assert!(out.contains("logs prune attach"));
         assert!(out.contains("--dry-run"));
         assert!(out.contains("serve kill restart"));

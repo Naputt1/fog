@@ -69,7 +69,7 @@ pub(crate) fn cmd_restart(pid: Option<u32>, all: bool, cli: &Cli) -> io::Result<
         // Spawn a detached instance with the same script. The config_path already
         // points at the correct worktree's fog.json, so no --branch is needed
         // (branch is inferred from the worktree containing config_dir).
-        let new_pid = spawn_instance_detached(&config_path, &script, None)?;
+        let new_pid = spawn_instance_detached(&config_path, &script, None, &status.forced_share)?;
         println!("restarted fog '{script}' (old pid {target_pid} → new pid {new_pid})");
         if let Some(b) = branch {
             println!("  branch: {b}");
@@ -81,11 +81,26 @@ pub(crate) fn cmd_restart(pid: Option<u32>, all: bool, cli: &Cli) -> io::Result<
 }
 
 /// Spawns a `fog <script>` detached instance for restart, mirroring
-/// `daemonize` / `index::spawn_detached` but for generic scripts.
+/// `daemonize` / `index::spawn_detached` but for generic scripts. `forced_share`
+/// replays the killed instance's `--share` names so the relaunch keeps sharing
+/// the same services instead of starting duplicates.
 fn spawn_instance_detached(
     config_path: &Path,
     script: &str,
     branch: Option<&str>,
+    forced_share: &[String],
 ) -> io::Result<u32> {
-    crate::ipc::spawn_detached(config_path, script, branch, &[], DAEMON_READY_TIMEOUT)
+    let mut extra_args = Vec::with_capacity(forced_share.len() * 2);
+    for service in forced_share {
+        extra_args.push("--share".to_string());
+        extra_args.push(service.clone());
+    }
+    crate::ipc::spawn_detached(
+        config_path,
+        script,
+        branch,
+        &extra_args,
+        &[],
+        DAEMON_READY_TIMEOUT,
+    )
 }

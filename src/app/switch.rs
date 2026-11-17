@@ -265,7 +265,7 @@ impl App {
             self.ipc_state.project.as_deref(),
             branch_for_ports.as_deref(),
             &mut port_map,
-            self.no_share,
+            &self.share,
         );
         // Resolve `${ports.<name>@<repo>:<branch>[:<script>]}` against live
         // instances (cold-starting a `:script` target when needed) before
@@ -289,7 +289,7 @@ impl App {
         // Build the new runtime *before* tearing down the old one, so a
         // build failure doesn't leave the UI empty.
         let mut adopted: HashMap<String, ipc::HandoffItem> = HashMap::new();
-        if !self.no_share {
+        if !self.share.no_share {
             for item in &mut self.items {
                 if item.reused || item.shared {
                     if let Some(handoff) = item.extract_handoff() {
@@ -301,7 +301,7 @@ impl App {
             }
         }
         let title_branch = branch_for_ports.clone();
-        let built = match runtime::build_with_ports_no_share(
+        let built = match runtime::build_with_share_policy(
             script,
             &script_name,
             &config_dir,
@@ -312,7 +312,7 @@ impl App {
             &mut adopted,
             &port_map,
             branch_for_ports.clone(),
-            self.no_share,
+            self.share.clone(),
             false,
             &owned_shared,
         ) {

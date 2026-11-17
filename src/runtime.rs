@@ -17,6 +17,46 @@ pub struct Runtime {
     pub warnings: Vec<String>,
 }
 
+/// Per-run overrides for sharing, from `--no-share` and `--share`.
+///
+/// Which config flag governs sharing depends on the script mode (`share` in
+/// concurrent mode, `reuse` in single-instance mode). A forced name is treated
+/// as if that flag were set for the one service; `--no-share` disables both
+/// mechanisms globally and always wins.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SharePolicy {
+    /// `--no-share`: never borrow or reuse anything.
+    pub no_share: bool,
+    /// `--share NAME`: treat these services as shared for this run.
+    pub forced: std::collections::BTreeSet<String>,
+}
+
+impl SharePolicy {
+    /// Whether `name` counts as shared, given its config flag for this mode.
+    pub fn shared(&self, name: &str, flagged: bool) -> bool {
+        !self.no_share && (flagged || self.forced.contains(name))
+    }
+
+    /// Whether `--share` explicitly named this service.
+    pub fn forces(&self, name: &str) -> bool {
+        !self.no_share && self.forced.contains(name)
+    }
+}
+
+/// The service's effective name: its `name`, or the basename of `path` under
+/// `config_dir` (which makes `path: "."` name the service after the config
+/// directory, matching what the runtime and the TUI show).
+pub(crate) fn entry_name(entry: &ConfigEntry, config_dir: &Path) -> String {
+    entry.name.clone().unwrap_or_else(|| {
+        config_dir
+            .join(&entry.path)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned()
+    })
+}
+
 /// Options for building a runtime with explicit ports and branch.
 /// Bundles the many parameters of `build_with_ports` to avoid
 /// `clippy::too_many_arguments`.
@@ -31,7 +71,8 @@ pub struct BuildOpts<'a> {
     pub adopted: &'a mut HashMap<String, HandoffItem>,
     pub ports: &'a crate::ports::PortMap,
     pub branch_override: Option<String>,
-    pub no_share: bool,
+    /// `--no-share` / `--share` overrides for this run.
+    pub share: SharePolicy,
     /// When true (a TUI detach), a live handoff is adopted for every service,
     /// not just `reuse`/`share` ones, so a detached successor keeps the whole
     /// running session instead of restarting non-shared services.
@@ -226,6 +267,9 @@ fn entry_health_checks(entry: &ConfigEntry, service_path: &Path) -> Vec<HealthCh
 /// Postgres port. Called before templates are resolved so `${ports.*}` in
 /// dependent services resolves to the borrowed resource's real port.
 ///
+/// A service flagged `share`/`reuse` or named by `--share` is treated as shared
+/// here too, so a forced service adopts the owner's ports as well.
+///
 /// Adoption is intentionally independent of the health probe: the ports of a
 /// shared resource belong to whichever sibling started it, and a transient
 /// probe result must not change which ports dependents resolve to. The health
@@ -242,10 +286,10 @@ pub fn adopt_shared_ports(
     project: Option<&str>,
     branch: Option<&str>,
     ports: &mut crate::ports::PortMap,
-    no_share: bool,
+    share: &SharePolicy,
 ) -> std::collections::HashSet<String> {
     let mut owned: std::collections::HashSet<String> = std::collections::HashSet::new();
-    if no_share {
+    if share.no_share {
         return owned;
     }
     let Some(project) = project else {
@@ -260,12 +304,13 @@ pub fn adopt_shared_ports(
     }
     let raw = script.service.clone().unwrap_or_default();
     for entry in &raw {
-        let shared = if script.concurrent {
+        let name = entry_name(entry, config_dir);
+        let flagged = if script.concurrent {
             entry.share
         } else {
             entry.reuse
         };
-        if !shared {
+        if !share.shared(&name, flagged) {
             continue;
         }
         // Scan the *raw* entry: templates name the symbolic ports to adopt.
@@ -275,14 +320,6 @@ pub fn adopt_shared_ports(
             // deterministic, so dependents already agree).
             continue;
         }
-        let name = entry.name.clone().unwrap_or_else(|| {
-            config_dir
-                .join(&entry.path)
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned()
-        });
         for (_, _, status) in &siblings {
             if names.iter().all(|n| status.ports.contains_key(n)) {
                 for n in &names {
@@ -598,18 +635,19 @@ pub fn build_with_ports(
         adopted,
         ports,
         branch_override,
-        no_share: false,
+        share: SharePolicy::default(),
         takeover: false,
         owned_shared,
     })
 }
 
-/// Same as `build_with_ports` but with `no_share` flag to ignore shared services.
+/// Same as `build_with_ports` but with explicit sharing overrides (`--no-share`
+/// and `--share`).
 ///
 /// `takeover` adopts live handoffs for every service (a TUI detach); otherwise
 /// only `reuse`/`share` services consume handoffs.
 #[allow(clippy::too_many_arguments)]
-pub fn build_with_ports_no_share(
+pub fn build_with_share_policy(
     script: &ScriptConfig,
     script_name: &str,
     config_dir: &Path,
@@ -620,7 +658,7 @@ pub fn build_with_ports_no_share(
     adopted: &mut HashMap<String, HandoffItem>,
     ports: &crate::ports::PortMap,
     branch_override: Option<String>,
-    no_share: bool,
+    share: SharePolicy,
     takeover: bool,
     owned_shared: &std::collections::HashSet<String>,
 ) -> FogResult<Runtime> {
@@ -635,7 +673,7 @@ pub fn build_with_ports_no_share(
         adopted,
         ports,
         branch_override,
-        no_share,
+        share,
         takeover,
         owned_shared,
     })
@@ -688,7 +726,7 @@ pub fn build_with_opts(opts: BuildOpts) -> FogResult<Runtime> {
         adopted,
         ports,
         branch_override,
-        no_share,
+        share,
         takeover,
         owned_shared,
     } = opts;
@@ -749,15 +787,15 @@ pub fn build_with_opts(opts: BuildOpts) -> FogResult<Runtime> {
         // Which flag governs sharing depends on the script's run mode: single
         // instance (concurrent: false) shares via `reuse` (handed over during a
         // reclaim/worktree switch); concurrent mode shares via `share` (borrowed
-        // if already up). The other flag is ignored in its mode.
-        // `--no-share` disables both mechanisms globally.
-        let shared = if no_share {
-            false
-        } else if script.concurrent {
+        // if already up). The other flag is ignored in its mode. `--no-share`
+        // disables both mechanisms globally; `--share NAME` forces the mode's
+        // flag for one service.
+        let flagged = if script.concurrent {
             entry.share
         } else {
             entry.reuse
         };
+        let shared = share.shared(&name, flagged);
         let share_flag = if script.concurrent { "share" } else { "reuse" };
 
         // A templated shared service is only borrowable when its live ports were
@@ -883,8 +921,13 @@ pub fn build_with_opts(opts: BuildOpts) -> FogResult<Runtime> {
                 // mode, so the config warning also renders in the tab instead of
                 // stderr (which would corrupt the layout). It is recorded in
                 // `warnings` for the caller to surface as an alert too.
+                let origin = if share.forces(&name) {
+                    "--share".to_string()
+                } else {
+                    format!("{share_flag}: true")
+                };
                 let warning = format!(
-                    "⚠ service '{name}' has {share_flag}: true but no health_check; \
+                    "⚠ service '{name}' was given {origin} but has no health_check; \
                      fog cannot verify it is already running, starting it"
                 );
                 t.notice(&format!("{warning}\n"));
@@ -1295,7 +1338,7 @@ mod tests {
             Some(&project),
             Some("mine"),
             &mut ports,
-            false,
+            &SharePolicy::default(),
         );
 
         let _ = std::fs::remove_file(&sibling);
@@ -1345,7 +1388,7 @@ mod tests {
             Some(&project),
             Some("mine"),
             &mut ports,
-            false,
+            &SharePolicy::default(),
         );
 
         let _ = std::fs::remove_file(&sibling);
@@ -1389,7 +1432,7 @@ mod tests {
             Some(&project),
             Some("mine"),
             &mut ports,
-            false,
+            &SharePolicy::default(),
         );
 
         let _ = std::fs::remove_file(&sibling);
@@ -1433,7 +1476,7 @@ mod tests {
             Some(&project),
             Some("mine"),
             &mut ports,
-            false,
+            &SharePolicy::default(),
         );
 
         let _ = std::fs::remove_file(&sibling);
@@ -1445,6 +1488,56 @@ mod tests {
             owned.is_empty(),
             "a --no-share sibling yields no owned service"
         );
+    }
+
+    #[test]
+    fn test_adopt_shared_ports_forced_share_adopts_unflagged_service() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let project = format!("fog-test-adopt-forced-{}", std::process::id());
+        let sibling = spawn_status_instance(
+            std::process::id().wrapping_add(26),
+            &project,
+            "dev",
+            Some("mine"),
+            false,
+            [("db".to_string(), 55555u16)].into_iter().collect(),
+        );
+
+        // The config does not share this service; `--share db` does for this run.
+        let mut db = share_entry("db", Some(tcp_health(&addr.to_string())));
+        db.share = false;
+        db.env = Some(
+            [(
+                "DATABASE_URL".to_string(),
+                "postgres://x@127.0.0.1:${ports.db}/x".to_string(),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let script = script_with_concurrent(vec![db]);
+        let mut ports: crate::ports::PortMap = [("db".to_string(), 12345u16)].into_iter().collect();
+        let share = SharePolicy {
+            forced: ["db".to_string()].into_iter().collect(),
+            ..Default::default()
+        };
+
+        let owned = adopt_shared_ports(
+            &script,
+            "dev",
+            Path::new("."),
+            Some(&project),
+            Some("mine"),
+            &mut ports,
+            &share,
+        );
+
+        let _ = std::fs::remove_file(&sibling);
+        assert_eq!(
+            ports["db"], 55555,
+            "--share must adopt the owner's live port for an unflagged service"
+        );
+        assert!(owned.contains("db"));
     }
 
     #[test]
@@ -1561,7 +1654,7 @@ mod tests {
         let script = script_with_concurrent(vec![db]);
         let mut adopted = HashMap::new();
         let ports: crate::ports::PortMap = [("db".to_string(), 12345u16)].into_iter().collect();
-        let rt = build_with_ports_no_share(
+        let rt = build_with_share_policy(
             &script,
             "dev",
             Path::new("."),
@@ -1572,7 +1665,7 @@ mod tests {
             &mut adopted,
             &ports,
             None,
-            false,
+            SharePolicy::default(),
             false,
             &std::collections::HashSet::new(),
         )
@@ -1602,7 +1695,7 @@ mod tests {
         let mut adopted = HashMap::new();
         let ports: crate::ports::PortMap = [("db".to_string(), 55555u16)].into_iter().collect();
         let owned: std::collections::HashSet<String> = ["db".to_string()].into_iter().collect();
-        let rt = build_with_ports_no_share(
+        let rt = build_with_share_policy(
             &script,
             "dev",
             Path::new("."),
@@ -1613,7 +1706,7 @@ mod tests {
             &mut adopted,
             &ports,
             None,
-            false,
+            SharePolicy::default(),
             false,
             &owned,
         )
@@ -1713,7 +1806,7 @@ mod tests {
         let script =
             script_with_concurrent(vec![share_entry("db", Some(tcp_health(&addr.to_string())))]);
         let mut adopted = HashMap::new();
-        let rt = build_with_ports_no_share(
+        let rt = build_with_share_policy(
             &script,
             "dev",
             Path::new("."),
@@ -1724,7 +1817,10 @@ mod tests {
             &mut adopted,
             &HashMap::new(),
             None,
-            true,
+            SharePolicy {
+                no_share: true,
+                ..Default::default()
+            },
             false,
             &std::collections::HashSet::new(),
         )
@@ -1748,7 +1844,7 @@ mod tests {
             Some(tcp_health(&addr.to_string())),
         )]);
         let mut adopted = HashMap::new();
-        let rt = build_with_ports_no_share(
+        let rt = build_with_share_policy(
             &script,
             "dev",
             Path::new("."),
@@ -1759,7 +1855,10 @@ mod tests {
             &mut adopted,
             &HashMap::new(),
             None,
-            true,
+            SharePolicy {
+                no_share: true,
+                ..Default::default()
+            },
             false,
             &std::collections::HashSet::new(),
         )
@@ -1769,6 +1868,107 @@ mod tests {
             "--no-share must not borrow an up reused resource"
         );
         assert!(!rt.items[0].shared);
+    }
+
+    #[test]
+    fn test_build_forced_share_borrows_unflagged_service() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut db = share_entry("db", Some(tcp_health(&addr.to_string())));
+        db.share = false;
+        let script = script_with_concurrent(vec![db]);
+        let mut adopted = HashMap::new();
+        let rt = build_with_share_policy(
+            &script,
+            "dev",
+            Path::new("."),
+            None,
+            false,
+            100,
+            None,
+            &mut adopted,
+            &HashMap::new(),
+            None,
+            SharePolicy {
+                forced: ["db".to_string()].into_iter().collect(),
+                ..Default::default()
+            },
+            false,
+            &std::collections::HashSet::new(),
+        )
+        .unwrap();
+        assert!(
+            rt.items[0].reused,
+            "--share must borrow an up service whose config does not share it"
+        );
+        assert!(rt.items[0].shared);
+    }
+
+    #[test]
+    fn test_build_forced_share_without_health_warns() {
+        let mut db = share_entry("db", None);
+        db.share = false;
+        let script = script_with_concurrent(vec![db]);
+        let mut adopted = HashMap::new();
+        let rt = build_with_share_policy(
+            &script,
+            "dev",
+            Path::new("."),
+            None,
+            false,
+            100,
+            None,
+            &mut adopted,
+            &HashMap::new(),
+            None,
+            SharePolicy {
+                forced: ["db".to_string()].into_iter().collect(),
+                ..Default::default()
+            },
+            false,
+            &std::collections::HashSet::new(),
+        )
+        .unwrap();
+        assert!(!rt.items[0].reused);
+        assert!(rt.items[0].shared);
+        assert!(
+            rt.warnings
+                .iter()
+                .any(|w| w.contains("--share") && w.contains("no health_check")),
+            "the warning must name --share, got {:?}",
+            rt.warnings
+        );
+    }
+
+    #[test]
+    fn test_build_forced_share_forces_reuse_in_single_instance() {
+        let mut infra = reuse_entry("infra", Some(tcp_health("127.0.0.1:1")));
+        infra.reuse = false;
+        let script = script_with(vec![infra]);
+        let mut adopted = HashMap::new();
+        let rt = build_with_share_policy(
+            &script,
+            "dev",
+            Path::new("."),
+            None,
+            false,
+            100,
+            None,
+            &mut adopted,
+            &HashMap::new(),
+            None,
+            SharePolicy {
+                forced: ["infra".to_string()].into_iter().collect(),
+                ..Default::default()
+            },
+            false,
+            &std::collections::HashSet::new(),
+        )
+        .unwrap();
+        assert!(
+            rt.items[0].shared,
+            "--share maps to reuse in a single-instance script"
+        );
     }
 
     fn sub(name: &str, host: Option<&str>, port: Option<&str>) -> crate::config::EndpointConfig {
