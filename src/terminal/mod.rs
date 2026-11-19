@@ -1878,6 +1878,7 @@ mod tests {
         assert!(!t.stopped);
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_failed_restart_of_skipped_service_stays_skipped() {
         let dir = std::env::temp_dir().join(format!("fog-test-skip-{}", std::process::id()));
@@ -1895,7 +1896,10 @@ mod tests {
             .insert("FOG_BAD\0KEY".to_string(), "x".to_string());
         t.shutdown_cmd = Some(format!("touch {}", marker.display()));
 
-        assert!(t.restart().is_err(), "spawning in a missing dir must fail");
+        assert!(
+            t.restart().is_err(),
+            "a NUL in the injected env must fail the spawn"
+        );
         assert!(t.skipped, "a failed start must not claim ownership");
         assert!(!t.process_running);
         t.teardown();

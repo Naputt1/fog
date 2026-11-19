@@ -185,8 +185,8 @@ pub struct App {
     /// Whether `--no-share` was passed: when true shared/reuse services are
     /// always started fresh instead of borrowed/handed over.
     no_share: bool,
-    /// Services left out with `--without`. Reapplied by a worktree switch and
-    /// copied into the detach recipe so the opt-out survives.
+    /// Services left out with `--without`. Reapplied by a worktree switch so
+    /// the opt-out survives; detach derives the set from live items instead.
     without: Vec<String>,
     /// Whether `--verbose` was passed: gates informational setup output.
     verbose: bool,

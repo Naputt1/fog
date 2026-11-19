@@ -290,6 +290,14 @@ pub(crate) fn usage_error(message: impl Into<FogError>, hint: &str) -> ! {
     die(message, Some(hint), 2)
 }
 
+/// Whether raw argv contains `--without`/`--without=...`, for command paths
+/// that are dispatched before clap.
+fn argv_has_without(argv: &[String]) -> bool {
+    argv.iter()
+        .skip(1)
+        .any(|arg| arg == "--without" || arg.starts_with("--without="))
+}
+
 /// Prints the CLI help to stdout, tolerating a closed pipe (`fog | head`).
 fn print_cli_help() -> io::Result<()> {
     let mut command = Cli::command();
@@ -309,6 +317,14 @@ pub fn run() -> io::Result<()> {
     // misparsed as the `[PID]` positional (which expects a number).
     let argv: Vec<String> = std::env::args().skip(1).collect();
     if argv.first().map(String::as_str) == Some("index") {
+        // The `index` command bypasses clap, so reject `--without` here too
+        // instead of silently ignoring it.
+        if argv_has_without(&argv) {
+            usage_error(
+                "--without only applies when running a script or to `fog restart`",
+                "e.g. `fog dev --without worker`",
+            );
+        }
         return commands::index::dispatch(&argv);
     }
 
@@ -562,6 +578,21 @@ mod tests {
             vec!["db".to_string(), "worker".to_string(), "api".to_string()]
         );
         assert_eq!(cli.script.as_deref(), Some("dev"));
+    }
+
+    #[test]
+    fn test_raw_index_args_reject_without() {
+        let args = |raw: &[&str]| raw.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(argv_has_without(&args(&[
+            "index",
+            "kill",
+            "--without",
+            "db"
+        ])));
+        assert!(argv_has_without(&args(&["index", "serve", "--without=db"])));
+        assert!(!argv_has_without(&args(&[
+            "index", "serve", "--port", "19000"
+        ])));
     }
 
     #[cfg(unix)]

@@ -227,9 +227,17 @@ impl App {
                 config_path.display()
             )));
         };
-        // Replay this run's `--without` against the target script. A service the
-        // target has since removed is ignored rather than aborting the switch.
-        let without = runtime::filter_without(script, &self.without);
+        // Replay the *currently* skipped services (not the startup set): one
+        // started manually during this run must not become skipped again in
+        // the target worktree. A service the target has since removed is
+        // ignored rather than aborting the switch.
+        let current: Vec<String> = self
+            .items
+            .iter()
+            .filter(|item| item.skipped)
+            .map(|item| item.name.clone())
+            .collect();
+        let without = runtime::filter_without(script, &current);
         // Validate the dependency graph up front so a bad target script leaves
         // the current instance untouched instead of tearing it down first.
         let entries = script.service.clone().unwrap_or_default();
