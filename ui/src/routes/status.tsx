@@ -3,6 +3,7 @@ import { useStatus, useInstanceKillState } from "@/lib/hooks";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page-state";
 import { StatusBadge } from "@/components/status-badge";
 import { serviceStateKey } from "@/lib/service-state";
+import { serviceBadgeState } from "@/lib/services";
 import { ServiceActions } from "@/components/service-actions";
 import { InstanceKillButton } from "@/components/instance-kill-button";
 import { LaunchCard } from "@/components/launch-instance";
@@ -48,7 +49,7 @@ function Endpoints({ svc }: { svc: InstanceServiceStatus }) {
         >
           <span className="text-muted-foreground">↳</span>
           <span>{endpoint.name}</span>
-          <StatusBadge status={endpoint.health} />
+          {svc.skipped ? null : <StatusBadge status={endpoint.health} />}
         </li>
       ))}
     </ul>
@@ -94,15 +95,7 @@ function ServiceTable({
                   <Endpoints svc={svc} />
                 </TableCell>
                 <TableCell>
-                  <StatusBadge
-                    status={
-                      svc.skipped
-                        ? "skipped"
-                        : svc.running
-                          ? "running"
-                          : "stopped"
-                    }
-                  />
+                  <StatusBadge status={serviceBadgeState(svc)} />
                 </TableCell>
                 <TableCell>
                   {svc.skipped ? (
@@ -133,11 +126,7 @@ function ServiceTable({
           <div key={svc.name} className="border-border rounded-lg border p-3">
             <div className="flex items-center justify-between gap-2">
               <span className="font-mono text-sm font-medium">{svc.name}</span>
-              <StatusBadge
-                status={
-                  svc.skipped ? "skipped" : svc.running ? "running" : "stopped"
-                }
-              />
+              <StatusBadge status={serviceBadgeState(svc)} />
             </div>
             <Endpoints svc={svc} />
             <div className="mt-2">

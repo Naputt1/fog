@@ -14,6 +14,7 @@ import {
   projectServices,
   projectStats,
   endpointViews,
+  serviceBadgeState,
   servicePid,
   worktreeFromBranch,
   worktreeFromParam,
@@ -292,6 +293,24 @@ describe("endpointViews", () => {
       service: svc({ service: "api" }),
     };
     expect(endpointViews(view)).toEqual([]);
+  });
+});
+
+describe("serviceBadgeState", () => {
+  it("marks a skipped service before running or stopped", () => {
+    expect(serviceBadgeState({ skipped: true, running: false })).toBe(
+      "skipped"
+    );
+    expect(serviceBadgeState({ skipped: true, running: true })).toBe("skipped");
+  });
+
+  it("falls back to running, then stopped", () => {
+    expect(serviceBadgeState({ skipped: false, running: true })).toBe(
+      "running"
+    );
+    expect(serviceBadgeState({ skipped: false, running: false })).toBe(
+      "stopped"
+    );
   });
 });
 
