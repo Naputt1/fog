@@ -364,9 +364,13 @@ export function useInstanceKillState(
 }
 
 /**
- * Pids with a kill that is still pending or shutting down. A bulk picker uses
- * this to leave already-killing instances out of its selection.
+ * Pids among `targets` with a kill that is still pending or shutting down.
+ * A bulk picker uses this to leave already-killing instances out of its
+ * selection.
  */
-export function useKillingPids(): ReadonlySet<number> {
-  return activeKillPids(useKillIntents());
+export function useKillingPids(
+  targets: readonly { pid: number; script?: string }[]
+): ReadonlySet<number> {
+  const intents = useKillIntents();
+  return activeKillPids(intents, targets);
 }

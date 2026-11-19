@@ -155,8 +155,9 @@ describe("activeKillPids", () => {
     submittedAt: now,
     ...over,
   });
+  const target = (pid: number, script = "dev") => ({ pid, script });
 
-  it("returns every pid with an in-flight or successful kill", () => {
+  it("returns every target with an in-flight or successful kill", () => {
     expect(
       activeKillPids(
         [
@@ -165,6 +166,7 @@ describe("activeKillPids", () => {
           intent({ pid: 3, status: "error" }),
           intent({ pid: 4, status: "idle" }),
         ],
+        [target(1), target(2), target(3), target(4)],
         now
       )
     ).toEqual(new Set([1, 2]));
@@ -177,14 +179,26 @@ describe("activeKillPids", () => {
           intent({ pid: 1, submittedAt: now - KILL_GRACE_MS }),
           intent({ pid: undefined }),
         ],
+        [target(1)],
         now
       )
     ).toEqual(new Set());
   });
 
-  it("deduplicates pids with more than one intent", () => {
+  it("only matches the target with the same pid and script", () => {
     expect(
-      activeKillPids([intent({ pid: 1 }), intent({ pid: 1 })], now)
+      activeKillPids(
+        [intent({ pid: 1, script: "dev" })],
+        [target(2), target(1, "worker")],
+        now
+      )
+    ).toEqual(new Set());
+    expect(
+      activeKillPids(
+        [intent({ pid: 1, script: "dev" })],
+        [target(1, "dev"), target(1, "worker")],
+        now
+      )
     ).toEqual(new Set([1]));
   });
 });

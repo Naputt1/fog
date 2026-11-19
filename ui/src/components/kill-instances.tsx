@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { GitBranch, TriangleAlert } from "lucide-react";
 
 import { useKillInstance, useKillingPids } from "@/lib/hooks";
@@ -84,9 +84,20 @@ function KillInstancesPicker({
   onClose: () => void;
 }) {
   const { mutate } = useKillInstance();
-  const killingPids = useKillingPids();
+  const killingPids = useKillingPids(instances);
   const [selected, setSelected] = useState<ReadonlySet<number>>(new Set());
   const [confirming, setConfirming] = useState(false);
+  // A double-click on "Kill selected" would otherwise land on the confirmation
+  // button that replaces it in the same spot. Arm the destructive action only
+  // after the new footer has settled, and dispatch at most once.
+  const [confirmReady, setConfirmReady] = useState(false);
+  const submitted = useRef(false);
+
+  useEffect(() => {
+    if (!confirming) return;
+    const timer = window.setTimeout(() => setConfirmReady(true), 400);
+    return () => window.clearTimeout(timer);
+  }, [confirming]);
 
   // Polling can remove an instance while the popup is open. Keep the selection
   // derived from what is still selectable so a stale pid is never killed.
@@ -114,7 +125,21 @@ function KillInstancesPicker({
     });
   };
 
+  const beginConfirm = () => {
+    if (selectedCount === 0) return;
+    submitted.current = false;
+    setConfirmReady(false);
+    setConfirming(true);
+  };
+
+  const cancelConfirm = () => {
+    setConfirmReady(false);
+    setConfirming(false);
+  };
+
   const killSelected = () => {
+    if (!confirmReady || submitted.current) return;
+    submitted.current = true;
     for (const pid of selectedPids) {
       const inst = instances.find((candidate) => candidate.pid === pid);
       if (inst) mutate({ pid, script: inst.script });
@@ -122,21 +147,23 @@ function KillInstancesPicker({
     onClose();
   };
 
+  const selectAllDisabled = confirmingSelection || selectablePids.size === 0;
+
   return (
     <>
       <div className="border-border flex shrink-0 flex-wrap items-center justify-between gap-2 border-b px-4 py-2.5">
         <label
           className={cn(
             "flex items-center gap-2 text-xs",
-            selectablePids.size > 0
-              ? "cursor-pointer"
-              : "cursor-not-allowed opacity-50"
+            selectAllDisabled
+              ? "cursor-not-allowed opacity-50"
+              : "cursor-pointer"
           )}
         >
           <Checkbox
             checked={allSelected}
             indeterminate={someSelected}
-            disabled={confirmingSelection || selectablePids.size === 0}
+            disabled={selectAllDisabled}
             onCheckedChange={(checked) =>
               setSelected(checked ? new Set(selectablePids) : new Set())
             }
@@ -189,7 +216,10 @@ function KillInstancesPicker({
       <div className="border-border flex shrink-0 flex-col gap-2 border-t px-4 py-3">
         {confirmingSelection ? (
           <>
-            <p className="text-muted-foreground text-2xs flex items-start gap-1.5 font-mono">
+            <p
+              role="alert"
+              className="text-muted-foreground text-2xs flex items-start gap-1.5 font-mono"
+            >
               <TriangleAlert
                 className="text-destructive mt-0.5 size-3.5 shrink-0"
                 aria-hidden
@@ -204,11 +234,17 @@ function KillInstancesPicker({
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={() => setConfirming(false)}
+                onClick={cancelConfirm}
+                autoFocus
               >
                 Back
               </Button>
-              <Button variant="destructive" size="sm" onClick={killSelected}>
+              <Button
+                variant="destructive"
+                size="sm"
+                onClick={killSelected}
+                disabled={!confirmReady}
+              >
                 Kill {selectedCount}{" "}
                 {selectedCount === 1 ? "instance" : "instances"}
               </Button>
@@ -229,7 +265,7 @@ function KillInstancesPicker({
                 variant="destructive"
                 size="sm"
                 disabled={selectedCount === 0}
-                onClick={() => setConfirming(true)}
+                onClick={beginConfirm}
               >
                 Kill selected{selectedCount > 0 ? ` (${selectedCount})` : ""}
               </Button>

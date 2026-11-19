@@ -98,22 +98,19 @@ export function isInstanceKilling(
 }
 
 /**
- * Every pid with a kill that was requested and not failed, within
- * {@link KILL_GRACE_MS}. Bulk controls use it to leave instances that are
- * already shutting down out of their selection.
+ * Every target whose kill was requested and has not failed, within
+ * {@link KILL_GRACE_MS}. Targets are matched by pid and script so a recycled
+ * pid cannot hide a different instance. Bulk controls use it to leave
+ * instances that are already shutting down out of their selection.
  */
 export function activeKillPids(
   intents: readonly KillIntentState[],
+  targets: readonly { pid: number; script?: string }[],
   now: number = Date.now()
 ): Set<number> {
   const pids = new Set<number>();
-  for (const intent of intents) {
-    if (
-      intent.pid != null &&
-      isInstanceKilling([intent], intent.pid, intent.script, now)
-    ) {
-      pids.add(intent.pid);
-    }
+  for (const { pid, script } of targets) {
+    if (isInstanceKilling(intents, pid, script, now)) pids.add(pid);
   }
   return pids;
 }
