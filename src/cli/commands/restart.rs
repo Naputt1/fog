@@ -39,6 +39,19 @@ pub(crate) fn cmd_restart(pid: Option<u32>, all: bool, cli: &Cli) -> io::Result<
         let script = status.script.clone();
         let config_dir = status.config_dir.clone();
         let branch = status.branch.clone();
+        // Restart preserves the target's opt-outs, plus any additional
+        // `--without` the user passed to `fog restart`.
+        let mut without: Vec<String> = status
+            .services
+            .iter()
+            .filter(|service| service.skipped)
+            .map(|service| service.name.clone())
+            .collect();
+        for name in &cli.without {
+            if !without.contains(name) {
+                without.push(name.clone());
+            }
+        }
 
         // Wait for the old instance to fully exit before relaunching to avoid
         // port conflicts and owner-lock races. `--force` escalates to SIGKILL
@@ -69,7 +82,7 @@ pub(crate) fn cmd_restart(pid: Option<u32>, all: bool, cli: &Cli) -> io::Result<
         // Spawn a detached instance with the same script. The config_path already
         // points at the correct worktree's fog.json, so no --branch is needed
         // (branch is inferred from the worktree containing config_dir).
-        let new_pid = spawn_instance_detached(&config_path, &script, None)?;
+        let new_pid = spawn_instance_detached(&config_path, &script, None, &without)?;
         println!("restarted fog '{script}' (old pid {target_pid} → new pid {new_pid})");
         if let Some(b) = branch {
             println!("  branch: {b}");
@@ -86,6 +99,14 @@ fn spawn_instance_detached(
     config_path: &Path,
     script: &str,
     branch: Option<&str>,
+    without: &[String],
 ) -> io::Result<u32> {
-    crate::ipc::spawn_detached(config_path, script, branch, &[], DAEMON_READY_TIMEOUT)
+    crate::ipc::spawn_detached(
+        config_path,
+        script,
+        branch,
+        without,
+        &[],
+        DAEMON_READY_TIMEOUT,
+    )
 }

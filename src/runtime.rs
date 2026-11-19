@@ -4,7 +4,7 @@ use crate::error::{FogError, FogResult};
 use crate::ipc::HandoffItem;
 use crate::proxy::{ProxyInstance, RouteEntry};
 use crate::terminal::{Terminal, health_checks_pass};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 /// The runtime state of a script: its service terminals and optional proxy.
@@ -41,7 +41,11 @@ pub struct BuildOpts<'a> {
     /// is only borrowed when it is listed here, so a borrower never hands its
     /// dependents a freshly allocated port while the real container listens on
     /// the owner's port.
-    pub owned_shared: &'a std::collections::HashSet<String>,
+    pub owned_shared: &'a HashSet<String>,
+    /// Effective service names left out for this run (`--without`). Skipped
+    /// services still get a terminal/tab, but no process and no health checks;
+    /// dependency edges pointing at them are dropped with a warning.
+    pub without: &'a HashSet<String>,
 }
 
 /// Options for spawning a checked terminal.
@@ -235,6 +239,7 @@ fn entry_health_checks(entry: &ConfigEntry, service_path: &Path) -> Vec<HealthCh
 /// Only same-branch siblings are considered (shared resources are
 /// branch-scoped, e.g. `red-fox-infra-${FOG_BRANCH}`). Returns the names of
 /// shared services whose ports were adopted from a sibling.
+#[allow(clippy::too_many_arguments)]
 pub fn adopt_shared_ports(
     script: &ScriptConfig,
     script_name: &str,
@@ -243,6 +248,7 @@ pub fn adopt_shared_ports(
     branch: Option<&str>,
     ports: &mut crate::ports::PortMap,
     no_share: bool,
+    without: &HashSet<String>,
 ) -> std::collections::HashSet<String> {
     let mut owned: std::collections::HashSet<String> = std::collections::HashSet::new();
     if no_share {
@@ -268,13 +274,6 @@ pub fn adopt_shared_ports(
         if !shared {
             continue;
         }
-        // Scan the *raw* entry: templates name the symbolic ports to adopt.
-        let names = crate::ports::entry_referenced_ports(entry);
-        if names.is_empty() {
-            // Fixed-port shared service: nothing to adopt (its address is
-            // deterministic, so dependents already agree).
-            continue;
-        }
         let name = entry.name.clone().unwrap_or_else(|| {
             config_dir
                 .join(&entry.path)
@@ -283,6 +282,18 @@ pub fn adopt_shared_ports(
                 .to_string_lossy()
                 .into_owned()
         });
+        // A skipped service is not ours to run, so borrowing a sibling's ports
+        // for it would point dependents (and routes) at the wrong resource.
+        if without.contains(&name) {
+            continue;
+        }
+        // Scan the *raw* entry: templates name the symbolic ports to adopt.
+        let names = crate::ports::entry_referenced_ports(entry);
+        if names.is_empty() {
+            // Fixed-port shared service: nothing to adopt (its address is
+            // deterministic, so dependents already agree).
+            continue;
+        }
         for (_, _, status) in &siblings {
             if names.iter().all(|n| status.ports.contains_key(n)) {
                 for n in &names {
@@ -509,6 +520,55 @@ pub fn endpoint_routes(items: &[Terminal]) -> Vec<crate::config::NativeRouteConf
     routes
 }
 
+/// Effective names of every service in a script, in declaration order.
+pub fn script_service_names(script: &ScriptConfig) -> Vec<String> {
+    script
+        .service
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(crate::config::effective_name)
+        .collect()
+}
+
+/// Turns `--without` values into a strict skip set.
+///
+/// A typo must not silently run the service the user meant to leave out, so an
+/// unknown name is an error here rather than a filtered no-op.
+pub fn resolve_without(script: &ScriptConfig, requested: &[String]) -> FogResult<HashSet<String>> {
+    let names = script_service_names(script);
+    let known: HashSet<&str> = names.iter().map(String::as_str).collect();
+    let unknown: Vec<&str> = requested
+        .iter()
+        .map(String::as_str)
+        .filter(|name| !known.contains(name))
+        .collect();
+    if !unknown.is_empty() {
+        let available = if names.is_empty() {
+            "none".to_string()
+        } else {
+            names.join(", ")
+        };
+        return Err(FogError::new(format!(
+            "unknown service in --without: {}; available services: {available}",
+            unknown.join(", ")
+        )));
+    }
+    Ok(requested.iter().cloned().collect())
+}
+
+/// Drops names absent from `script` instead of failing. Used when replaying a
+/// previous run's opt-outs (restart/attach/worktree switch), where the config
+/// may have changed since the set was recorded.
+pub fn filter_without(script: &ScriptConfig, requested: &[String]) -> HashSet<String> {
+    let known: HashSet<String> = script_service_names(script).into_iter().collect();
+    requested
+        .iter()
+        .filter(|name| known.contains(*name))
+        .cloned()
+        .collect()
+}
+
 /// Builds the IPC route-info list for `items`' declared endpoints.
 ///
 /// Unlike [`endpoint_routes`] this includes *every* declared endpoint,
@@ -551,7 +611,7 @@ pub fn build(
     log_dir: Option<std::path::PathBuf>,
     adopted: &mut HashMap<String, HandoffItem>,
 ) -> FogResult<Runtime> {
-    let owned_shared = std::collections::HashSet::new();
+    let owned_shared = HashSet::new();
     build_with_ports(
         script,
         script_name,
@@ -585,8 +645,9 @@ pub fn build_with_ports(
     adopted: &mut HashMap<String, HandoffItem>,
     ports: &crate::ports::PortMap,
     branch_override: Option<String>,
-    owned_shared: &std::collections::HashSet<String>,
+    owned_shared: &HashSet<String>,
 ) -> FogResult<Runtime> {
+    let without = HashSet::new();
     build_with_opts(BuildOpts {
         script,
         script_name,
@@ -601,6 +662,7 @@ pub fn build_with_ports(
         no_share: false,
         takeover: false,
         owned_shared,
+        without: &without,
     })
 }
 
@@ -622,7 +684,44 @@ pub fn build_with_ports_no_share(
     branch_override: Option<String>,
     no_share: bool,
     takeover: bool,
-    owned_shared: &std::collections::HashSet<String>,
+    owned_shared: &HashSet<String>,
+) -> FogResult<Runtime> {
+    let without = HashSet::new();
+    build_with_ports_skipping(
+        script,
+        script_name,
+        config_dir,
+        project,
+        save_logs,
+        scrollback,
+        log_dir,
+        adopted,
+        ports,
+        branch_override,
+        no_share,
+        takeover,
+        owned_shared,
+        &without,
+    )
+}
+
+/// [`build_with_ports_no_share`] plus a per-run set of skipped services.
+#[allow(clippy::too_many_arguments)]
+pub fn build_with_ports_skipping(
+    script: &ScriptConfig,
+    script_name: &str,
+    config_dir: &Path,
+    project: Option<String>,
+    save_logs: bool,
+    scrollback: usize,
+    log_dir: Option<std::path::PathBuf>,
+    adopted: &mut HashMap<String, HandoffItem>,
+    ports: &crate::ports::PortMap,
+    branch_override: Option<String>,
+    no_share: bool,
+    takeover: bool,
+    owned_shared: &HashSet<String>,
+    without: &HashSet<String>,
 ) -> FogResult<Runtime> {
     build_with_opts(BuildOpts {
         script,
@@ -638,6 +737,7 @@ pub fn build_with_ports_no_share(
         no_share,
         takeover,
         owned_shared,
+        without,
     })
 }
 
@@ -691,13 +791,36 @@ pub fn build_with_opts(opts: BuildOpts) -> FogResult<Runtime> {
         no_share,
         takeover,
         owned_shared,
+        without,
     } = opts;
     // Resolve branch: override from caller (allocated ports context) wins,
     // otherwise infer from git worktree.
     let branch = branch_override.or_else(|| resolve_branch(config_dir));
 
     // Clone and template-resolve entries when ports non-empty or branch present.
-    let raw_entries = script.service.clone().unwrap_or_default();
+    let mut raw_entries = script.service.clone().unwrap_or_default();
+    // A skipped service is assumed to be provided elsewhere: drop edges pointing
+    // at it so its dependents start immediately instead of waiting forever for
+    // a service this instance will never start.
+    let mut drop_warnings: Vec<String> = Vec::new();
+    for entry in &mut raw_entries {
+        let Some(deps) = entry.depends_on.take() else {
+            continue;
+        };
+        let mut kept = Vec::with_capacity(deps.len());
+        for dep in deps {
+            if without.contains(&dep) {
+                drop_warnings.push(format!(
+                    "service '{}' depends on '{}', which is skipped; starting it without waiting for it",
+                    crate::config::effective_name(entry),
+                    dep
+                ));
+            } else {
+                kept.push(dep);
+            }
+        }
+        entry.depends_on = if kept.is_empty() { None } else { Some(kept) };
+    }
     // Which services reference a `${ports.*}` name. Such a service can only be
     // safely borrowed when its live ports were adopted from the owning sibling
     // (`owned_shared`); otherwise dependents would resolve to our own fresh
@@ -725,7 +848,7 @@ pub fn build_with_opts(opts: BuildOpts) -> FogResult<Runtime> {
     let n = entries.len();
     let mut items: Vec<Option<Terminal>> = (0..n).map(|_| None).collect();
     let mut pending_services: Vec<PendingService> = Vec::new();
-    let mut warnings: Vec<String> = Vec::new();
+    let mut warnings: Vec<String> = drop_warnings;
 
     for &idx in &dep_order {
         let entry = &entries[idx];
@@ -743,6 +866,27 @@ pub fn build_with_opts(opts: BuildOpts) -> FogResult<Runtime> {
         // Endpoints keep their own status thread for display, so resolve them
         // separately (the aggregate above already folded in their checks).
         let endpoints = resolve_endpoint_compose_paths(entry, &service_path);
+
+        if without.contains(&name) {
+            let mut t = Terminal::spawn_skipped(
+                name.clone(),
+                service_path_str,
+                entry.cmd.clone(),
+                scrollback,
+            );
+            t.save_logs = save_logs;
+            t.log_dir = log_dir.clone();
+            t.health_checks = health_checks;
+            t.shutdown_cmd = entry.shutdown_cmd.clone();
+            t.injected_env = entry.env.clone().unwrap_or_default();
+            t.branch = branch.clone();
+            t.project = project.clone();
+            t.script = script_name.to_string();
+            t.set_endpoints(endpoints);
+            t.persist_skip_notice();
+            items[idx] = Some(t);
+            continue;
+        }
 
         let has_deps = entry.depends_on.is_some();
 
@@ -1084,6 +1228,106 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_without_rejects_unknown_and_dedupes() {
+        let script = script_with(vec![entry("db", None), entry("api", None)]);
+        let err = resolve_without(&script, &["nope".to_string()])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown service in --without: nope"), "{err}");
+        assert!(err.contains("db, api"), "{err}");
+
+        let skipped = resolve_without(
+            &script,
+            &["api".to_string(), "api".to_string(), "db".to_string()],
+        )
+        .unwrap();
+        assert_eq!(skipped.len(), 2);
+        assert!(skipped.contains("db") && skipped.contains("api"));
+    }
+
+    #[test]
+    fn test_build_skips_service_and_drops_its_dependents_edge() {
+        let script = script_with(vec![entry("db", None), entry("api", Some(vec!["db"]))]);
+        let mut adopted = HashMap::new();
+        let without: HashSet<String> = ["db".to_string()].into();
+        let rt = build_with_ports_skipping(
+            &script,
+            "dev",
+            Path::new("."),
+            None,
+            false,
+            100,
+            None,
+            &mut adopted,
+            &Default::default(),
+            None,
+            false,
+            false,
+            &HashSet::new(),
+            &without,
+        )
+        .unwrap();
+
+        let db = rt
+            .items
+            .iter()
+            .find(|t| t.name == "db")
+            .expect("skipped service still gets a tab");
+        assert!(db.skipped);
+        assert!(!db.process_running);
+        let api = rt
+            .items
+            .iter()
+            .find(|t| t.name == "api")
+            .expect("dependent service still starts");
+        assert!(!api.skipped);
+        assert!(
+            rt.pending_services.is_empty(),
+            "a dropped edge must not leave the dependent waiting"
+        );
+        assert!(
+            rt.warnings
+                .iter()
+                .any(|w| w.contains("'api' depends on 'db', which is skipped")),
+            "{:?}",
+            rt.warnings
+        );
+    }
+
+    #[test]
+    fn test_skipped_service_teardown_does_not_run_shutdown_cmd() {
+        let marker = std::env::temp_dir().join(format!("fog-skip-shutdown-{}", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+        let mut db = entry("db", None);
+        db.shutdown_cmd = Some(format!("touch {}", marker.display()));
+        let script = script_with(vec![db]);
+        let mut adopted = HashMap::new();
+        let without: HashSet<String> = ["db".to_string()].into();
+        let rt = build_with_ports_skipping(
+            &script,
+            "dev",
+            Path::new("."),
+            None,
+            false,
+            100,
+            None,
+            &mut adopted,
+            &Default::default(),
+            None,
+            false,
+            false,
+            &HashSet::new(),
+            &without,
+        )
+        .unwrap();
+        drop(rt);
+        assert!(
+            !marker.exists(),
+            "a service this run never started must not be shut down"
+        );
+    }
+
+    #[test]
     fn test_resolve_dep_order_simple() {
         let entries = vec![entry("a", None), entry("b", Some(vec!["a"]))];
         let order = resolve_dep_order(&entries).unwrap();
@@ -1296,6 +1540,7 @@ mod tests {
             Some("mine"),
             &mut ports,
             false,
+            &HashSet::new(),
         );
 
         let _ = std::fs::remove_file(&sibling);
@@ -1346,6 +1591,7 @@ mod tests {
             Some("mine"),
             &mut ports,
             false,
+            &HashSet::new(),
         );
 
         let _ = std::fs::remove_file(&sibling);
@@ -1390,6 +1636,7 @@ mod tests {
             Some("mine"),
             &mut ports,
             false,
+            &HashSet::new(),
         );
 
         let _ = std::fs::remove_file(&sibling);
@@ -1434,6 +1681,7 @@ mod tests {
             Some("mine"),
             &mut ports,
             false,
+            &HashSet::new(),
         );
 
         let _ = std::fs::remove_file(&sibling);

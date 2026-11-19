@@ -92,6 +92,8 @@ export interface InstanceServiceStatus {
   health: string | null;
   /** Declared endpoints and their health; omitted when none. */
   endpoints?: EndpointStatus[];
+  /** Left out of this run with `--without`; start it to clear this. */
+  skipped?: boolean;
 }
 
 /** One IPC instance in the GET /api/status snapshot. */

@@ -135,10 +135,13 @@ pub fn resolve(
             if ports::any_instance_matches(&group[0].matcher, &ports::live_instances()) {
                 return Ok(None);
             }
+            // A cross-instance cold start runs the target script as authored.
+            // Skip flags belong to the caller's own run, not to a dependency.
             crate::ipc::spawn_detached(
                 &target.config_path,
                 &target.script,
                 None,
+                &[],
                 &[
                     (AUTOSTART_CHAIN_ENV, inherited.serialize()),
                     (AUTOSTART_BY_ENV, parent_pid.clone()),

@@ -39,7 +39,13 @@ Done when you can name the script you will run and the config path.
 fog dev -d                      # background daemon; shows startup progress, then prints "fog 'dev' started in background (pid <pid>)"
 fog dev -d --branch feature-x   # run the worktree checked out on that branch
 fog dev -d --no-share           # ignore share/reuse, start everything fresh
+fog dev -d --without worker     # leave a service out of this run (repeatable; comma-separated too)
 ```
+
+`--without <name>` uses the service's effective name (`name`, else `path` basename) and
+fails on an unknown name. Dependents of a skipped service start without waiting for it
+(the dropped edge is warned), its ports/routes stay configured, and its `shutdown_cmd`
+never runs. The tab stays visible as `skipped`; `R` starts it normally.
 
 Done when `fog ls` shows your instance on the expected branch.
 
@@ -60,7 +66,7 @@ reports what they hold, `fog prune` removes them (a running instance's logs are 
 touched). Don't leave output from runs you started lying around.
 
 `fog ls` prints one row per instance — `pid script project branch started-by proxy services`
-— with each service's state (`healthy`, `reused`, `running`, `stopped`, `unhealthy`).
+— with each service's state (`healthy`, `reused`, `running`, `stopped`, `skipped`, `unhealthy`).
 `started-by` names the parent that auto-started an instance for a cross-instance port
 reference (see below), so a stack whose other half was started for you is visible rather
 than orphaned.

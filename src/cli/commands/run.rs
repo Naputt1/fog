@@ -126,6 +126,10 @@ pub(crate) fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>)
         Some(s) => s,
         None => list_scripts_and_exit(&config, &format!("unknown script '{name}'")),
     };
+    // Validate `--without` before any setup side effect (dnsmasq, router,
+    // ports, reclaim), so a typo cannot start half a stack.
+    let without = crate::runtime::resolve_without(script, &cli.without)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
 
     // Setup diagnostics are collected rather than printed immediately: in
     // interactive mode the TUI takes the screen moments later, so warnings are
@@ -207,7 +211,11 @@ pub(crate) fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>)
         // every live service (not just `reuse` ones) so the session keeps
         // running.
         note_phase(&mut progress, "adopting services");
-        match reclaim_takeover(from_pid, &all_service_names(script)) {
+        let takeover_names: Vec<String> = all_service_names(script)
+            .into_iter()
+            .filter(|name| !without.contains(name))
+            .collect();
+        match reclaim_takeover(from_pid, &takeover_names) {
             Some(handoffs) => adopted = handoffs,
             None => std::process::exit(1),
         }
@@ -217,7 +225,10 @@ pub(crate) fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>)
         // reclaim happens. Only single-instance scripts take over from a previous
         // run (handing over `reuse` services). `--no-share` disables reuse handoff.
         if !script.concurrent && !cli.no_share {
-            let reuse = reuse_names(script);
+            let reuse: Vec<String> = reuse_names(script)
+                .into_iter()
+                .filter(|name| !without.contains(name))
+                .collect();
             note_phase(&mut progress, "reclaiming previous instance");
             (adopted, owner_lock) = reconcile_instance(project, name, branch.as_deref(), &reuse);
         } else if !script.concurrent && cli.no_share {
@@ -308,10 +319,10 @@ pub(crate) fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>)
     // per-(project, script, branch) owner lock so a racing sibling adopts the
     // winner's ports instead of allocating divergent ones. Single-instance mode
     // already holds this lock (from reclaim) and is released after startup.
-    let has_shared = script
-        .service
-        .as_ref()
-        .is_some_and(|s| s.iter().any(|e| e.share));
+    let has_shared = script.service.as_ref().is_some_and(|s| {
+        s.iter()
+            .any(|e| e.share && !without.contains(&crate::config::effective_name(e)))
+    });
     let startup_lock = if script.concurrent && !cli.no_share && has_shared {
         project.as_ref().and_then(|p| {
             crate::lock::OwnerLock::acquire_with_timeout(
@@ -399,6 +410,7 @@ pub(crate) fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>)
         branch_for_ports.as_deref(),
         &mut port_map,
         cli.no_share,
+        &without,
     );
     // Resolve `${ports.<name>@<repo>:<branch>[:<script>]}` against live fog
     // instances; a `:script` reference may start its target when it is not
@@ -506,7 +518,7 @@ pub(crate) fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>)
     }
 
     note_phase(&mut progress, "starting services");
-    let runtime = crate::runtime::build_with_ports_no_share(
+    let runtime = crate::runtime::build_with_ports_skipping(
         script,
         name,
         &config_dir,
@@ -520,6 +532,7 @@ pub(crate) fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>)
         cli.no_share,
         takeover,
         &owned_shared,
+        &without,
     )
     .map_err(|e| {
         // Close any handoff fds we duped that the failed build did not consume.
@@ -632,6 +645,10 @@ pub(crate) fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>)
         if cli.verbose {
             args.push(OsString::from("--verbose"));
         }
+        for service in &without {
+            args.push(OsString::from("--without"));
+            args.push(OsString::from(service));
+        }
         Some(crate::app::DetachSpawn::new(exe, args, std::process::id()))
     };
 
@@ -651,6 +668,7 @@ pub(crate) fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>)
         config_rel: cli.config.clone(),
         save_logs: cli.save_logs,
         no_share: cli.no_share,
+        without: without.iter().cloned().collect(),
         verbose: cli.verbose,
         detach,
         startup_messages: startup_warnings,

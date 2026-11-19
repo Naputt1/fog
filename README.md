@@ -194,6 +194,7 @@ instance), `2` a usage error (bad flag, unknown script).
 | `--port <NAME=PORT>`     | Override a top-level `ports` entry for this run (repeatable; `0` re-randomizes, e.g. `fog dev --port api=4000`) |
 | `-d`, `--detach`         | Run in background without TUI; waits until services start, showing progress, logs to `$TMPDIR/fog-<pid>.logs/`  |
 | `--no-share`             | Ignore `share:`/`reuse:` — start fresh even when a healthy sibling could be borrowed                            |
+| `--without <SERVICE>`    | Leave a service out of this run (repeatable or comma-separated, e.g. `fog dev --without db,worker`)             |
 | `--all`                  | With `fog kill`/`fog restart`: apply to every matching instance (conflicts with `PID`)                          |
 | `--force`                | With `fog kill`/`fog restart`: escalate to SIGTERM then SIGKILL for a wedged instance                           |
 | `--with-dependents`      | With `fog kill`: also stop instances it cold-started through cross-instance port references                     |
@@ -217,6 +218,16 @@ fog dev --port api=4000 --port web=0   # pin api, re-randomize web
 
 `--port` is repeatable and applies before `${ports.*}` templating, so services, endpoint routes and native routes all use the overridden value. A name not declared in the config's `ports` map is added for that run. A cross-instance key such as `--port api@my-repo:main=4000` pins that reference (fixed ports only — `=0` is rejected, since the parent does not own that port); with a script segment (`--port api@my-repo:main:dev=4000`) it also skips starting the target.
 
+Leave services out of one run without editing `fog.json`:
+
+```bash
+fog dev --without worker              # skip one service
+fog dev --without db,worker           # skip several
+fog dev --without db --without worker # same, repeated
+```
+
+`--without` names a service by its effective name (its `name`, or the basename of its `path`). An unknown name fails before anything starts and lists the available services. A skipped service keeps its tab/status row and allocated ports, but no process or health checks run; if another service lists it in `depends_on`, that edge is dropped with a warning so the dependent starts anyway. `share`/`reuse` neither borrows nor hands over a skipped service, and its `shutdown_cmd` never runs — useful when the real dependency is external or owned by another instance. Start the tab manually (TUI `R`, or Start in the web UI) to run it normally; the opt-out is preserved by detach, attach, restart and worktree switching.
+
 Docs: [https://naputt1.github.io/fog/](https://naputt1.github.io/fog/) for configuration, proxy, themes, keybindings, architecture and troubleshooting.
 
 ## Keybindings
@@ -227,7 +238,7 @@ Docs: [https://naputt1.github.io/fog/](https://naputt1.github.io/fog/) for confi
 | `j` / `→` / `Ctrl+n`                          | Next tab                                                                                  |
 | `k` / `←` / `Ctrl+p`                          | Previous tab                                                                              |
 | `i`                                           | Enter terminal input (`Esc` to exit)                                                      |
-| `R`                                           | Restart current service or proxy                                                          |
+| `R`                                           | Restart current service or proxy (starts a `--without` skipped service)                    |
 | `t` / `Ctrl+t`                                | Open a shell tab                                                                          |
 | `x`                                           | Close the current shell tab                                                               |
 | `d`                                           | Detach: close the TUI but keep the session running                                        |

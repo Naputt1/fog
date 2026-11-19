@@ -92,6 +92,7 @@ pub fn spawn_detached(
     config_path: &Path,
     script: &str,
     branch: Option<&str>,
+    without: &[String],
     extra_env: &[(&str, String)],
     timeout: Duration,
 ) -> io::Result<u32> {
@@ -107,6 +108,9 @@ pub fn spawn_detached(
         .stderr(Stdio::null());
     if let Some(b) = branch {
         cmd.arg("--branch").arg(b);
+    }
+    for service in without {
+        cmd.arg("--without").arg(service);
     }
     for (key, value) in extra_env {
         cmd.env(key, value);
@@ -483,6 +487,7 @@ mod tests {
             health: "unknown".into(),
             endpoints: Vec::new(),
             shutdown_cmd: None,
+            skipped: false,
         });
         let state = Arc::new(state);
         let server_dir = dir.clone();
@@ -552,6 +557,7 @@ mod tests {
             health: "healthy".into(),
             endpoints: Vec::new(),
             shutdown_cmd: None,
+            skipped: false,
         });
         state.proxy.lock().unwrap().replace(ProxyStatus {
             running: true,

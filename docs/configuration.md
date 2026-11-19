@@ -41,6 +41,21 @@ See [`fog.schema.json`](https://github.com/Naputt1/fog/blob/main/fog.schema.json
 
 Run-time port overrides: `fog <script> --port <name>=<port>` (repeatable) replaces an allocated port for one run without editing `fog.json`; `--port <name>=0` re-randomizes it. A name not declared in `ports` is added for that run. Overrides apply before templating, so every `${ports.<name>}` consumer — service `cmd`/`env`/health checks, endpoint routes and native routes — resolves to the overridden value. A cross-instance key (`--port api@my-repo:main=4000`, or `--port api@my-repo:main:dev=4000` with a script segment) pins that reference for one run and skips lookup and auto-start.
 
+### Leaving services out of a run
+
+`--without <service>` (repeatable, or comma-separated) starts a script without the named services, without changing `fog.json`:
+
+```bash
+fog dev --without worker
+fog dev --without db,worker
+```
+
+Names are effective service names: an explicit `name`, or the basename of `path`. An unknown name is a usage error reported before ports, DNS, the router or any service is touched, and the message lists the script's services.
+
+A skipped service keeps its tab/status row (`skipped` in `fog ls` and the web UI), its allocated ports, and any proxy/native routes pointing at it. No process, health check, `share`/`reuse` borrow or hand-off is attached to it, and its `shutdown_cmd` is never run, because this run does not own it. If a kept service names a skipped service in `depends_on`, that edge is dropped with a warning and the kept service starts immediately instead of waiting forever. Ports and routes are intentionally left alone: when something else already provides the service on the configured port, routes keep working, and starting the skipped tab later needs no reconfiguration.
+
+The opt-out is per run and survives `-d`, `fog attach`, `fog restart`, and worktree switching. In the TUI press `R` on its tab, or use Start in the web UI, to clear `skipped` and run it normally for the rest of that instance.
+
 ## Validation
 
 fog validates the config as it loads it and exits with every problem it finds before starting anything. Unknown keys are errors, not warnings: a misspelled `healt_check` or `depend_on` would otherwise silently drop a health check or a dependency, which is the hardest kind of mistake to notice.

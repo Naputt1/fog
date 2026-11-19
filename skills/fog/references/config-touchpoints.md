@@ -18,6 +18,14 @@ and the [configuration docs](https://naputt1.github.io/fog/configuration).
 | `endpoint` | A multi-port service (e.g. a compose stack) declares one entry per exposed endpoint; each gets its own health and optional generated route. |
 | `concurrent` | Script-level. `true` (default) runs alongside; `false` reclaims the previous same-branch instance. |
 
+Per-run opt-out: `fog <script> --without <service>[,<service>]` (also repeatable). Uses the
+effective name (`name`, else `path` basename); an unknown name fails before startup and
+lists the available services. A skipped service gets no process, health checks,
+`share`/`reuse` borrow or shutdown; its ports and proxy/native routes stay as configured.
+Dependents that `depends_on` it start immediately, with a warning for each dropped edge.
+The tab/status row remains as `skipped`; `R` or Start runs it normally. The set survives
+`-d`, attach, restart and worktree switching, but is not written to `fog.json`.
+
 Templates: `${ports.*}`; `${branch}` / `${FOG_BRANCH}` (DNS-safe slug, `feat/book` →
 `feat-book`); `${branch_raw}` / `${FOG_BRANCH_RAW}` (raw name — display only, never a
 `Host()` or DNS name). Cross-instance ports use

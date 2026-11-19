@@ -381,6 +381,7 @@ fn spawn_detached(config_path: &std::path::Path, script: &str) -> io::Result<u32
         script,
         None,
         &[],
+        &[],
         std::time::Duration::from_secs(LAUNCH_READY_TIMEOUT_SECS),
     )
 }

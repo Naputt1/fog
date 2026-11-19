@@ -249,6 +249,7 @@ describe("endpointViews", () => {
       name: "infra",
       running: true,
       health: "healthy" as string | null,
+      skipped: false,
       endpoints: [
         { name: "web", health: "healthy" },
         { name: "api", health: "unhealthy" },
@@ -286,6 +287,7 @@ describe("endpointViews", () => {
       name: "api",
       running: true,
       health: "healthy" as string | null,
+      skipped: false,
       endpoints: [],
       service: svc({ service: "api" }),
     };
@@ -300,6 +302,7 @@ describe("servicePid", () => {
     name: "frontend",
     running: true,
     health: "healthy",
+    skipped: false,
     service: null,
     endpoints: [],
     ...overrides,

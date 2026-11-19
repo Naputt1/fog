@@ -43,7 +43,7 @@ fn is_builtin(name: &str) -> bool {
     name = "fog",
     version = env!("CARGO_PKG_VERSION"),
     about = "Terminal-based service orchestrator & reverse-proxy dashboard",
-    after_help = "Built-in commands:\n  fog ls [PID]                    list running instances and service status\n  fog kill [PID|--all]            gracefully shut down a running instance\n  fog kill --force [PID|--all]    forcibly shut down a wedged instance\n  fog restart [PID|--all]         restart a running instance\n  fog logs [PID]                  list services and their status\n  fog logs [PID] --service NAME   print captured output of one service\n  fog logs [PID] -s NAME --tail   limit lines: --head N|-N, --tail N|-N|+N\n  fog prune [--dry-run]           remove the captured logs of finished instances\n  fog attach [PID]                reattach the TUI to a running instance (replays screen history)\n  fog index serve [--foreground] [--port N]  run the index server (detached by default)\n  fog index kill                  stop the index server\n  fog index restart               restart the index server\n\nWith no PID, kill/restart/logs target the instance started from the local\nfog.json (same config directory, so the branch is implicit). `fog logs <PID>`\nalso reads the captured logs of an instance that has finished; `fog prune`\nremoves those logs (a running instance's logs are never touched). When several\nlocal instances match, the command lists them: pass an explicit PID, or\n--all (kill/restart) to apply to every local match. Outside a directory\nwith fog.json, --all applies to every running instance.\n\nWhen a kill/restart grace period is not enough (a wedged instance that never\nconsumes its kill flag), --force escalates to SIGTERM then SIGKILL.\n\nRun a script from fog.json:\n  fog <script> [OPTIONS]  (e.g. fog dev)\n\nWith no script, fog lists the scripts in fog.json, or prints this help when\nthere is no config in the current directory.\n\nOverride an allocated port for one run:\n  fog dev --port api=4000       (repeatable; --port web=0 re-randomizes)"
+    after_help = "Built-in commands:\n  fog ls [PID]                    list running instances and service status\n  fog kill [PID|--all]            gracefully shut down a running instance\n  fog kill --force [PID|--all]    forcibly shut down a wedged instance\n  fog restart [PID|--all]         restart a running instance\n  fog logs [PID]                  list services and their status\n  fog logs [PID] --service NAME   print captured output of one service\n  fog logs [PID] -s NAME --tail   limit lines: --head N|-N, --tail N|-N|+N\n  fog prune [--dry-run]           remove the captured logs of finished instances\n  fog attach [PID]                reattach the TUI to a running instance (replays screen history)\n  fog index serve [--foreground] [--port N]  run the index server (detached by default)\n  fog index kill                  stop the index server\n  fog index restart               restart the index server\n\nWith no PID, kill/restart/logs target the instance started from the local\nfog.json (same config directory, so the branch is implicit). `fog logs <PID>`\nalso reads the captured logs of an instance that has finished; `fog prune`\nremoves those logs (a running instance's logs are never touched). When several\nlocal instances match, the command lists them: pass an explicit PID, or\n--all (kill/restart) to apply to every local match. Outside a directory\nwith fog.json, --all applies to every running instance.\n\nWhen a kill/restart grace period is not enough (a wedged instance that never\nconsumes its kill flag), --force escalates to SIGTERM then SIGKILL.\n\nRun a script from fog.json:\n  fog <script> [OPTIONS]  (e.g. fog dev)\n\nWith no script, fog lists the scripts in fog.json, or prints this help when\nthere is no config in the current directory.\n\nOverride an allocated port for one run:\n  fog dev --port api=4000       (repeatable; --port web=0 re-randomizes)\n\nSkip services for one run:\n  fog dev --without worker      (repeatable or comma-separated:\n                                 --without worker,db)"
 )]
 struct Cli {
     /// Script to run (e.g. `fog dev`), or a built-in command
@@ -115,6 +115,13 @@ struct Cli {
     /// `health_check`, start a fresh instance instead of borrowing/reusing.
     #[arg(long)]
     no_share: bool,
+
+    /// Leave a service out of this run, e.g. `--without worker`. Repeatable or
+    /// comma-separated. Kept services that depend on it start anyway, without
+    /// waiting for it. The service stays visible in the TUI/index as skipped
+    /// and can be started manually.
+    #[arg(long, value_name = "SERVICE", value_delimiter = ',')]
+    without: Vec<String>,
 
     /// Override a top-level `ports` entry for this run, e.g. `--port api=4000`.
     /// Repeatable; use `0` to re-randomize. Names not in the config `ports` map
@@ -530,6 +537,17 @@ mod tests {
 
         let cli = Cli::try_parse_from(["fog", "restart", "--all", "--force"]).unwrap();
         assert!(cli.force && cli.all);
+    }
+
+    #[test]
+    fn test_cli_accepts_without_services() {
+        let cli = Cli::try_parse_from(["fog", "dev", "--without", "db,worker", "--without", "api"])
+            .unwrap();
+        assert_eq!(
+            cli.without,
+            vec!["db".to_string(), "worker".to_string(), "api".to_string()]
+        );
+        assert_eq!(cli.script.as_deref(), Some("dev"));
     }
 
     #[cfg(unix)]

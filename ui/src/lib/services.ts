@@ -150,6 +150,8 @@ export interface InstanceServiceView {
   running: boolean;
   /** Health detail from the instance, null when unset. */
   health: string | null;
+  /** Left out of this run with `--without`. */
+  skipped: boolean;
   /**
    * Matching `/api/services` directory entry (URL/ports/container), or null
    * when the directory has no row for it yet (a snapshot that has not caught
@@ -340,6 +342,7 @@ export function buildInstanceViews(
         name: s.name,
         running: s.running,
         health: s.health,
+        skipped: s.skipped ?? false,
         service: lookup(project, worktree, s.name),
         endpoints: s.endpoints ?? [],
       }))
@@ -438,6 +441,7 @@ export function branchInstances(
           name: s.service,
           running: s.status === "running",
           health: s.health,
+          skipped: false,
           service: s,
           endpoints: [],
         })),

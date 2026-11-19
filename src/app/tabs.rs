@@ -20,6 +20,7 @@ impl App {
             } else {
                 TabKind::Service
             };
+            tabs.entries[i].skipped = item.skipped;
         }
         // Mark pending service tabs
         for ps in pending_services {

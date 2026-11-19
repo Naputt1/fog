@@ -34,10 +34,12 @@ describe("optimisticServicePatch", () => {
     expect(optimisticServicePatch("start")).toEqual({
       running: true,
       health: "starting",
+      skipped: false,
     });
     expect(optimisticServicePatch("restart")).toEqual({
       running: true,
       health: "starting",
+      skipped: false,
     });
   });
 
@@ -81,6 +83,7 @@ describe("applyServiceAction", () => {
       name: "db",
       running: true,
       health: "starting",
+      skipped: false,
     });
   });
 

@@ -257,6 +257,7 @@ struct StartService {
     name: String,
     running: bool,
     health: String,
+    skipped: bool,
 }
 
 /// Maps a service's running flag and health string to its rendered start
@@ -265,7 +266,10 @@ struct StartService {
 /// The checklist wording ("started", "waiting") differs from
 /// [`ServiceState::label`] on purpose: it collapses every up state into
 /// `started`, and a service that has not come up into `waiting`.
-fn start_service_state(running: bool, health: &str) -> (&'static str, bool, bool) {
+fn start_service_state(running: bool, health: &str, skipped: bool) -> (&'static str, bool, bool) {
+    if skipped {
+        return ("skipped", true, false);
+    }
     match ServiceState::parse(health) {
         Some(ServiceState::Healthy) => ("started", true, false),
         Some(state @ ServiceState::Unhealthy) => (state.label(), false, true),
@@ -315,7 +319,7 @@ fn start_lines(
         lines.push(format!("  {marker} {phase}"));
     }
     for svc in services {
-        let (state, ready, failed) = start_service_state(svc.running, &svc.health);
+        let (state, ready, failed) = start_service_state(svc.running, &svc.health, svc.skipped);
         let (state, ready) = settled_state(state, ready, failed, all_done);
         let marker = if failed {
             colored(START_FAILED, MARKER_RED, color)
@@ -377,6 +381,7 @@ impl StartProgress {
                         name: svc.name.clone(),
                         running: svc.running,
                         health: svc.health.clone(),
+                        skipped: svc.skipped,
                     })
                     .collect()
             })
@@ -418,7 +423,7 @@ impl StartProgress {
         self.phases_printed = phases.len();
         let mut labels = Vec::with_capacity(services.len());
         for svc in services {
-            let (label, ready, failed) = start_service_state(svc.running, &svc.health);
+            let (label, ready, failed) = start_service_state(svc.running, &svc.health, svc.skipped);
             let (label, ready) = settled_state(label, ready, failed, all_done);
             let marker = if failed {
                 START_FAILED
@@ -572,30 +577,34 @@ mod tests {
     #[test]
     fn test_start_service_state_maps_health() {
         assert_eq!(
-            start_service_state(true, "healthy"),
+            start_service_state(true, "healthy", false),
             ("started", true, false)
         );
         assert_eq!(
-            start_service_state(true, "unhealthy"),
+            start_service_state(true, "unhealthy", false),
             ("unhealthy", false, true)
         );
         assert_eq!(
-            start_service_state(true, "starting"),
+            start_service_state(true, "starting", false),
             ("starting", false, false)
         );
         // `pending` without a live process is still waiting on a dependency.
         assert_eq!(
-            start_service_state(false, "pending"),
+            start_service_state(false, "pending", false),
             ("waiting", false, false)
         );
         // A service with no health checks is up as soon as it runs.
         assert_eq!(
-            start_service_state(true, "unknown"),
+            start_service_state(true, "unknown", false),
             ("started", true, false)
         );
         assert_eq!(
-            start_service_state(false, "unknown"),
+            start_service_state(false, "unknown", false),
             ("waiting", false, false)
+        );
+        assert_eq!(
+            start_service_state(false, "unknown", true),
+            ("skipped", true, false)
         );
     }
 
@@ -625,16 +634,19 @@ mod tests {
                 name: "db".into(),
                 running: true,
                 health: "healthy".into(),
+                skipped: false,
             },
             StartService {
                 name: "api".into(),
                 running: false,
                 health: "pending".into(),
+                skipped: false,
             },
             StartService {
                 name: "web".into(),
                 running: true,
                 health: "unhealthy".into(),
+                skipped: false,
             },
         ];
         assert_eq!(
@@ -680,6 +692,7 @@ mod tests {
                 health: "pending".to_string(),
                 endpoints: Vec::new(),
                 shutdown_cmd: None,
+                skipped: false,
             },
             ipc::ServiceStatus {
                 name: "db".to_string(),
@@ -687,6 +700,7 @@ mod tests {
                 health: "healthy".to_string(),
                 endpoints: Vec::new(),
                 shutdown_cmd: None,
+                skipped: false,
             },
         ];
         let status = test_status(services, None);

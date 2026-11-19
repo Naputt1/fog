@@ -502,7 +502,7 @@ pub(super) fn api_health() -> Response<RespBody> {
     let mut health = Vec::new();
     for inst in discover_fog_instances() {
         let proj = inst.project.as_deref().map(project_name_from_common_dir);
-        for svc in inst.services {
+        for svc in inst.services.into_iter().filter(|svc| !svc.skipped) {
             health.push(serde_json::json!({
                 "pid": inst.pid,
                 "script": inst.script,
@@ -605,6 +605,7 @@ mod tests {
             health: "unknown".to_string(),
             endpoints: Vec::new(),
             shutdown_cmd: None,
+            skipped: false,
         }
     }
 

@@ -29,7 +29,7 @@ mod reader;
 use self::reader::spawn_reader_pty;
 #[cfg(unix)]
 use self::reader::{FdWriter, make_stop_pipe, spawn_reader};
-use self::reader::{LogTee, borrow_notice, shell_command, wait_reaped};
+use self::reader::{LogTee, borrow_notice, shell_command, skip_notice, wait_reaped};
 use self::style::cell_style;
 
 const INITIAL_COLS: u16 = 256;
@@ -149,6 +149,10 @@ pub struct Terminal {
     /// `shutdown_cmd` is skipped on teardown while another instance on the
     /// same (project, script, branch) still serves it.
     pub shared: bool,
+    /// Left out of this run with `--without`: no process was started and no
+    /// health checks run. The tab stays visible and `restart`/`start` promotes
+    /// it to a normal service.
+    pub skipped: bool,
     /// When a reused service is adopted from another instance, the child PID
     /// to wait on / kill instead of a [`Child`] handle.
     owned_pid: Option<u32>,
@@ -318,6 +322,7 @@ impl Terminal {
             project: None,
             script: String::new(),
             reused: false,
+            skipped: false,
             shared: false,
             owned_pid: None,
             raw_fd: None,
@@ -384,6 +389,7 @@ impl Terminal {
             project: None,
             script: String::new(),
             reused: false,
+            skipped: false,
             shared: false,
             owned_pid: None,
             raw_fd: None,
@@ -448,6 +454,7 @@ impl Terminal {
             project: None,
             script: String::new(),
             reused: false,
+            skipped: false,
             shared: false,
             owned_pid: None,
             raw_fd: None,
@@ -509,6 +516,7 @@ impl Terminal {
             project: None,
             script: String::new(),
             reused: false,
+            skipped: false,
             shared: false,
             owned_pid: None,
             raw_fd: None,
@@ -570,6 +578,7 @@ impl Terminal {
             project: None,
             script: String::new(),
             reused: true,
+            skipped: false,
             shared: false,
             owned_pid: None,
             raw_fd: None,
@@ -590,6 +599,71 @@ impl Terminal {
             writer: None,
             child: None,
             master: None,
+        }
+    }
+
+    /// A service left out with `--without`: no process, no health checks, but a
+    /// real tab so it can be started manually.
+    pub fn spawn_skipped(name: String, path: String, cmd: String, scrollback: usize) -> Self {
+        let message = skip_notice(&name);
+        let parser = Arc::new(Mutex::new(vt100::Parser::new(
+            DEFAULT_ROWS,
+            DEFAULT_COLS,
+            scrollback,
+        )));
+        {
+            let mut p = parser.lock().expect("mutex poisoned");
+            p.process(format!("{message}\r\n").as_bytes());
+        }
+
+        Self {
+            init: Init::Command { path, cmd },
+            name,
+            stopped: true,
+            process_running: false,
+            save_logs: false,
+            log_dir: None,
+            scrollback,
+            health_checks: vec![],
+            shutdown_cmd: None,
+            dep_names: vec![],
+            injected_env: Default::default(),
+            branch: None,
+            project: None,
+            script: String::new(),
+            reused: false,
+            skipped: true,
+            shared: false,
+            owned_pid: None,
+            raw_fd: None,
+            reused_since: None,
+            endpoints: Vec::new(),
+            reuse_grace: DEFAULT_REUSE_GRACE,
+            stop_w: None,
+            handed_off: false,
+            child_reaped: false,
+            torn_down: false,
+            parser,
+            health_status: Arc::new(Mutex::new(HealthStatus::Unknown)),
+            health_stop: Arc::new(AtomicBool::new(false)),
+            screen_generation: Arc::new(AtomicUsize::new(0)),
+            line_cache: RefCell::new(None),
+            raw_output: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+            handler: None,
+            writer: None,
+            child: None,
+            master: None,
+        }
+    }
+
+    /// Persists the skip notice so `fog logs <pid> -s <name>` explains why the
+    /// service has no output. No-op when this terminal has no log dir.
+    pub(crate) fn persist_skip_notice(&self) {
+        let Some(dir) = self.log_dir.as_deref() else {
+            return;
+        };
+        if let Ok(mut tee) = LogTee::create(dir, &self.name) {
+            tee.write_line(&skip_notice(&self.name));
         }
     }
 
@@ -718,6 +792,7 @@ impl Terminal {
             project: None,
             script: String::new(),
             reused: true,
+            skipped: false,
             shared: false,
             owned_pid: Some(pid),
             endpoints: Vec::new(),
@@ -852,6 +927,7 @@ impl Terminal {
         // refresh_status resumes deriving liveness. This matters for reused
         // terminals revived by maybe_auto_start after the grace period —
         // without it they report "stopped" forever despite a live process.
+        self.skipped = false;
         self.stopped = false;
         self.process_running = true;
         Ok(())
@@ -859,6 +935,9 @@ impl Terminal {
 
     /// Returns `true` if the service is running and (if health checks are configured) healthy.
     pub fn is_ready(&self) -> bool {
+        if self.skipped {
+            return false;
+        }
         if self.health_checks.is_empty() {
             return !self.stopped && self.process_running;
         }
@@ -1332,11 +1411,14 @@ impl Terminal {
                 return Err(io::Error::other("cannot restart a shell tab"));
             }
         };
-        self.kill_inner();
-        // Tear down the previous incarnation (e.g. `docker compose down`) and
-        // wait for it to finish so the fresh start does not race it or silently
-        // attach to leftover containers.
-        self.run_shutdown_cmd_blocking(SHUTDOWN_CMD_TIMEOUT);
+        let was_skipped = self.skipped;
+        if !was_skipped {
+            self.kill_inner();
+            // Tear down the previous incarnation (e.g. `docker compose down`) and
+            // wait for it to finish so the fresh start does not race it or silently
+            // attach to leftover containers.
+            self.run_shutdown_cmd_blocking(SHUTDOWN_CMD_TIMEOUT);
+        }
         // A health-checked reuse service (e.g. a one-shot `docker compose up -d`)
         // stays health-driven after restart: its command exits after bringing
         // the resource up, so liveness comes from the health checks. Without
@@ -1345,9 +1427,16 @@ impl Terminal {
             self.reused = false;
         }
         self.reused_since = None;
+        self.skipped = false;
         self.stopped = false;
         self.set_health_status(HealthStatus::Unknown);
-        self.spawn_into(&path, &cmd)
+        self.spawn_into(&path, &cmd)?;
+        if was_skipped {
+            self.probe_health();
+            self.start_health_checks();
+            self.start_endpoint_health_checks();
+        }
+        Ok(())
     }
 
     /// Stops the command process in this terminal without respawning it:
@@ -1360,6 +1449,9 @@ impl Terminal {
     /// Always succeeds; the signature mirrors [`restart`](Self::restart) so the
     /// two can be handled uniformly.
     pub fn stop(&mut self) -> io::Result<()> {
+        if self.skipped {
+            return Ok(());
+        }
         self.kill_inner();
         // Tear down the previous incarnation (e.g. `docker compose down`) just
         // like restart does, so a stopped compose-style service does not leave
@@ -1470,7 +1562,7 @@ impl Terminal {
 
     /// Checks if the child process has exited and updates `stopped` accordingly.
     pub fn refresh_status(&mut self) {
-        if self.stopped {
+        if self.stopped || self.skipped {
             return;
         }
         // An adopted terminal whose transferred process has already exited
@@ -1697,6 +1789,11 @@ impl Terminal {
         self.health_stop.store(true, Ordering::SeqCst);
         for sub in &self.endpoints {
             sub.health_stop.store(true, Ordering::SeqCst);
+        }
+        // A skipped service never started here: its process is not ours and its
+        // shutdown command must not tear down an externally provided resource.
+        if self.skipped {
+            return;
         }
         if self.save_logs
             && let Init::Command { .. } = &self.init

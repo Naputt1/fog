@@ -34,6 +34,8 @@ pub struct TabEntry {
     pub process_running: bool,
     /// Whether the service is waiting for dependencies.
     pub pending: bool,
+    /// Whether the service was left out with `--without`.
+    pub skipped: bool,
     /// Health check status.
     pub health_status: HealthStatus,
 }
@@ -81,6 +83,7 @@ impl ClickTab {
                 stopped: false,
                 process_running: false,
                 pending: false,
+                skipped: false,
                 health_status: HealthStatus::Unknown,
             })
             .collect();
@@ -108,6 +111,7 @@ impl ClickTab {
             stopped: false,
             process_running: false,
             pending: false,
+            skipped: false,
             health_status: HealthStatus::Unknown,
         });
         self.index = self.entries.len() - 1;
@@ -129,6 +133,7 @@ impl ClickTab {
                 stopped: false,
                 process_running: false,
                 pending: false,
+                skipped: false,
                 health_status: HealthStatus::Unknown,
             },
         );
@@ -228,7 +233,9 @@ impl ClickTab {
                 let name = e.display_name();
                 let is_selected = i == self.index;
 
-                let (dot, dot_style) = if e.pending {
+                let (dot, dot_style) = if e.skipped {
+                    ("⊘", Style::default().fg(theme.text_muted))
+                } else if e.pending {
                     ("◌", Style::default().fg(theme.status_300).bold())
                 } else if e.stopped {
                     ("○", Style::default().fg(theme.stopped))
@@ -249,6 +256,9 @@ impl ClickTab {
                 } else {
                     match e.kind {
                         TabKind::Terminal => Style::default().fg(theme.terminal),
+                        TabKind::Service if e.skipped => {
+                            Style::default().fg(theme.text_muted).dim()
+                        }
                         TabKind::Service if e.stopped => Style::default().fg(theme.stopped).dim(),
                         TabKind::Proxy if e.stopped => Style::default().fg(theme.stopped).dim(),
                         TabKind::Proxy => Style::default().fg(theme.proxy),
@@ -286,6 +296,9 @@ impl ClickTab {
 /// A short label for a row that is not simply "running healthy", so problems
 /// stand out at a glance. Healthy rows stay unlabelled.
 fn health_label(e: &TabEntry) -> Option<&'static str> {
+    if e.skipped {
+        return Some("skipped");
+    }
     if e.pending {
         // Waiting on a dependency is a startup phase, not a health reading.
         return Some("waiting");
@@ -400,6 +413,7 @@ mod tests {
             stopped: false,
             process_running: false,
             pending: false,
+            skipped: false,
             health_status: HealthStatus::Unknown,
         };
         assert_eq!(e.display_name(), "myservice");
@@ -413,6 +427,7 @@ mod tests {
             stopped: false,
             process_running: false,
             pending: false,
+            skipped: false,
             health_status: HealthStatus::Unknown,
         };
         assert_eq!(e.display_name(), "$ bash");
@@ -426,6 +441,7 @@ mod tests {
             stopped: false,
             process_running: false,
             pending: false,
+            skipped: false,
             health_status: HealthStatus::Unknown,
         };
         assert_eq!(e.display_name(), "▶ proxy");

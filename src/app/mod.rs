@@ -171,6 +171,9 @@ pub struct App {
     /// Whether `--no-share` was passed: when true shared/reuse services are
     /// always started fresh instead of borrowed/handed over.
     no_share: bool,
+    /// Services left out with `--without`. Reapplied by a worktree switch and
+    /// copied into the detach recipe so the opt-out survives.
+    without: Vec<String>,
     /// Whether `--verbose` was passed: gates informational setup output.
     verbose: bool,
     /// Set once a `d` detach has launched a detached successor; the run loop
@@ -217,6 +220,7 @@ pub struct AppCreateOpts {
     pub config_rel: PathBuf,
     pub save_logs: bool,
     pub no_share: bool,
+    pub without: Vec<String>,
     pub verbose: bool,
     /// Detach spawn recipe; `None` outside an interactive run.
     pub detach: Option<DetachSpawn>,
@@ -244,6 +248,7 @@ impl App {
             config_rel,
             save_logs,
             no_share,
+            without,
             verbose,
             detach,
             startup_messages,
@@ -300,6 +305,7 @@ impl App {
             content_layout: Vec::new(),
             switch_popup: None,
             no_share,
+            without,
             verbose,
             detaching: false,
             detach_pid: None,
@@ -449,6 +455,7 @@ mod tests {
             content_layout: Vec::new(),
             switch_popup: None,
             no_share: false,
+            without: Vec::new(),
             verbose: false,
             detaching: false,
             detach_pid: None,

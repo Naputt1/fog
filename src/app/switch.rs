@@ -227,6 +227,9 @@ impl App {
                 config_path.display()
             )));
         };
+        // Replay this run's `--without` against the target script. A service the
+        // target has since removed is ignored rather than aborting the switch.
+        let without = runtime::filter_without(script, &self.without);
         // Validate the dependency graph up front so a bad target script leaves
         // the current instance untouched instead of tearing it down first.
         let entries = script.service.clone().unwrap_or_default();
@@ -266,6 +269,7 @@ impl App {
             branch_for_ports.as_deref(),
             &mut port_map,
             self.no_share,
+            &without,
         );
         // Resolve `${ports.<name>@<repo>:<branch>[:<script>]}` against live
         // instances (cold-starting a `:script` target when needed) before
@@ -301,7 +305,7 @@ impl App {
             }
         }
         let title_branch = branch_for_ports.clone();
-        let built = match runtime::build_with_ports_no_share(
+        let built = match runtime::build_with_ports_skipping(
             script,
             &script_name,
             &config_dir,
@@ -315,6 +319,7 @@ impl App {
             self.no_share,
             false,
             &owned_shared,
+            &without,
         ) {
             Ok(b) => b,
             Err(e) => {
@@ -335,6 +340,8 @@ impl App {
         // The project identity is the repo's git-common-dir, shared by every
         // worktree, so `ipc_state.project` stays unchanged across switches.
         self.title_branch = title_branch;
+        self.without = without.into_iter().collect();
+        self.without.sort();
 
         // Tear down the old services and proxy now so their ports are free
         // before the new worktree's services start.

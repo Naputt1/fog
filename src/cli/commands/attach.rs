@@ -90,12 +90,17 @@ pub(crate) fn cmd_attach(cli: &Cli) -> io::Result<()> {
         );
     };
 
-    let mut attach_cli = Cli::parse_from([
+    let mut argv = vec![
         OsString::from("fog"),
         OsString::from(&status.script),
         OsString::from("--config"),
         OsString::from(&config_path),
-    ]);
+    ];
+    for service in status.services.iter().filter(|service| service.skipped) {
+        argv.push(OsString::from("--without"));
+        argv.push(OsString::from(&service.name));
+    }
+    let mut attach_cli = Cli::parse_from(argv);
     attach_cli.verbose = cli.verbose;
     attach_cli.save_logs = cli.save_logs;
 

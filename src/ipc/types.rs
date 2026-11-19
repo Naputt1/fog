@@ -34,6 +34,11 @@ pub struct ServiceStatus {
     /// unset so older readers are unaffected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shutdown_cmd: Option<String>,
+    /// Left out of this run with `--without`: no process, and `fog ls` /
+    /// `fog logs` / the index show it as skipped. Omitted when false so older
+    /// readers are unaffected.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub skipped: bool,
 }
 
 /// Allocated port map for an instance (symbolic name -> host port).

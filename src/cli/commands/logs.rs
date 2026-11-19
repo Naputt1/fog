@@ -25,7 +25,9 @@ fn log_service_rows(status: &ipc::StatusResponse, daemon_exists: bool) -> Vec<(S
         .services
         .iter()
         .map(|s| {
-            let state = if s.running {
+            let state = if s.skipped {
+                "skipped".to_string()
+            } else if s.running {
                 s.health.clone()
             } else {
                 ServiceState::Stopped.as_str().to_string()
@@ -464,6 +466,7 @@ mod tests {
             health: health.to_string(),
             endpoints: Vec::new(),
             shutdown_cmd: None,
+            skipped: false,
         }
     }
 

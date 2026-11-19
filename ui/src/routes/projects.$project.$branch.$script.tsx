@@ -457,7 +457,13 @@ function ScriptServicesPage() {
                         {svc.name}
                       </span>
                       <StatusBadge
-                        status={svc.running ? "running" : "stopped"}
+                        status={
+                          svc.skipped
+                            ? "skipped"
+                            : svc.running
+                              ? "running"
+                              : "stopped"
+                        }
                       />
                     </div>
                     {svc.service?.url ? (
@@ -531,7 +537,13 @@ function ScriptServicesPage() {
                               </TableCell>
                               <TableCell>
                                 <StatusBadge
-                                  status={svc.running ? "running" : "stopped"}
+                                  status={
+                                    svc.skipped
+                                      ? "skipped"
+                                      : svc.running
+                                        ? "running"
+                                        : "stopped"
+                                  }
                                 />
                               </TableCell>
                               <TableCell>

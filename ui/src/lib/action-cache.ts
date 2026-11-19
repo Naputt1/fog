@@ -28,12 +28,12 @@ export const KILL_GRACE_MS = 90_000;
  */
 export function optimisticServicePatch(
   action: ServiceAction
-): Pick<InstanceServiceStatus, "running" | "health"> {
+): Pick<InstanceServiceStatus, "running" | "health" | "skipped"> {
   switch (action) {
     case "start":
-      return { running: true, health: "starting" };
+      return { running: true, health: "starting", skipped: false };
     case "restart":
-      return { running: true, health: "starting" };
+      return { running: true, health: "starting", skipped: false };
     case "stop":
       return { running: false, health: null };
   }

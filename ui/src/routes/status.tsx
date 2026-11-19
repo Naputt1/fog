@@ -94,10 +94,22 @@ function ServiceTable({
                   <Endpoints svc={svc} />
                 </TableCell>
                 <TableCell>
-                  <StatusBadge status={svc.running ? "running" : "stopped"} />
+                  <StatusBadge
+                    status={
+                      svc.skipped
+                        ? "skipped"
+                        : svc.running
+                          ? "running"
+                          : "stopped"
+                    }
+                  />
                 </TableCell>
                 <TableCell>
-                  <HealthBadge health={svc.health} />
+                  {svc.skipped ? (
+                    <span className="text-muted-foreground">—</span>
+                  ) : (
+                    <HealthBadge health={svc.health} />
+                  )}
                 </TableCell>
                 <TableCell className="text-right">
                   <div className="flex justify-end">
@@ -121,11 +133,19 @@ function ServiceTable({
           <div key={svc.name} className="border-border rounded-lg border p-3">
             <div className="flex items-center justify-between gap-2">
               <span className="font-mono text-sm font-medium">{svc.name}</span>
-              <StatusBadge status={svc.running ? "running" : "stopped"} />
+              <StatusBadge
+                status={
+                  svc.skipped ? "skipped" : svc.running ? "running" : "stopped"
+                }
+              />
             </div>
             <Endpoints svc={svc} />
             <div className="mt-2">
-              <HealthBadge health={svc.health} />
+              {svc.skipped ? (
+                <span className="text-muted-foreground">—</span>
+              ) : (
+                <HealthBadge health={svc.health} />
+              )}
             </div>
             <div className="mt-3 border-t pt-3">
               <ServiceActions
