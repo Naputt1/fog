@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { ChevronRight, GitBranch, Plus, Terminal } from "lucide-react";
+import { ChevronRight, GitBranch, Plus, Skull, Terminal } from "lucide-react";
 
 import { useServices, useStatus } from "@/lib/hooks";
 import {
@@ -23,6 +23,7 @@ import { PageHeader } from "@/components/page-state";
 import { InstanceKillButton } from "@/components/instance-kill-button";
 import { InstanceKillingBadge } from "@/components/instance-killing-badge";
 import { LaunchPopup } from "@/components/launch-instance";
+import { KillInstancesPopup } from "@/components/kill-instances";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
@@ -260,11 +261,13 @@ function BranchesPage() {
 
   // Another instance of this project, started from here.
   const [launchOpen, setLaunchOpen] = useState(false);
+  const [killOpen, setKillOpen] = useState(false);
 
   const needle = project.toLowerCase();
   const projectBuckets = groupByBranch(
     buildInstanceViews(status?.instances ?? [], services ?? [])
   ).filter((b) => b.project.toLowerCase() === needle);
+  const projectInstances = projectBuckets.flatMap((b) => b.instances);
 
   // Fallback to the docker directory when no instance reports this project
   // (e.g. the index server could not query the IPC sockets).
@@ -290,10 +293,22 @@ function BranchesPage() {
       <PageHeader
         title={project}
         actions={
-          <Button size="sm" onClick={() => setLaunchOpen(true)}>
-            <Plus aria-hidden />
-            Start instance
-          </Button>
+          <>
+            {projectInstances.length > 0 ? (
+              <Button
+                variant="destructiveOutline"
+                size="sm"
+                onClick={() => setKillOpen(true)}
+              >
+                <Skull aria-hidden />
+                Kill instances
+              </Button>
+            ) : null}
+            <Button size="sm" onClick={() => setLaunchOpen(true)}>
+              <Plus aria-hidden />
+              Start instance
+            </Button>
+          </>
         }
       />
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -310,6 +325,12 @@ function BranchesPage() {
             ))}
       </div>
       {launchPopup}
+      <KillInstancesPopup
+        open={killOpen}
+        onOpenChange={setKillOpen}
+        project={project}
+        instances={projectInstances}
+      />
     </div>
   );
 }

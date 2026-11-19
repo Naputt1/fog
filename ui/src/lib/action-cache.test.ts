@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { StatusSnapshot } from "@/lib/api";
 import {
+  activeKillPids,
   applyServiceAction,
   isInstanceKilling,
   KILL_GRACE_MS,
@@ -142,5 +143,48 @@ describe("isInstanceKilling", () => {
     expect(
       isInstanceKilling([intent({ script: undefined })], 1, "dev", now)
     ).toBe(true);
+  });
+});
+
+describe("activeKillPids", () => {
+  const now = 1_000_000;
+  const intent = (over: Partial<KillIntentState>): KillIntentState => ({
+    pid: 1,
+    script: "dev",
+    status: "pending",
+    submittedAt: now,
+    ...over,
+  });
+
+  it("returns every pid with an in-flight or successful kill", () => {
+    expect(
+      activeKillPids(
+        [
+          intent({ pid: 1, status: "pending" }),
+          intent({ pid: 2, status: "success" }),
+          intent({ pid: 3, status: "error" }),
+          intent({ pid: 4, status: "idle" }),
+        ],
+        now
+      )
+    ).toEqual(new Set([1, 2]));
+  });
+
+  it("drops expired kills and intents without a pid", () => {
+    expect(
+      activeKillPids(
+        [
+          intent({ pid: 1, submittedAt: now - KILL_GRACE_MS }),
+          intent({ pid: undefined }),
+        ],
+        now
+      )
+    ).toEqual(new Set());
+  });
+
+  it("deduplicates pids with more than one intent", () => {
+    expect(
+      activeKillPids([intent({ pid: 1 }), intent({ pid: 1 })], now)
+    ).toEqual(new Set([1]));
   });
 });

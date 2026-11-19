@@ -96,3 +96,24 @@ export function isInstanceKilling(
       now - intent.submittedAt < KILL_GRACE_MS
   );
 }
+
+/**
+ * Every pid with a kill that was requested and not failed, within
+ * {@link KILL_GRACE_MS}. Bulk controls use it to leave instances that are
+ * already shutting down out of their selection.
+ */
+export function activeKillPids(
+  intents: readonly KillIntentState[],
+  now: number = Date.now()
+): Set<number> {
+  const pids = new Set<number>();
+  for (const intent of intents) {
+    if (
+      intent.pid != null &&
+      isInstanceKilling([intent], intent.pid, intent.script, now)
+    ) {
+      pids.add(intent.pid);
+    }
+  }
+  return pids;
+}
