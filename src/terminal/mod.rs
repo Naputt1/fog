@@ -602,8 +602,8 @@ impl Terminal {
         }
     }
 
-    /// A service left out with `--without`: no process, no health checks, but a
-    /// real tab so it can be started manually.
+    /// A service left out with `--without`: no process and no health polling,
+    /// but a real tab so it can be started manually.
     pub fn spawn_skipped(name: String, path: String, cmd: String, scrollback: usize) -> Self {
         let message = skip_notice(&name);
         let parser = Arc::new(Mutex::new(vt100::Parser::new(
@@ -1427,12 +1427,24 @@ impl Terminal {
             self.reused = false;
         }
         self.reused_since = None;
+        self.set_health_status(HealthStatus::Unknown);
+        if let Err(e) = self.spawn_into(&path, &cmd) {
+            // Clear any partially spawned child. Keep `skipped` set when this
+            // was a skipped service: the spawn failed, so this instance still
+            // owns no process and must not run its shutdown command.
+            self.kill_inner();
+            self.stopped = true;
+            self.process_running = false;
+            if was_skipped {
+                self.skipped = true;
+                self.set_health_status(HealthStatus::Unknown);
+            }
+            return Err(e);
+        }
         self.skipped = false;
         self.stopped = false;
-        self.set_health_status(HealthStatus::Unknown);
-        self.spawn_into(&path, &cmd)?;
+        self.process_running = true;
         if was_skipped {
-            self.probe_health();
             self.start_health_checks();
             self.start_endpoint_health_checks();
         }
@@ -1864,6 +1876,34 @@ mod tests {
         assert!(t.is_ready());
         t.refresh_status();
         assert!(!t.stopped);
+    }
+
+    #[test]
+    fn test_failed_restart_of_skipped_service_stays_skipped() {
+        let dir = std::env::temp_dir().join(format!("fog-test-skip-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("shutdown-ran");
+        let mut t = Terminal::spawn_skipped(
+            "db".into(),
+            dir.to_string_lossy().into_owned(),
+            "true".into(),
+            100,
+        );
+        // A NUL in an env key makes PTY spawn fail deterministically, after
+        // the point where the old code had already cleared `skipped`.
+        t.injected_env
+            .insert("FOG_BAD\0KEY".to_string(), "x".to_string());
+        t.shutdown_cmd = Some(format!("touch {}", marker.display()));
+
+        assert!(t.restart().is_err(), "spawning in a missing dir must fail");
+        assert!(t.skipped, "a failed start must not claim ownership");
+        assert!(!t.process_running);
+        t.teardown();
+        assert!(
+            !marker.exists(),
+            "a service this run never started must not be shut down"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

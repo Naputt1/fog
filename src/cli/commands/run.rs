@@ -82,6 +82,10 @@ pub(crate) fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>)
     // A `d` detach re-executes this process with `FOG_DETACH_FROM=<pid>` set:
     // the child is a headless takeover that adopts the named instance's live
     // services via handoff.
+    // A detach successor replays the skip set from the process it takes over;
+    // the config may have changed since, so those names are filtered instead
+    // of failing the takeover.
+    let replay_without = std::env::var_os("FOG_DETACH_FROM").is_some();
     let takeover_from = takeover_pid.or_else(|| {
         std::env::var("FOG_DETACH_FROM")
             .ok()
@@ -128,8 +132,17 @@ pub(crate) fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>)
     };
     // Validate `--without` before any setup side effect (dnsmasq, router,
     // ports, reclaim), so a typo cannot start half a stack.
-    let without = crate::runtime::resolve_without(script, &cli.without)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
+    let without = if replay_without {
+        crate::runtime::filter_without(script, &cli.without)
+    } else {
+        match crate::runtime::resolve_without(script, &cli.without) {
+            Ok(names) => names,
+            Err(e) => crate::cli::usage_error(
+                e,
+                "pass an effective service name, e.g. `fog dev --without worker`",
+            ),
+        }
+    };
 
     // Setup diagnostics are collected rather than printed immediately: in
     // interactive mode the TUI takes the screen moments later, so warnings are
@@ -645,10 +658,9 @@ pub(crate) fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>)
         if cli.verbose {
             args.push(OsString::from("--verbose"));
         }
-        for service in &without {
-            args.push(OsString::from("--without"));
-            args.push(OsString::from(service));
-        }
+        // The skip set is derived from the live skipped tabs when detach is
+        // requested, so a manually started service is not re-skipped in the
+        // successor.
         Some(crate::app::DetachSpawn::new(exe, args, std::process::id()))
     };
 

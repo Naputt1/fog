@@ -282,11 +282,7 @@ pub fn adopt_shared_ports(
                 .to_string_lossy()
                 .into_owned()
         });
-        // A skipped service is not ours to run, so borrowing a sibling's ports
-        // for it would point dependents (and routes) at the wrong resource.
-        if without.contains(&name) {
-            continue;
-        }
+        let skipped = without.contains(&name);
         // Scan the *raw* entry: templates name the symbolic ports to adopt.
         let names = crate::ports::entry_referenced_ports(entry);
         if names.is_empty() {
@@ -301,7 +297,13 @@ pub fn adopt_shared_ports(
                         ports.insert(n.clone(), *port);
                     }
                 }
-                owned.insert(name);
+                // A skipped shared service still lends its live ports to kept
+                // dependents (`${ports.db}`); only its process is skipped. It
+                // is not marked owned, so the runtime never treats the
+                // service itself as borrowed.
+                if !skipped {
+                    owned.insert(name);
+                }
                 break;
             }
         }
@@ -538,7 +540,15 @@ pub fn script_service_names(script: &ScriptConfig) -> Vec<String> {
 pub fn resolve_without(script: &ScriptConfig, requested: &[String]) -> FogResult<HashSet<String>> {
     let names = script_service_names(script);
     let known: HashSet<&str> = names.iter().map(String::as_str).collect();
-    let unknown: Vec<&str> = requested
+    // `--without db,` yields an empty token from clap's delimiter parser;
+    // ignore empty/whitespace-only entries and trim the rest.
+    let normalized: Vec<String> = requested
+        .iter()
+        .map(|name| name.trim())
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .collect();
+    let unknown: Vec<&str> = normalized
         .iter()
         .map(String::as_str)
         .filter(|name| !known.contains(name))
@@ -554,7 +564,7 @@ pub fn resolve_without(script: &ScriptConfig, requested: &[String]) -> FogResult
             unknown.join(", ")
         )));
     }
-    Ok(requested.iter().cloned().collect())
+    Ok(normalized.into_iter().collect())
 }
 
 /// Drops names absent from `script` instead of failing. Used when replaying a
@@ -564,8 +574,9 @@ pub fn filter_without(script: &ScriptConfig, requested: &[String]) -> HashSet<St
     let known: HashSet<String> = script_service_names(script).into_iter().collect();
     requested
         .iter()
-        .filter(|name| known.contains(*name))
-        .cloned()
+        .map(|name| name.trim())
+        .filter(|name| !name.is_empty() && known.contains(*name))
+        .map(str::to_string)
         .collect()
 }
 
@@ -807,14 +818,18 @@ pub fn build_with_opts(opts: BuildOpts) -> FogResult<Runtime> {
         let Some(deps) = entry.depends_on.take() else {
             continue;
         };
+        let dependent = crate::config::effective_name(entry);
+        let dependent_skipped = without.contains(&dependent);
         let mut kept = Vec::with_capacity(deps.len());
         for dep in deps {
             if without.contains(&dep) {
-                drop_warnings.push(format!(
-                    "service '{}' depends on '{}', which is skipped; starting it without waiting for it",
-                    crate::config::effective_name(entry),
-                    dep
-                ));
+                // A skipped dependent never starts, so the dropped edge is
+                // not worth a warning that claims it will.
+                if !dependent_skipped {
+                    drop_warnings.push(format!(
+                        "service '{dependent}' depends on '{dep}', which is skipped; starting it without waiting for it"
+                    ));
+                }
             } else {
                 kept.push(dep);
             }
@@ -1243,6 +1258,10 @@ mod tests {
         .unwrap();
         assert_eq!(skipped.len(), 2);
         assert!(skipped.contains("db") && skipped.contains("api"));
+
+        // Empty tokens from a trailing comma must not become names.
+        let skipped = resolve_without(&script, &[" db ".to_string(), String::new()]).unwrap();
+        assert_eq!(skipped.into_iter().collect::<Vec<_>>(), vec!["db"]);
     }
 
     #[test]
@@ -1543,7 +1562,6 @@ mod tests {
             &HashSet::new(),
         );
 
-        let _ = std::fs::remove_file(&sibling);
         assert_eq!(
             ports["db"], 55555,
             "a borrowed shared service must adopt the owner's live port"
@@ -1551,6 +1569,30 @@ mod tests {
         assert!(
             owned.contains("db"),
             "the owner's shared service is reported as sibling-owned"
+        );
+
+        // A skipped shared service still lends its port to kept dependents,
+        // but is not reported as owned/borrowed by this instance.
+        ports.insert("db".to_string(), 12345);
+        let without: HashSet<String> = ["db".to_string()].into();
+        let owned = adopt_shared_ports(
+            &script,
+            "dev",
+            Path::new("."),
+            Some(&project),
+            Some("mine"),
+            &mut ports,
+            false,
+            &without,
+        );
+        let _ = std::fs::remove_file(&sibling);
+        assert_eq!(
+            ports["db"], 55555,
+            "a skipped shared service must still lend its live port"
+        );
+        assert!(
+            !owned.contains("db"),
+            "a skipped service must not be borrowed as a process"
         );
     }
 

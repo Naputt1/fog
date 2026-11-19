@@ -286,7 +286,7 @@ fn fail(error: impl Into<FogError>) -> ! {
 }
 
 /// Bad or conflicting flags: exits with clap's usage exit code.
-fn usage_error(message: impl Into<FogError>, hint: &str) -> ! {
+pub(crate) fn usage_error(message: impl Into<FogError>, hint: &str) -> ! {
     die(message, Some(hint), 2)
 }
 
@@ -407,6 +407,20 @@ pub fn run() -> io::Result<()> {
         usage_error(
             "--port only applies when running a script",
             "e.g. `fog dev --port api=4000`",
+        );
+    }
+
+    // `--without` only applies when running a script. `fog restart` forwards
+    // the names to the replacement instance; no other built-in uses them.
+    if !cli.without.is_empty()
+        && cli
+            .script
+            .as_deref()
+            .is_none_or(|name| is_builtin(name) && name != "restart")
+    {
+        usage_error(
+            "--without only applies when running a script or to `fog restart`",
+            "e.g. `fog dev --without worker`",
         );
     }
 

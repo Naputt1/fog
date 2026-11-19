@@ -90,15 +90,46 @@ pub(crate) fn cmd_attach(cli: &Cli) -> io::Result<()> {
         );
     };
 
+    let config = crate::config::load(Path::new(&config_path)).unwrap_or_else(|e| {
+        die(
+            &format!("cannot attach to instance {pid}: {e}"),
+            Some("the target's config changed; restart it with a current fog build"),
+            1,
+        )
+    });
+    let Some(target_script) = config.scripts.get(&status.script) else {
+        die(
+            &format!(
+                "cannot attach to instance {pid}: script '{}' is no longer in '{config_path}'",
+                status.script
+            ),
+            Some("restore the script, or restart the instance"),
+            1,
+        );
+    };
+    // Replayed opt-outs are filtered against the current config: removing a
+    // skipped service from fog.json must not make the healthy instance
+    // impossible to attach to.
+    let replayed: Vec<String> = status
+        .services
+        .iter()
+        .filter(|service| service.skipped)
+        .map(|service| service.name.clone())
+        .collect();
+    let mut without: Vec<String> = crate::runtime::filter_without(target_script, &replayed)
+        .into_iter()
+        .collect();
+    without.sort();
+
     let mut argv = vec![
         OsString::from("fog"),
         OsString::from(&status.script),
         OsString::from("--config"),
         OsString::from(&config_path),
     ];
-    for service in status.services.iter().filter(|service| service.skipped) {
+    for name in without {
         argv.push(OsString::from("--without"));
-        argv.push(OsString::from(&service.name));
+        argv.push(OsString::from(name));
     }
     let mut attach_cli = Cli::parse_from(argv);
     attach_cli.verbose = cli.verbose;

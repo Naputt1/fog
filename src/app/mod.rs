@@ -114,11 +114,25 @@ impl DetachSpawn {
         }
     }
 
+    /// Arguments for the successor, including the current skip set.
+    ///
+    /// `without` is the set of currently skipped services (not the startup
+    /// set): a service started manually during this run must not be skipped
+    /// again by the successor.
+    fn successor_args(&self, without: &[String]) -> Vec<std::ffi::OsString> {
+        let mut args = self.args.clone();
+        for name in without {
+            args.push("--without".into());
+            args.push(name.into());
+        }
+        args
+    }
+
     /// Launches the detached successor and returns its pid.
-    fn spawn(&self) -> std::io::Result<u32> {
+    fn spawn(&self, without: &[String]) -> std::io::Result<u32> {
         let mut cmd = std::process::Command::new(&self.exe);
-        cmd.args(&self.args)
-            .env("FOG_DAEMON_CHILD", "1")
+        cmd.args(self.successor_args(without));
+        cmd.env("FOG_DAEMON_CHILD", "1")
             .env("FOG_DETACH_FROM", self.from_pid.to_string())
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
@@ -344,7 +358,13 @@ impl App {
             self.note_error("detach is unavailable in this run".to_string());
             return;
         };
-        match spawn.spawn() {
+        let without: Vec<String> = self
+            .items
+            .iter()
+            .filter(|item| item.skipped)
+            .map(|item| item.name.clone())
+            .collect();
+        match spawn.spawn(&without) {
             Ok(pid) => {
                 self.detach_pid = Some(pid);
                 self.detaching = true;
@@ -1052,5 +1072,35 @@ mod tests {
         // `x` still closes the current shell tab.
         app.handle_normal_key(KeyEvent::from(KeyCode::Char('x')));
         assert_eq!(app.items.len(), 1);
+    }
+
+    #[test]
+    fn detach_successor_args_use_the_current_skip_set() {
+        let spawn = DetachSpawn::new(
+            std::path::PathBuf::from("fog"),
+            vec!["dev".into(), "--config".into(), "fog.json".into()],
+            42,
+        );
+        assert_eq!(
+            spawn.successor_args(&["db".to_string(), "worker".to_string()]),
+            vec![
+                std::ffi::OsString::from("dev"),
+                std::ffi::OsString::from("--config"),
+                std::ffi::OsString::from("fog.json"),
+                std::ffi::OsString::from("--without"),
+                std::ffi::OsString::from("db"),
+                std::ffi::OsString::from("--without"),
+                std::ffi::OsString::from("worker"),
+            ]
+        );
+        assert_eq!(
+            spawn.successor_args(&[]),
+            vec![
+                std::ffi::OsString::from("dev"),
+                std::ffi::OsString::from("--config"),
+                std::ffi::OsString::from("fog.json"),
+            ],
+            "a manually started service is no longer skipped"
+        );
     }
 }

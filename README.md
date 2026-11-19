@@ -206,7 +206,7 @@ instance), `2` a usage error (bad flag, unknown script).
 | `-v`, `--verbose`        | Print informational setup output (DNS, router, index, ports, native routes); warnings always print              |
 | `--completions <SHELL>`  | Print bash/zsh/fish completions                                                                                 |
 
-`fog ls` prints one row per instance — `pid script project branch started-by proxy` — with a `service`/`status` sub-table beneath each (`healthy`, `starting`, `unhealthy`, `unknown`, or `stopped`). `started-by` names the parent that auto-started an instance for a cross-instance port reference, so a cold-started stack is visible rather than orphaned; `fog kill <parent>` warns about such instances and `--with-dependents` stops them too.
+`fog ls` prints one row per instance — `pid script project branch started-by proxy` — with a `service`/`status` sub-table beneath each (`healthy`, `starting`, `unhealthy`, `unknown`, `skipped`, or `stopped`). `started-by` names the parent that auto-started an instance for a cross-instance port reference, so a cold-started stack is visible rather than orphaned; `fog kill <parent>` warns about such instances and `--with-dependents` stops them too.
 
 Each instance exposes a Unix socket at `$TMPDIR/fog-<pid>.sock`. `fog ls` and `fog kill` discover it there. Pass a PID when multiple instances run.
 

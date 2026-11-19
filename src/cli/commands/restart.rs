@@ -26,6 +26,19 @@ pub(crate) fn cmd_restart(pid: Option<u32>, all: bool, cli: &Cli) -> io::Result<
     }
 
     let targets = resolve_targets(&instances, pid, all, cli, "restart");
+
+    // Plan every restart before stopping anything: a typo in `--without`, a
+    // missing script, or an unreadable config must not take down a target
+    // that cannot be replaced. This also makes `--all` all-or-nothing.
+    struct RestartPlan {
+        pid: u32,
+        path: PathBuf,
+        script: String,
+        branch: Option<String>,
+        config_path: PathBuf,
+        without: Vec<String>,
+    }
+    let mut plans = Vec::with_capacity(targets.len());
     for (target_pid, path) in &targets {
         let target_pid = *target_pid;
         // Capture the target's status before killing so we can relaunch it.
@@ -37,26 +50,86 @@ pub(crate) fn cmd_restart(pid: Option<u32>, all: bool, cli: &Cli) -> io::Result<
             )
         });
         let script = status.script.clone();
-        let config_dir = status.config_dir.clone();
-        let branch = status.branch.clone();
-        // Restart preserves the target's opt-outs, plus any additional
-        // `--without` the user passed to `fog restart`.
-        let mut without: Vec<String> = status
+        let config_path = restart_config_path(
+            status.config_path.as_deref(),
+            status.config_dir.as_deref(),
+            cli,
+        );
+        let config = crate::config::load(&config_path).unwrap_or_else(|e| {
+            die(
+                &format!("cannot restart instance {target_pid}: {e}"),
+                Some("fix the target's config; nothing was stopped"),
+                1,
+            )
+        });
+        let issues = config.validate();
+        if !issues.is_empty() {
+            die(
+                &format!(
+                    "cannot restart instance {target_pid}: '{}' has {} problem{}: {}",
+                    config_path.display(),
+                    issues.len(),
+                    if issues.len() == 1 { "" } else { "s" },
+                    issues[0]
+                ),
+                Some("fix the config; nothing was stopped"),
+                1,
+            );
+        }
+        let Some(target_script) = config.scripts.get(&script) else {
+            die(
+                &format!(
+                    "cannot restart instance {target_pid}: script '{script}' is no longer in '{}'",
+                    config_path.display()
+                ),
+                Some("restore the script; nothing was stopped"),
+                1,
+            );
+        };
+        // Replayed opt-outs are filtered because the config may have changed;
+        // names passed to this command are strict so a typo is caught.
+        let replayed: Vec<String> = status
             .services
             .iter()
             .filter(|service| service.skipped)
             .map(|service| service.name.clone())
             .collect();
-        for name in &cli.without {
-            if !without.contains(name) {
-                without.push(name.clone());
+        let mut without = crate::runtime::filter_without(target_script, &replayed);
+        match crate::runtime::resolve_without(target_script, &cli.without) {
+            Ok(names) => without.extend(names),
+            Err(e) => {
+                die(
+                    e,
+                    Some("pass an effective service name; nothing was stopped"),
+                    2,
+                );
             }
         }
+        let mut without: Vec<String> = without.into_iter().collect();
+        without.sort();
+        plans.push(RestartPlan {
+            pid: target_pid,
+            path: path.clone(),
+            script,
+            branch: status.branch,
+            config_path,
+            without,
+        });
+    }
 
+    for plan in plans {
+        let RestartPlan {
+            pid: target_pid,
+            path,
+            script,
+            branch,
+            config_path,
+            without,
+        } = plan;
         // Wait for the old instance to fully exit before relaunching to avoid
         // port conflicts and owner-lock races. `--force` escalates to SIGKILL
         // so a wedged instance does not block the restart.
-        if stop_instance(target_pid, path, cli.force, false, &mut stdout()) {
+        if stop_instance(target_pid, &path, cli.force, false, &mut stdout()) {
             println!("stopped fog instance {target_pid} (script '{script}')");
         } else {
             eprintln!(
@@ -64,20 +137,7 @@ pub(crate) fn cmd_restart(pid: Option<u32>, all: bool, cli: &Cli) -> io::Result<
             );
         }
         // Extra grace for socket file removal.
-        wait_for_socket_gone(path);
-
-        // Resolve config path for the relaunch. Prefer the killed instance's
-        // config_dir (worktree-accurate), fall back to cli --config.
-        let config_path = if let Some(dir) = config_dir {
-            let p = PathBuf::from(&dir).join("fog.json");
-            if p.exists() {
-                p
-            } else {
-                resolve_config_path(&resolve_run_config(cli))
-            }
-        } else {
-            resolve_config_path(&resolve_run_config(cli))
-        };
+        wait_for_socket_gone(&path);
 
         // Spawn a detached instance with the same script. The config_path already
         // points at the correct worktree's fog.json, so no --branch is needed
@@ -91,6 +151,25 @@ pub(crate) fn cmd_restart(pid: Option<u32>, all: bool, cli: &Cli) -> io::Result<
         println!("  logs:   fog logs {new_pid}");
     }
     Ok(())
+}
+
+/// Config path for a restart: prefer the target instance's config file (or its
+/// config directory for older status payloads), fall back to the command's
+/// `--config`.
+fn restart_config_path(config_path: Option<&str>, config_dir: Option<&str>, cli: &Cli) -> PathBuf {
+    if let Some(path) = config_path {
+        let p = PathBuf::from(path);
+        if p.exists() {
+            return p;
+        }
+    }
+    if let Some(dir) = config_dir {
+        let p = PathBuf::from(dir).join("fog.json");
+        if p.exists() {
+            return p;
+        }
+    }
+    resolve_config_path(&resolve_run_config(cli))
 }
 
 /// Spawns a `fog <script>` detached instance for restart, mirroring
