@@ -348,8 +348,6 @@ impl App {
         // The project identity is the repo's git-common-dir, shared by every
         // worktree, so `ipc_state.project` stays unchanged across switches.
         self.title_branch = title_branch;
-        self.without = without.into_iter().collect();
-        self.without.sort();
 
         // Tear down the old services and proxy now so their ports are free
         // before the new worktree's services start.

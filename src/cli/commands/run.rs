@@ -680,7 +680,6 @@ pub(crate) fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>)
         config_rel: cli.config.clone(),
         save_logs: cli.save_logs,
         no_share: cli.no_share,
-        without: without.iter().cloned().collect(),
         verbose: cli.verbose,
         detach,
         startup_messages: startup_warnings,
