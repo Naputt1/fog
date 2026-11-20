@@ -202,6 +202,13 @@ pub(crate) fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>)
         startup_messages.extend(crate::index::ensure_for_config(&config));
     }
 
+    // Keep the config path logical (absolute but with symlinks unresolved): a
+    // symlinked `fog.json` must retain the identity of the worktree that holds
+    // the link, not the link target's directory. The daemon also re-execs with
+    // this path via `--config`, so it must not be canonicalized either.
+    let config_path = std::path::absolute(&config_path).unwrap_or(config_path);
+    let config_dir = crate::project::config_dir(&config_path);
+
     // Every start — TUI, daemon or worktree switch — keeps the project in the
     // index's "known project" list after it stops. Only launchable configs
     // (those with a `fog.json`) are remembered: the picker launches via that

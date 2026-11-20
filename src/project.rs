@@ -77,6 +77,21 @@ pub fn display_name(project: &str) -> String {
     }
 }
 
+/// Returns the project directory implied by a config path.
+///
+/// The config location is intentionally kept logical: a management tool may
+/// symlink `fog.json` into a worktree while the real file lives elsewhere, and
+/// git lookups, identity, and service `path: "."` must use the worktree that
+/// contains the link, not the link's target. The path is therefore made
+/// absolute lexically instead of being canonicalized.
+pub fn config_dir(config_path: &Path) -> PathBuf {
+    let absolute = std::path::absolute(config_path).unwrap_or_else(|_| config_path.to_path_buf());
+    absolute
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
 /// Returns the main working-tree root of the git repository containing `dir`,
 /// regardless of which worktree `dir` is checked out in.
 ///
@@ -307,6 +322,31 @@ mod tests {
                 .ok()
                 .map(|c| c.to_string_lossy().into_owned())
         );
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_config_dir_keeps_symlink_parent() {
+        use std::os::unix::fs::symlink;
+
+        let base = std::env::temp_dir().join(format!("fog-config-dir-test-{}", std::process::id()));
+        let worktree = base.join("worktree");
+        let overlay = base.join("overlay");
+        fs::create_dir_all(&worktree).unwrap();
+        fs::create_dir_all(&overlay).unwrap();
+
+        // A management tool overlays `fog.json` into the worktree as a symlink.
+        let target = overlay.join("fog.json");
+        fs::write(&target, "{}").unwrap();
+        let link = worktree.join("fog.json");
+        symlink(&target, &link).unwrap();
+
+        // The project directory must be the worktree holding the link, not the
+        // target's directory: git, identity, and `path: "."` all use it.
+        assert_eq!(config_dir(&link), worktree);
+        assert_ne!(config_dir(&link), overlay);
 
         let _ = fs::remove_dir_all(&base);
     }

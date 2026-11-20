@@ -243,11 +243,10 @@ impl App {
         if let Err(e) = runtime::resolve_dep_order(&entries) {
             return Err(FogError::new(format!("switch worktree: {e}")));
         }
-        let config_path = config_path.canonicalize().unwrap_or(config_path);
-        let config_dir = config_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .to_path_buf();
+        // Same logical-path rule as `run`: the worktree containing the config
+        // link is the project root, not the symlink target's directory.
+        let config_path = std::path::absolute(&config_path).unwrap_or(config_path);
+        let config_dir = crate::project::config_dir(&config_path);
         let without = runtime::filter_without(script, &config_dir, &current);
         // Carry the current forced-share set into the target, dropping names it
         // no longer defines. A stale name would otherwise reach a detach
@@ -285,7 +284,6 @@ impl App {
                 }
             }
         }
-
         // Allocate ports and validate before tearing down the current instance,
         // so a failure leaves the running services untouched.
         let branch_for_ports = runtime::resolve_branch(&config_dir);
