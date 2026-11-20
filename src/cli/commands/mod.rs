@@ -247,6 +247,7 @@ pub(crate) fn test_status(
         ports: Default::default(),
         native_routes: Vec::new(),
         no_share: false,
+        forced_share: Vec::new(),
         autostarted_by: None,
         autostarted_by_label: None,
         started: true,

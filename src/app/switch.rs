@@ -237,7 +237,6 @@ impl App {
             .filter(|item| item.skipped)
             .map(|item| item.name.clone())
             .collect();
-        let without = runtime::filter_without(script, &current);
         // Validate the dependency graph up front so a bad target script leaves
         // the current instance untouched instead of tearing it down first.
         let entries = script.service.clone().unwrap_or_default();
@@ -249,6 +248,7 @@ impl App {
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
+        let without = runtime::filter_without(script, &config_dir, &current);
 
         // Allocate ports and validate before tearing down the current instance,
         // so a failure leaves the running services untouched.
@@ -276,7 +276,7 @@ impl App {
             self.ipc_state.project.as_deref(),
             branch_for_ports.as_deref(),
             &mut port_map,
-            self.no_share,
+            &self.share,
             &without,
         );
         // Resolve `${ports.<name>@<repo>:<branch>[:<script>]}` against live
@@ -301,7 +301,7 @@ impl App {
         // Build the new runtime *before* tearing down the old one, so a
         // build failure doesn't leave the UI empty.
         let mut adopted: HashMap<String, ipc::HandoffItem> = HashMap::new();
-        if !self.no_share {
+        if !self.share.no_share {
             for item in &mut self.items {
                 if item.reused || item.shared {
                     if let Some(handoff) = item.extract_handoff() {
@@ -313,7 +313,7 @@ impl App {
             }
         }
         let title_branch = branch_for_ports.clone();
-        let built = match runtime::build_with_ports_skipping(
+        let built = match runtime::build_with_share_policy(
             script,
             &script_name,
             &config_dir,
@@ -324,7 +324,7 @@ impl App {
             &mut adopted,
             &port_map,
             branch_for_ports.clone(),
-            self.no_share,
+            self.share.clone(),
             false,
             &owned_shared,
             &without,

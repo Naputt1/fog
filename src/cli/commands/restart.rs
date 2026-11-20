@@ -37,6 +37,7 @@ pub(crate) fn cmd_restart(pid: Option<u32>, all: bool, cli: &Cli) -> io::Result<
         branch: Option<String>,
         config_path: PathBuf,
         without: Vec<String>,
+        forced_share: Vec<String>,
     }
     let mut plans = Vec::with_capacity(targets.len());
     for (target_pid, path) in &targets {
@@ -88,14 +89,15 @@ pub(crate) fn cmd_restart(pid: Option<u32>, all: bool, cli: &Cli) -> io::Result<
         };
         // Replayed opt-outs are filtered because the config may have changed;
         // names passed to this command are strict so a typo is caught.
+        let config_dir = config_path.parent().unwrap_or_else(|| Path::new("."));
         let replayed: Vec<String> = status
             .services
             .iter()
             .filter(|service| service.skipped)
             .map(|service| service.name.clone())
             .collect();
-        let mut without = crate::runtime::filter_without(target_script, &replayed);
-        match crate::runtime::resolve_without(target_script, &cli.without) {
+        let mut without = crate::runtime::filter_without(target_script, config_dir, &replayed);
+        match crate::runtime::resolve_without(target_script, config_dir, &cli.without) {
             Ok(names) => without.extend(names),
             Err(e) => {
                 die(
@@ -114,6 +116,7 @@ pub(crate) fn cmd_restart(pid: Option<u32>, all: bool, cli: &Cli) -> io::Result<
             branch: status.branch,
             config_path,
             without,
+            forced_share: status.forced_share,
         });
     }
 
@@ -125,6 +128,7 @@ pub(crate) fn cmd_restart(pid: Option<u32>, all: bool, cli: &Cli) -> io::Result<
             branch,
             config_path,
             without,
+            forced_share,
         } = plan;
         // Wait for the old instance to fully exit before relaunching to avoid
         // port conflicts and owner-lock races. `--force` escalates to SIGKILL
@@ -142,7 +146,8 @@ pub(crate) fn cmd_restart(pid: Option<u32>, all: bool, cli: &Cli) -> io::Result<
         // Spawn a detached instance with the same script. The config_path already
         // points at the correct worktree's fog.json, so no --branch is needed
         // (branch is inferred from the worktree containing config_dir).
-        let new_pid = spawn_instance_detached(&config_path, &script, None, &without)?;
+        let new_pid =
+            spawn_instance_detached(&config_path, &script, None, &without, &forced_share)?;
         println!("restarted fog '{script}' (old pid {target_pid} → new pid {new_pid})");
         if let Some(b) = branch {
             println!("  branch: {b}");
@@ -173,18 +178,30 @@ fn restart_config_path(config_path: Option<&str>, config_dir: Option<&str>, cli:
 }
 
 /// Spawns a `fog <script>` detached instance for restart, mirroring
-/// `daemonize` / `index::spawn_detached` but for generic scripts.
+/// `daemonize` / `index::spawn_detached` but for generic scripts. `without` and
+/// `forced_share` replay the killed instance's per-run service overrides so the
+/// relaunch keeps the same skip/share behavior.
 fn spawn_instance_detached(
     config_path: &Path,
     script: &str,
     branch: Option<&str>,
     without: &[String],
+    forced_share: &[String],
 ) -> io::Result<u32> {
+    let mut extra_args = Vec::with_capacity((without.len() + forced_share.len()) * 2);
+    for service in without {
+        extra_args.push("--without".to_string());
+        extra_args.push(service.clone());
+    }
+    for service in forced_share {
+        extra_args.push("--share".to_string());
+        extra_args.push(service.clone());
+    }
     crate::ipc::spawn_detached(
         config_path,
         script,
         branch,
-        without,
+        &extra_args,
         &[],
         DAEMON_READY_TIMEOUT,
     )

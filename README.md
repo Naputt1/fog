@@ -195,6 +195,7 @@ instance), `2` a usage error (bad flag, unknown script).
 | `-d`, `--detach`         | Run in background without TUI; waits until services start, showing progress, logs to `$TMPDIR/fog-<pid>.logs/`  |
 | `--no-share`             | Ignore `share:`/`reuse:` — start fresh even when a healthy sibling could be borrowed                            |
 | `--without <SERVICE>`    | Leave a service out of this run (repeatable or comma-separated, e.g. `fog dev --without db,worker`)             |
+| `--share <SERVICE>`      | Force a service to be shared for this run even when its config omits `share:`/`reuse:` (repeatable)             |
 | `--all`                  | With `fog kill`/`fog restart`: apply to every matching instance (conflicts with `PID`)                          |
 | `--force`                | With `fog kill`/`fog restart`: escalate to SIGTERM then SIGKILL for a wedged instance                           |
 | `--with-dependents`      | With `fog kill`: also stop instances it cold-started through cross-instance port references                     |

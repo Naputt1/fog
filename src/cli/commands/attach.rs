@@ -110,18 +110,22 @@ pub(crate) fn cmd_attach(cli: &Cli) -> io::Result<()> {
     // Replayed opt-outs are filtered against the current config: removing a
     // skipped service from fog.json must not make the healthy instance
     // impossible to attach to.
+    let config_dir = Path::new(&config_path)
+        .parent()
+        .unwrap_or_else(|| Path::new("."));
     let replayed: Vec<String> = status
         .services
         .iter()
         .filter(|service| service.skipped)
         .map(|service| service.name.clone())
         .collect();
-    let mut without: Vec<String> = crate::runtime::filter_without(target_script, &replayed)
-        .into_iter()
-        .collect();
+    let mut without: Vec<String> =
+        crate::runtime::filter_without(target_script, config_dir, &replayed)
+            .into_iter()
+            .collect();
     without.sort();
 
-    let mut argv = vec![
+    let mut argv: Vec<OsString> = vec![
         OsString::from("fog"),
         OsString::from(&status.script),
         OsString::from("--config"),
@@ -130,6 +134,13 @@ pub(crate) fn cmd_attach(cli: &Cli) -> io::Result<()> {
     for name in without {
         argv.push(OsString::from("--without"));
         argv.push(OsString::from(name));
+    }
+    // Replay `--share` so the attached session keeps the same sharing behavior
+    // (borrowed services stay shared for teardown, and a detach successor
+    // rebuilds it too).
+    for service in &status.forced_share {
+        argv.push(OsString::from("--share"));
+        argv.push(OsString::from(service));
     }
     let mut attach_cli = Cli::parse_from(argv);
     attach_cli.verbose = cli.verbose;
