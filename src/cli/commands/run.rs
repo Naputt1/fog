@@ -281,7 +281,8 @@ pub(crate) fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>)
     ipc_state.config_dir = Some(config_dir.to_string_lossy().into_owned());
     ipc_state.config_path = Some(config_path.to_string_lossy().into_owned());
     // Publish the forced names so `fog attach` can rebuild this invocation.
-    ipc_state.forced_share = share.forced.iter().cloned().collect();
+    *ipc_state.forced_share.lock().expect("mutex poisoned") =
+        share.forced.iter().cloned().collect();
     // Cold-start provenance: `references::resolve` passes the parent's pid and
     // identity when it spawns this instance, so `fog ls` and `fog kill` can
     // show and optionally stop instances this one caused to start.
@@ -416,8 +417,11 @@ pub(crate) fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>)
         .filter(|(key, _)| !adopted_ports.contains_key(*key))
         .map(|(key, port)| (key.clone(), *port))
         .collect();
+    // A port referenced only by a skipped service may already be served by an
+    // external process; do not reject the run because probing it fails.
+    let unprobed_ports = crate::runtime::skipped_port_names(script, &config_dir, &without);
     let mut port_map = if !local_specs.is_empty() {
-        match crate::ports::allocate_ports(&local_specs) {
+        match crate::ports::allocate_ports_unprobed(&local_specs, &unprobed_ports) {
             Ok(m) => m,
             Err(e) => {
                 if !detached {
@@ -682,16 +686,9 @@ pub(crate) fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>)
         if cli.verbose {
             args.push(OsString::from("--verbose"));
         }
-        // The skip set is derived from the live skipped tabs when detach is
-        // requested, so a manually started service is not re-skipped in the
-        // successor.
-        // Keep the forced services across a detach: the successor rebuilds the
-        // run from these args, so dropping them would restart a borrowed
-        // resource instead of taking it over.
-        for service in &share.forced {
-            args.push(OsString::from("--share"));
-            args.push(OsString::from(service));
-        }
+        // The skip and forced-share sets are derived from the live app when
+        // detach is requested, so a manually started service is not re-skipped
+        // and a service removed by a worktree switch is not replayed.
         Some(crate::app::DetachSpawn::new(exe, args, std::process::id()))
     };
 

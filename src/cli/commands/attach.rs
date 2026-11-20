@@ -137,8 +137,11 @@ pub(crate) fn cmd_attach(cli: &Cli) -> io::Result<()> {
     }
     // Replay `--share` so the attached session keeps the same sharing behavior
     // (borrowed services stay shared for teardown, and a detach successor
-    // rebuilds it too).
-    for service in &status.forced_share {
+    // rebuilds it too). Filter against the current config like the skip set:
+    // a service removed since startup must not make attach impossible.
+    for service in
+        crate::runtime::filter_forced_share(target_script, config_dir, &status.forced_share)
+    {
         argv.push(OsString::from("--share"));
         argv.push(OsString::from(service));
     }

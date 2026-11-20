@@ -52,7 +52,7 @@ fog dev --without db,worker
 
 Names are effective service names: an explicit `name`, or the basename of `path`. An unknown name is a usage error reported before ports, DNS, the router or any service is touched, and the message lists the script's services.
 
-A skipped service keeps its tab/status row (`skipped` in `fog ls` and the web UI), its allocated ports, and any proxy/native routes pointing at it. No process, health check, `share`/`reuse` borrow or hand-off is attached to it, and its `shutdown_cmd` is never run, because this run does not own it. If a kept service names a skipped service in `depends_on`, that edge is dropped with a warning and the kept service starts immediately instead of waiting forever. Ports and routes are intentionally left alone: when something else already provides the service on the configured port, routes keep working, and starting the skipped tab later needs no reconfiguration.
+A skipped service keeps its tab/status row (`skipped` in `fog ls` and the web UI), its allocated ports, and any proxy/native routes pointing at it. No process, health check, `share`/`reuse` borrow or hand-off is attached to it, and its `shutdown_cmd` is never run, because this run does not own it. If a kept service names a skipped service in `depends_on`, that edge is dropped with a warning and the kept service starts immediately instead of waiting forever. Ports and routes are intentionally left alone: when something else already provides the service on the configured port, routes keep working, and starting the skipped tab later needs no reconfiguration. A fixed port referenced only by skipped services is not probed, so an external process already listening there does not block the run.
 
 The opt-out is per run and survives `-d`, `fog attach`, `fog restart`, and worktree switching. In the TUI press `R` on its tab, or use Start in the web UI, to clear `skipped` and run it normally for the rest of that instance.
 
@@ -267,7 +267,7 @@ Services flagged `"share": true` are **shared between all concurrent instances**
 
 `--share <SERVICE>` (repeatable) turns sharing on for the named service, whatever its config says: `share` behavior in a concurrent script, `reuse` behavior in a single-instance one. It exists for a resource that is safe to share (a database, a compose stack) when the config left the flag off. `--no-share` is the opposite: it starts every service fresh for the run. The two flags conflict.
 
-A forced service is still held to the same rules: it needs a `health_check` to be verified and borrowed (without one fog warns and starts it), and it is only borrowed when a same-branch sibling already owns it. The name must be one the script defines — an explicit `name`, else the `path` basename — otherwise fog exits `2` with the list of valid names. The override survives detach and worktree switches, and `fog attach` replays it.
+A forced service is still held to the same rules: it needs a `health_check` to be verified and borrowed (without one fog warns and starts it), and it is only borrowed when a same-branch sibling already owns it. The name must be one the script defines — an explicit `name`, else the `path` basename — otherwise fog exits `2` with the list of valid names. The override survives detach, `fog attach`, `fog restart`, and worktree switches; `--no-share` is replayed across restart too. A name the current config no longer defines is dropped from the replay rather than making restart/attach fail, and a detach successor uses the live forced set.
 
 ### `FOG_BRANCH` environment variable
 

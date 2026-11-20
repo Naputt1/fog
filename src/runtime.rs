@@ -320,6 +320,12 @@ pub fn adopt_shared_ports(
             continue;
         }
         let skipped = without.contains(&name);
+        // A forced shared service without a health check cannot be borrowed:
+        // the build starts a fresh copy. Adopting the sibling's ports would
+        // make that copy collide with the process already listening there.
+        if !skipped && entry_health_checks(entry, &config_dir.join(&entry.path)).is_empty() {
+            continue;
+        }
         // Scan the *raw* entry: templates name the symbolic ports to adopt.
         let names = crate::ports::entry_referenced_ports(entry);
         if names.is_empty() {
@@ -624,6 +630,39 @@ pub fn filter_without(
         .map(|name| name.trim())
         .filter(|name| !name.is_empty() && known.contains(*name))
         .map(str::to_string)
+        .collect()
+}
+
+/// Drops replayed `--share` names absent from `script`.
+///
+/// Like [`filter_without`], this is for a previous run's per-run overrides:
+/// removing a forced service from `fog.json` must not make restart/attach fail.
+pub fn filter_forced_share(
+    script: &ScriptConfig,
+    config_dir: &Path,
+    requested: &[String],
+) -> std::collections::BTreeSet<String> {
+    filter_without(script, config_dir, requested)
+        .into_iter()
+        .collect()
+}
+
+/// Port names referenced by services left out with `--without`.
+///
+/// Their fixed ports may already be served externally, so startup must not
+/// reject the run merely because binding them fails.
+pub fn skipped_port_names(
+    script: &ScriptConfig,
+    config_dir: &Path,
+    without: &HashSet<String>,
+) -> HashSet<String> {
+    script
+        .service
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .filter(|entry| without.contains(&entry_name(entry, config_dir)))
+        .flat_map(crate::ports::entry_referenced_ports)
         .collect()
 }
 
@@ -1282,6 +1321,41 @@ mod tests {
     }
 
     #[test]
+    fn test_filter_forced_share_drops_removed_services() {
+        let script = script_with(vec![entry("db", None), entry("api", None)]);
+        let filtered = filter_forced_share(
+            &script,
+            Path::new("."),
+            &["api".to_string(), "gone".to_string()],
+        );
+        assert_eq!(filtered.into_iter().collect::<Vec<_>>(), vec!["api"]);
+    }
+
+    #[test]
+    fn test_skipped_port_names_only_cover_skipped_services() {
+        let mut db = entry("db", None);
+        db.env = Some(
+            [(
+                "DATABASE_URL".to_string(),
+                "postgres://x@${ports.db}/x".to_string(),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let mut api = entry("api", None);
+        api.env = Some(
+            [("PORT".to_string(), "${ports.api}".to_string())]
+                .into_iter()
+                .collect(),
+        );
+        let script = script_with(vec![db, api]);
+        let without: HashSet<String> = ["db".to_string()].into();
+        let names = skipped_port_names(&script, Path::new("."), &without);
+        assert!(names.contains("db"));
+        assert!(!names.contains("api"));
+    }
+
+    #[test]
     fn test_build_skips_service_and_drops_its_dependents_edge() {
         let script = script_with(vec![entry("db", None), entry("api", Some(vec!["db"]))]);
         let mut adopted = HashMap::new();
@@ -1803,6 +1877,53 @@ mod tests {
             "--share must adopt the owner's live port for an unflagged service"
         );
         assert!(owned.contains("db"));
+    }
+
+    #[test]
+    fn test_adopt_shared_ports_skips_service_without_health_check() {
+        let project = format!("fog-test-adopt-no-health-{}", std::process::id());
+        let sibling = spawn_status_instance(
+            std::process::id().wrapping_add(27),
+            &project,
+            "dev",
+            Some("mine"),
+            false,
+            [("db".to_string(), 55556u16)].into_iter().collect(),
+        );
+
+        // A forced/shared service without a health check is spawned fresh, so
+        // its sibling's live ports must not be adopted (that copy would collide).
+        let mut db = share_entry("db", None);
+        db.share = false;
+        db.env = Some(
+            [(
+                "DATABASE_URL".to_string(),
+                "postgres://x@127.0.0.1:${ports.db}/x".to_string(),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let script = script_with_concurrent(vec![db]);
+        let mut ports: crate::ports::PortMap = [("db".to_string(), 12346u16)].into_iter().collect();
+        let share = SharePolicy {
+            forced: ["db".to_string()].into_iter().collect(),
+            ..Default::default()
+        };
+
+        let owned = adopt_shared_ports(
+            &script,
+            "dev",
+            Path::new("."),
+            Some(&project),
+            Some("mine"),
+            &mut ports,
+            &share,
+            &HashSet::new(),
+        );
+
+        let _ = std::fs::remove_file(&sibling);
+        assert_eq!(ports["db"], 12346, "no health check means a fresh spawn");
+        assert!(owned.is_empty());
     }
 
     #[test]

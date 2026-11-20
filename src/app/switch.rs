@@ -249,16 +249,56 @@ impl App {
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
         let without = runtime::filter_without(script, &config_dir, &current);
+        // Carry the current forced-share set into the target, dropping names it
+        // no longer defines. A stale name would otherwise reach a detach
+        // successor or `fog attach` and be rejected there.
+        let forced: Vec<String> = self.share.forced.iter().cloned().collect();
+        let share = runtime::SharePolicy {
+            no_share: self.share.no_share,
+            forced: runtime::filter_forced_share(script, &config_dir, &forced),
+        };
+        let target_names: std::collections::HashSet<String> =
+            runtime::script_service_names(script, &config_dir)
+                .into_iter()
+                .collect();
+
+        // Ports of services this instance owns and is about to hand over: the
+        // adopted process keeps listening on them, so dependent templates must
+        // resolve to the old values rather than a fresh allocation.
+        let mut handoff_ports = std::collections::HashMap::new();
+        if !share.no_share {
+            let current_ports = self.ipc_state.ports.lock().expect("mutex poisoned").clone();
+            let target_ports: std::collections::HashMap<String, Vec<String>> = script
+                .service
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .map(|entry| {
+                    (
+                        runtime::entry_name(entry, &config_dir),
+                        crate::ports::entry_referenced_ports(entry)
+                            .into_iter()
+                            .collect(),
+                    )
+                })
+                .collect();
+            for item in &self.items {
+                if (item.reused || item.shared)
+                    && target_names.contains(&item.name)
+                    && let Some(names) = target_ports.get(&item.name)
+                {
+                    for name in names {
+                        if let Some(port) = current_ports.get(name) {
+                            handoff_ports.insert(name.clone(), *port);
+                        }
+                    }
+                }
+            }
+        }
 
         // Allocate ports and validate before tearing down the current instance,
         // so a failure leaves the running services untouched.
         let branch_for_ports = runtime::resolve_branch(&config_dir);
-        let port_map = if let Some(specs) = &config.ports {
-            crate::ports::allocate_ports(specs)
-                .map_err(|e| FogError::new(format!("switch worktree: port allocation: {e}")))?
-        } else {
-            std::collections::HashMap::new()
-        };
         if let Err(e) = crate::ports::ensure_ports_defined(
             config.ports.as_ref(),
             script,
@@ -268,17 +308,35 @@ impl App {
         }
         // Adopt the live ports of a sibling that already owns a shared service
         // on the target branch, so its dependents resolve to the real port.
-        let mut port_map = port_map;
+        // Adoption happens *before* allocation: a fixed port held by the live
+        // owner would otherwise fail its "already in use" probe.
+        let mut adopted_ports = std::collections::HashMap::new();
         let owned_shared = runtime::adopt_shared_ports(
             script,
             &script_name,
             &config_dir,
             self.ipc_state.project.as_deref(),
             branch_for_ports.as_deref(),
-            &mut port_map,
-            &self.share,
+            &mut adopted_ports,
+            &share,
             &without,
         );
+        let specs = config.ports.clone().unwrap_or_default();
+        let local_specs: std::collections::HashMap<String, u16> = specs
+            .into_iter()
+            .filter(|(name, _)| {
+                !adopted_ports.contains_key(name) && !handoff_ports.contains_key(name)
+            })
+            .collect();
+        let unprobed = runtime::skipped_port_names(script, &config_dir, &without);
+        let mut port_map = if local_specs.is_empty() {
+            std::collections::HashMap::new()
+        } else {
+            crate::ports::allocate_ports_unprobed(&local_specs, &unprobed)
+                .map_err(|e| FogError::new(format!("switch worktree: port allocation: {e}")))?
+        };
+        port_map.extend(adopted_ports);
+        port_map.extend(handoff_ports);
         // Resolve `${ports.<name>@<repo>:<branch>[:<script>]}` against live
         // instances (cold-starting a `:script` target when needed) before
         // building, so a missing dependency aborts the switch while the
@@ -324,7 +382,7 @@ impl App {
             &mut adopted,
             &port_map,
             branch_for_ports.clone(),
-            self.share.clone(),
+            share.clone(),
             false,
             &owned_shared,
             &without,
@@ -344,6 +402,9 @@ impl App {
         for warning in &built.warnings {
             self.note_error(warning.clone());
         }
+        self.share = share.clone();
+        *self.ipc_state.forced_share.lock().expect("mutex poisoned") =
+            share.forced.iter().cloned().collect();
 
         // The project identity is the repo's git-common-dir, shared by every
         // worktree, so `ipc_state.project` stays unchanged across switches.

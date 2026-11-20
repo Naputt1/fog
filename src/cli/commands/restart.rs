@@ -38,6 +38,7 @@ pub(crate) fn cmd_restart(pid: Option<u32>, all: bool, cli: &Cli) -> io::Result<
         config_path: PathBuf,
         without: Vec<String>,
         forced_share: Vec<String>,
+        no_share: bool,
     }
     let mut plans = Vec::with_capacity(targets.len());
     for (target_pid, path) in &targets {
@@ -109,6 +110,39 @@ pub(crate) fn cmd_restart(pid: Option<u32>, all: bool, cli: &Cli) -> io::Result<
         }
         let mut without: Vec<String> = without.into_iter().collect();
         without.sort();
+        // Fresh `--share` names are strict like `--without`: catch a typo
+        // before stopping anything. Replayed names are filtered because the
+        // config may have changed since the target started.
+        let known: Vec<String> = crate::runtime::script_service_names(target_script, config_dir);
+        if let Some(name) = cli
+            .share
+            .iter()
+            .find(|name| !known.iter().any(|known| known == *name))
+        {
+            die(
+                crate::error::FogError::new(format!("unknown service in --share: {name}")),
+                Some("pass an effective service name; nothing was stopped"),
+                2,
+            );
+        }
+        // A target started with --no-share keeps it; an explicit --share asks
+        // for the opposite, so it wins over the replayed flag.
+        let no_share = cli.no_share || (status.no_share && cli.share.is_empty());
+        let forced_share: Vec<String> = if no_share {
+            Vec::new()
+        } else {
+            let mut names: Vec<String> = crate::runtime::filter_forced_share(
+                target_script,
+                config_dir,
+                &status.forced_share,
+            )
+            .into_iter()
+            .collect();
+            names.extend(cli.share.iter().cloned());
+            names.sort();
+            names.dedup();
+            names
+        };
         plans.push(RestartPlan {
             pid: target_pid,
             path: path.clone(),
@@ -116,7 +150,8 @@ pub(crate) fn cmd_restart(pid: Option<u32>, all: bool, cli: &Cli) -> io::Result<
             branch: status.branch,
             config_path,
             without,
-            forced_share: status.forced_share,
+            forced_share,
+            no_share,
         });
     }
 
@@ -129,6 +164,7 @@ pub(crate) fn cmd_restart(pid: Option<u32>, all: bool, cli: &Cli) -> io::Result<
             config_path,
             without,
             forced_share,
+            no_share,
         } = plan;
         // Wait for the old instance to fully exit before relaunching to avoid
         // port conflicts and owner-lock races. `--force` escalates to SIGKILL
@@ -146,8 +182,14 @@ pub(crate) fn cmd_restart(pid: Option<u32>, all: bool, cli: &Cli) -> io::Result<
         // Spawn a detached instance with the same script. The config_path already
         // points at the correct worktree's fog.json, so no --branch is needed
         // (branch is inferred from the worktree containing config_dir).
-        let new_pid =
-            spawn_instance_detached(&config_path, &script, None, &without, &forced_share)?;
+        let new_pid = spawn_instance_detached(
+            &config_path,
+            &script,
+            None,
+            &without,
+            &forced_share,
+            no_share,
+        )?;
         println!("restarted fog '{script}' (old pid {target_pid} → new pid {new_pid})");
         if let Some(b) = branch {
             println!("  branch: {b}");
@@ -187,16 +229,9 @@ fn spawn_instance_detached(
     branch: Option<&str>,
     without: &[String],
     forced_share: &[String],
+    no_share: bool,
 ) -> io::Result<u32> {
-    let mut extra_args = Vec::with_capacity((without.len() + forced_share.len()) * 2);
-    for service in without {
-        extra_args.push("--without".to_string());
-        extra_args.push(service.clone());
-    }
-    for service in forced_share {
-        extra_args.push("--share".to_string());
-        extra_args.push(service.clone());
-    }
+    let extra_args = restart_extra_args(without, forced_share, no_share);
     crate::ipc::spawn_detached(
         config_path,
         script,
@@ -205,4 +240,43 @@ fn spawn_instance_detached(
         &[],
         DAEMON_READY_TIMEOUT,
     )
+}
+
+/// Per-run flags for the replacement instance.
+fn restart_extra_args(without: &[String], forced_share: &[String], no_share: bool) -> Vec<String> {
+    let mut extra_args = Vec::with_capacity((without.len() + forced_share.len()) * 2 + 1);
+    for service in without {
+        extra_args.push("--without".to_string());
+        extra_args.push(service.clone());
+    }
+    if no_share {
+        extra_args.push("--no-share".to_string());
+    } else {
+        for service in forced_share {
+            extra_args.push("--share".to_string());
+            extra_args.push(service.clone());
+        }
+    }
+    extra_args
+}
+
+#[cfg(test)]
+mod tests {
+    use super::restart_extra_args;
+
+    #[test]
+    fn test_restart_extra_args_replay_skip_and_share() {
+        assert_eq!(
+            restart_extra_args(&["db".to_string()], &["redis".to_string()], false),
+            vec!["--without", "db", "--share", "redis"]
+        );
+    }
+
+    #[test]
+    fn test_restart_extra_args_replay_no_share_without_forced_names() {
+        assert_eq!(
+            restart_extra_args(&["db".to_string()], &["redis".to_string()], true),
+            vec!["--without", "db", "--no-share"]
+        );
+    }
 }

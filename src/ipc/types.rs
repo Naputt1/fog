@@ -144,8 +144,9 @@ pub struct IpcState {
     /// Whether this instance was started with `--no-share`.
     pub no_share: bool,
     /// Services forced with `--share` for this run, so `fog attach` can rebuild
-    /// the same invocation.
-    pub forced_share: Vec<String>,
+    /// the same invocation. Mutable so a worktree switch can drop names the
+    /// target script no longer defines.
+    pub forced_share: Arc<Mutex<Vec<String>>>,
     /// PID of the instance that cold-started this one through a cross-instance
     /// port reference, if any.
     pub autostarted_by: Option<u32>,
@@ -195,7 +196,7 @@ impl IpcState {
             handoff_done: Arc::new(AtomicBool::new(false)),
             handoff_all: Arc::new(AtomicBool::new(false)),
             no_share,
-            forced_share: Vec::new(),
+            forced_share: Arc::new(Mutex::new(Vec::new())),
             autostarted_by: None,
             autostarted_by_label: None,
             control_req: Arc::new(Mutex::new(None)),
