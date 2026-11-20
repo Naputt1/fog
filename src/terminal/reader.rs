@@ -85,7 +85,7 @@ pub(super) fn borrow_notice(name: &str) -> String {
 
 /// Notice shown for a service left out with `--without`, in its tab and log.
 pub(super) fn skip_notice(name: &str) -> String {
-    format!("⊘ skipped with --without {name}; not started (press R to start)")
+    format!("⊘ skipped with --without {name}; not started (press R or use Start to run it)")
 }
 
 /// Creates a pipe used to signal a reader thread to stop. Returns

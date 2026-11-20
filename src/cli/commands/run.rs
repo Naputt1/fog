@@ -158,6 +158,14 @@ pub(crate) fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>)
             ),
         }
     };
+    if let Some(name) = without.iter().find(|name| share.forced.contains(*name)) {
+        crate::cli::usage_error(
+            crate::error::FogError::new(format!(
+                "service '{name}' cannot be both skipped and force-shared"
+            )),
+            "use either `--without` or `--share` for it",
+        );
+    }
 
     // Setup diagnostics are collected rather than printed immediately: in
     // interactive mode the TUI takes the screen moments later, so warnings are
@@ -419,7 +427,7 @@ pub(crate) fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>)
         .collect();
     // A port referenced only by a skipped service may already be served by an
     // external process; do not reject the run because probing it fails.
-    let unprobed_ports = crate::runtime::skipped_port_names(script, &config_dir, &without);
+    let unprobed_ports = crate::runtime::unprobed_port_names(script, &config_dir, &share, &without);
     let mut port_map = if !local_specs.is_empty() {
         match crate::ports::allocate_ports_unprobed(&local_specs, &unprobed_ports) {
             Ok(m) => m,

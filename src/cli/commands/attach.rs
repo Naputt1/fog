@@ -131,7 +131,7 @@ pub(crate) fn cmd_attach(cli: &Cli) -> io::Result<()> {
         OsString::from("--config"),
         OsString::from(&config_path),
     ];
-    for name in without {
+    for name in &without {
         argv.push(OsString::from("--without"));
         argv.push(OsString::from(name));
     }
@@ -141,6 +141,8 @@ pub(crate) fn cmd_attach(cli: &Cli) -> io::Result<()> {
     // a service removed since startup must not make attach impossible.
     for service in
         crate::runtime::filter_forced_share(target_script, config_dir, &status.forced_share)
+            .into_iter()
+            .filter(|service| !without.contains(service))
     {
         argv.push(OsString::from("--share"));
         argv.push(OsString::from(service));

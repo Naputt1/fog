@@ -149,6 +149,10 @@ pub struct Terminal {
     /// `shutdown_cmd` is skipped on teardown while another instance on the
     /// same (project, script, branch) still serves it.
     pub shared: bool,
+    /// Share decision to apply when a skipped service is started manually.
+    /// A skipped terminal is not live, so it is not handed over or treated as
+    /// shared yet; promoting it must restore the config/`--share` decision.
+    pub shared_on_start: bool,
     /// Left out of this run with `--without`: no process was started and no
     /// health checks run. The tab stays visible and `restart`/`start` promotes
     /// it to a normal service.
@@ -324,6 +328,7 @@ impl Terminal {
             reused: false,
             skipped: false,
             shared: false,
+            shared_on_start: false,
             owned_pid: None,
             raw_fd: None,
             reused_since: None,
@@ -391,6 +396,7 @@ impl Terminal {
             reused: false,
             skipped: false,
             shared: false,
+            shared_on_start: false,
             owned_pid: None,
             raw_fd: None,
             reused_since: None,
@@ -456,6 +462,7 @@ impl Terminal {
             reused: false,
             skipped: false,
             shared: false,
+            shared_on_start: false,
             owned_pid: None,
             raw_fd: None,
             reused_since: None,
@@ -518,6 +525,7 @@ impl Terminal {
             reused: false,
             skipped: false,
             shared: false,
+            shared_on_start: false,
             owned_pid: None,
             raw_fd: None,
             reused_since: None,
@@ -580,6 +588,7 @@ impl Terminal {
             reused: true,
             skipped: false,
             shared: false,
+            shared_on_start: false,
             owned_pid: None,
             raw_fd: None,
             reused_since: Some(Instant::now()),
@@ -634,6 +643,7 @@ impl Terminal {
             reused: false,
             skipped: true,
             shared: false,
+            shared_on_start: false,
             owned_pid: None,
             raw_fd: None,
             reused_since: None,
@@ -794,6 +804,7 @@ impl Terminal {
             reused: true,
             skipped: false,
             shared: false,
+            shared_on_start: false,
             owned_pid: Some(pid),
             endpoints: Vec::new(),
             raw_fd: Some(fd),
@@ -927,6 +938,10 @@ impl Terminal {
         // refresh_status resumes deriving liveness. This matters for reused
         // terminals revived by maybe_auto_start after the grace period —
         // without it they report "stopped" forever despite a live process.
+        if self.skipped {
+            self.shared = self.shared_on_start;
+            self.shared_on_start = false;
+        }
         self.skipped = false;
         self.stopped = false;
         self.process_running = true;
@@ -1441,6 +1456,10 @@ impl Terminal {
             }
             return Err(e);
         }
+        if was_skipped {
+            self.shared = self.shared_on_start;
+            self.shared_on_start = false;
+        }
         self.skipped = false;
         self.stopped = false;
         self.process_running = true;
@@ -1876,6 +1895,30 @@ mod tests {
         assert!(t.is_ready());
         t.refresh_status();
         assert!(!t.stopped);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_starting_skipped_shared_service_restores_shared() {
+        let dir = std::env::temp_dir().join(format!("fog-test-shared-skip-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut t = Terminal::spawn_skipped(
+            "db".into(),
+            dir.to_string_lossy().into_owned(),
+            "true".into(),
+            100,
+        );
+        t.shared_on_start = true;
+        t.start(&dir.to_string_lossy(), "true").unwrap();
+        assert!(!t.skipped);
+        assert!(
+            t.shared,
+            "a manually started shared service must stay shared on teardown"
+        );
+        assert!(!t.shared_on_start);
+        t.stop().unwrap();
+        drop(t);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[cfg(unix)]

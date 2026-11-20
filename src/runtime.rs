@@ -647,23 +647,79 @@ pub fn filter_forced_share(
         .collect()
 }
 
-/// Port names referenced by services left out with `--without`.
+/// Port names that must not be probed at startup.
 ///
-/// Their fixed ports may already be served externally, so startup must not
-/// reject the run merely because binding them fails.
-pub fn skipped_port_names(
+/// A skipped service may already be provided externally, and a shared service
+/// without a health check cannot be verified as borrowable (so fog starts a
+/// fresh copy and its duplicate failure belongs in its own tab, not in the
+/// run's port allocation). In both cases an occupied fixed port must not abort
+/// the whole run. A port also referenced by a kept, verifiable service is
+/// still probed.
+pub fn unprobed_port_names(
     script: &ScriptConfig,
     config_dir: &Path,
+    share: &SharePolicy,
     without: &HashSet<String>,
 ) -> HashSet<String> {
-    script
-        .service
-        .as_deref()
-        .unwrap_or_default()
-        .iter()
-        .filter(|entry| without.contains(&entry_name(entry, config_dir)))
-        .flat_map(crate::ports::entry_referenced_ports)
-        .collect()
+    let entries = script.service.as_deref().unwrap_or_default();
+    let mut skipped = HashSet::new();
+    let mut kept = HashSet::new();
+    let mut shared_without_health = HashSet::new();
+    for entry in entries {
+        let name = entry_name(entry, config_dir);
+        let skipped_entry = without.contains(&name);
+        let refs: HashSet<String> = crate::ports::entry_referenced_ports(entry)
+            .into_iter()
+            .collect();
+        if skipped_entry {
+            skipped.extend(refs);
+            continue;
+        }
+        kept.extend(refs);
+        let flagged = if script.concurrent {
+            entry.share
+        } else {
+            entry.reuse
+        };
+        if share.shared(&name, flagged)
+            && entry_health_checks(entry, &config_dir.join(&entry.path)).is_empty()
+        {
+            shared_without_health.extend(crate::ports::entry_referenced_ports(entry));
+        }
+    }
+    let mut unprobed: HashSet<String> = skipped.difference(&kept).cloned().collect();
+    unprobed.extend(shared_without_health);
+    unprobed
+}
+
+/// Port names of services the target script will share, grouped by service.
+///
+/// A worktree switch may hand a live process over only for these names: a
+/// target that dropped `share`/`reuse` starts its own copy and needs a fresh
+/// port, not the old process's.
+pub fn shared_port_names(
+    script: &ScriptConfig,
+    config_dir: &Path,
+    share: &SharePolicy,
+) -> HashMap<String, Vec<String>> {
+    let mut shared = HashMap::new();
+    for entry in script.service.as_deref().unwrap_or_default() {
+        let name = entry_name(entry, config_dir);
+        let flagged = if script.concurrent {
+            entry.share
+        } else {
+            entry.reuse
+        };
+        if share.shared(&name, flagged) {
+            shared.insert(
+                name,
+                crate::ports::entry_referenced_ports(entry)
+                    .into_iter()
+                    .collect(),
+            );
+        }
+    }
+    shared
 }
 
 /// Builds the IPC route-info list for `items`' declared endpoints.
@@ -927,29 +983,6 @@ pub fn build_with_opts(opts: BuildOpts) -> FogResult<Runtime> {
         // separately (the aggregate above already folded in their checks).
         let endpoints = resolve_endpoint_compose_paths(entry, &service_path);
 
-        if without.contains(&name) {
-            let mut t = Terminal::spawn_skipped(
-                name.clone(),
-                service_path_str,
-                entry.cmd.clone(),
-                scrollback,
-            );
-            t.save_logs = save_logs;
-            t.log_dir = log_dir.clone();
-            t.health_checks = health_checks;
-            t.shutdown_cmd = entry.shutdown_cmd.clone();
-            t.injected_env = entry.env.clone().unwrap_or_default();
-            t.branch = branch.clone();
-            t.project = project.clone();
-            t.script = script_name.to_string();
-            t.set_endpoints(endpoints);
-            t.persist_skip_notice();
-            items[idx] = Some(t);
-            continue;
-        }
-
-        let has_deps = entry.depends_on.is_some();
-
         // Which flag governs sharing depends on the script's run mode: single
         // instance (concurrent: false) shares via `reuse` (handed over during a
         // reclaim/worktree switch); concurrent mode shares via `share` (borrowed
@@ -963,6 +996,33 @@ pub fn build_with_opts(opts: BuildOpts) -> FogResult<Runtime> {
         };
         let shared = share.shared(&name, flagged);
         let share_flag = if script.concurrent { "share" } else { "reuse" };
+
+        if without.contains(&name) {
+            let mut t = Terminal::spawn_skipped(
+                name.clone(),
+                service_path_str,
+                entry.cmd.clone(),
+                scrollback,
+            );
+            t.save_logs = save_logs;
+            t.log_dir = log_dir.clone();
+            t.health_checks = health_checks;
+            t.shutdown_cmd = entry.shutdown_cmd.clone();
+            t.injected_env = entry.env.clone().unwrap_or_default();
+            // Carry the share decision to a manual start; the skipped service
+            // is not live yet, so it must not be handed over or treated as
+            // shared until it runs.
+            t.shared_on_start = shared;
+            t.branch = branch.clone();
+            t.project = project.clone();
+            t.script = script_name.to_string();
+            t.set_endpoints(endpoints);
+            t.persist_skip_notice();
+            items[idx] = Some(t);
+            continue;
+        }
+
+        let has_deps = entry.depends_on.is_some();
 
         // A templated shared service is only borrowable when its live ports were
         // adopted from the owning sibling. Without that, borrowing would point
@@ -1332,7 +1392,7 @@ mod tests {
     }
 
     #[test]
-    fn test_skipped_port_names_only_cover_skipped_services() {
+    fn test_unprobed_port_names_only_cover_skipped_services() {
         let mut db = entry("db", None);
         db.env = Some(
             [(
@@ -1350,9 +1410,130 @@ mod tests {
         );
         let script = script_with(vec![db, api]);
         let without: HashSet<String> = ["db".to_string()].into();
-        let names = skipped_port_names(&script, Path::new("."), &without);
+        let names = unprobed_port_names(&script, Path::new("."), &SharePolicy::default(), &without);
         assert!(names.contains("db"));
         assert!(!names.contains("api"));
+    }
+
+    #[test]
+    fn test_unprobed_port_names_keep_ports_a_running_service_uses() {
+        let mut worker = entry("worker", None);
+        worker.env = Some(
+            [(
+                "CACHE".to_string(),
+                "redis://127.0.0.1:${ports.cache}".to_string(),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let mut redis = entry("redis", None);
+        redis.env = Some(
+            [(
+                "CACHE".to_string(),
+                "redis://127.0.0.1:${ports.cache}".to_string(),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let script = script_with(vec![worker, redis]);
+        let without: HashSet<String> = ["worker".to_string()].into();
+        let names = unprobed_port_names(&script, Path::new("."), &SharePolicy::default(), &without);
+        assert!(
+            !names.contains("cache"),
+            "a kept service still binds this port, so it must be probed"
+        );
+    }
+
+    #[test]
+    fn test_unprobed_port_names_cover_shared_service_without_health_check() {
+        let mut db = share_entry("db", None);
+        db.env = Some(
+            [(
+                "DATABASE_URL".to_string(),
+                "postgres://x@${ports.db}/x".to_string(),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let script = script_with_concurrent(vec![db]);
+        let names = unprobed_port_names(
+            &script,
+            Path::new("."),
+            &SharePolicy::default(),
+            &HashSet::new(),
+        );
+        assert!(
+            names.contains("db"),
+            "an unverifiable forced-share service must not abort on its occupied port"
+        );
+
+        let mut healthy = share_entry("db", Some(tcp_health("127.0.0.1:1")));
+        healthy.env = Some(
+            [(
+                "DATABASE_URL".to_string(),
+                "postgres://x@${ports.db}/x".to_string(),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let script = script_with_concurrent(vec![healthy]);
+        let names = unprobed_port_names(
+            &script,
+            Path::new("."),
+            &SharePolicy::default(),
+            &HashSet::new(),
+        );
+        assert!(!names.contains("db"), "a borrowable service is probed");
+    }
+
+    #[test]
+    fn test_shared_port_names_only_include_target_share_decisions() {
+        let script = script_with_concurrent(vec![entry("api", None), share_entry("db", None)]);
+        let names = shared_port_names(&script, Path::new("."), &SharePolicy::default());
+        assert!(names.contains_key("db"));
+        assert!(
+            !names.contains_key("api"),
+            "a service that dropped share cannot consume a handoff"
+        );
+
+        let forced = SharePolicy {
+            no_share: false,
+            forced: ["api".to_string()].into(),
+        };
+        let names = shared_port_names(&script, Path::new("."), &forced);
+        assert!(names.contains_key("api"));
+    }
+
+    #[test]
+    fn test_skipped_shared_service_keeps_share_decision_for_manual_start() {
+        let script =
+            script_with_concurrent(vec![share_entry("db", Some(tcp_health("127.0.0.1:1")))]);
+        let mut adopted = HashMap::new();
+        let without: HashSet<String> = ["db".to_string()].into();
+        let rt = build_with_share_policy(
+            &script,
+            "dev",
+            Path::new("."),
+            None,
+            false,
+            100,
+            None,
+            &mut adopted,
+            &Default::default(),
+            None,
+            SharePolicy::default(),
+            false,
+            &HashSet::new(),
+            &without,
+        )
+        .unwrap();
+        let db = rt.items.iter().find(|t| t.name == "db").unwrap();
+        assert!(db.skipped);
+        assert!(!db.shared, "a skipped service is not handed over yet");
+        assert!(
+            db.shared_on_start,
+            "manual start must restore its shared role"
+        );
     }
 
     #[test]

@@ -27,6 +27,20 @@ pub(crate) fn cmd_restart(pid: Option<u32>, all: bool, cli: &Cli) -> io::Result<
 
     let targets = resolve_targets(&instances, pid, all, cli, "restart");
 
+    if let Some(name) = cli
+        .without
+        .iter()
+        .find(|name| cli.share.iter().any(|shared| shared == *name))
+    {
+        die(
+            crate::error::FogError::new(format!(
+                "service '{name}' cannot be both skipped and force-shared"
+            )),
+            Some("use either `--without` or `--share` for it; nothing was stopped"),
+            2,
+        );
+    }
+
     // Plan every restart before stopping anything: a typo in `--without`, a
     // missing script, or an unreadable config must not take down a target
     // that cannot be replaced. This also makes `--all` all-or-nothing.
@@ -141,6 +155,8 @@ pub(crate) fn cmd_restart(pid: Option<u32>, all: bool, cli: &Cli) -> io::Result<
             names.extend(cli.share.iter().cloned());
             names.sort();
             names.dedup();
+            // A skipped service cannot also run as a forced shared owner.
+            names.retain(|name| !without.contains(name));
             names
         };
         plans.push(RestartPlan {

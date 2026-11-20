@@ -253,38 +253,28 @@ impl App {
         // no longer defines. A stale name would otherwise reach a detach
         // successor or `fog attach` and be rejected there.
         let forced: Vec<String> = self.share.forced.iter().cloned().collect();
+        let mut forced = runtime::filter_forced_share(script, &config_dir, &forced);
+        forced.retain(|name| !without.contains(name));
         let share = runtime::SharePolicy {
             no_share: self.share.no_share,
-            forced: runtime::filter_forced_share(script, &config_dir, &forced),
+            forced,
         };
-        let target_names: std::collections::HashSet<String> =
-            runtime::script_service_names(script, &config_dir)
-                .into_iter()
-                .collect();
-
         // Ports of services this instance owns and is about to hand over: the
         // adopted process keeps listening on them, so dependent templates must
         // resolve to the old values rather than a fresh allocation.
+        // Only services the target still shares can consume a handoff. A name
+        // whose target entry dropped `share`/`reuse` must keep a fresh port and
+        // let the old process be torn down, otherwise the new copy is spawned
+        // on a port still held by the old one.
+        let target_ports = runtime::shared_port_names(script, &config_dir, &share);
+        let target_shared: std::collections::HashSet<String> =
+            target_ports.keys().cloned().collect();
         let mut handoff_ports = std::collections::HashMap::new();
         if !share.no_share {
             let current_ports = self.ipc_state.ports.lock().expect("mutex poisoned").clone();
-            let target_ports: std::collections::HashMap<String, Vec<String>> = script
-                .service
-                .as_deref()
-                .unwrap_or_default()
-                .iter()
-                .map(|entry| {
-                    (
-                        runtime::entry_name(entry, &config_dir),
-                        crate::ports::entry_referenced_ports(entry)
-                            .into_iter()
-                            .collect(),
-                    )
-                })
-                .collect();
             for item in &self.items {
                 if (item.reused || item.shared)
-                    && target_names.contains(&item.name)
+                    && target_shared.contains(&item.name)
                     && let Some(names) = target_ports.get(&item.name)
                 {
                     for name in names {
@@ -328,7 +318,7 @@ impl App {
                 !adopted_ports.contains_key(name) && !handoff_ports.contains_key(name)
             })
             .collect();
-        let unprobed = runtime::skipped_port_names(script, &config_dir, &without);
+        let unprobed = runtime::unprobed_port_names(script, &config_dir, &share, &without);
         let mut port_map = if local_specs.is_empty() {
             std::collections::HashMap::new()
         } else {
@@ -361,7 +351,7 @@ impl App {
         let mut adopted: HashMap<String, ipc::HandoffItem> = HashMap::new();
         if !self.share.no_share {
             for item in &mut self.items {
-                if item.reused || item.shared {
+                if (item.reused || item.shared) && target_shared.contains(&item.name) {
                     if let Some(handoff) = item.extract_handoff() {
                         adopted.insert(handoff.name.clone(), handoff);
                     } else {
