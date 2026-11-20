@@ -8,6 +8,9 @@ export const buttonVariants = cva(
         default: "bg-primary text-primary-foreground hover:bg-primary/90",
         destructive:
           "bg-destructive text-white hover:bg-destructive/90 focus-visible:ring-destructive/20 dark:bg-destructive/60 dark:focus-visible:ring-destructive/40",
+        /** Outlined destructive action, e.g. a page-level bulk kill. */
+        destructiveOutline:
+          "border border-destructive/30 bg-background text-destructive shadow-xs hover:border-destructive/40 hover:bg-destructive/10 focus-visible:ring-destructive/20 dark:border-destructive/40 dark:bg-input/30 dark:hover:bg-destructive/15 dark:focus-visible:ring-destructive/40",
         outline:
           "border bg-background shadow-xs hover:bg-accent hover:text-accent-foreground dark:border-input dark:bg-input/30 dark:hover:bg-input/50",
         secondary:

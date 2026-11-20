@@ -5,6 +5,7 @@ import type {
   Endpoint,
   EndpointStatus,
 } from "@/lib/api";
+import type { BadgeState } from "@/lib/service-state";
 
 export interface WorktreeBucket {
   /** Git worktree name; "" means services started in the default checkout. */
@@ -151,6 +152,8 @@ export interface InstanceServiceView {
   running: boolean;
   /** Health detail from the instance, null when unset. */
   health: string | null;
+  /** Left out of this run with `--without`. */
+  skipped: boolean;
   /**
    * Matching `/api/services` directory entry (URL/ports/container), or null
    * when the directory has no row for it yet (a snapshot that has not caught
@@ -159,6 +162,18 @@ export interface InstanceServiceView {
   service: Service | null;
   /** Declared endpoints and their health, from the IPC status snapshot. */
   endpoints: EndpointStatus[];
+}
+
+/**
+ * Badge state for one instance service. `skipped` wins because a skipped
+ * service has no process even if a stale snapshot still reports it running.
+ */
+export function serviceBadgeState(svc: {
+  running: boolean;
+  skipped?: boolean;
+}): BadgeState {
+  if (svc.skipped) return "skipped";
+  return svc.running ? "running" : "stopped";
 }
 
 /**
@@ -357,6 +372,7 @@ export function buildInstanceViews(
         name: s.name,
         running: s.running,
         health: s.health,
+        skipped: s.skipped ?? false,
         service: lookup(inst.pid, project, worktree, s.name),
         endpoints: s.endpoints ?? [],
       }))
@@ -456,6 +472,7 @@ export function branchInstances(
           name: s.service,
           running: s.status === "running",
           health: s.health,
+          skipped: false,
           service: s,
           endpoints: [],
         })),

@@ -35,6 +35,7 @@ import {
   type StatusSnapshot,
 } from "@/lib/api";
 import {
+  activeKillPids,
   applyServiceAction,
   isInstanceKilling,
   type KillIntentState,
@@ -333,16 +334,9 @@ export function useServiceActionState(
   };
 }
 
-/**
- * Whether an instance is being killed and has not failed. Stays true through
- * the graceful-shutdown window (while the instance still appears in `status`)
- * and drops on failure or after {@link KILL_GRACE_MS}.
- */
-export function useInstanceKillState(
-  pid: number,
-  script?: string
-): { killing: boolean } {
-  const intents = useMutationState({
+/** Kill mutations projected into the variables/status the UI reasons about. */
+function useKillIntents(): KillIntentState[] {
+  return useMutationState({
     filters: { mutationKey: KILL_INSTANCE_KEY },
     select: (mutation): KillIntentState => {
       const vars = mutation.state.variables as KillInstanceVars | undefined;
@@ -354,5 +348,29 @@ export function useInstanceKillState(
       };
     },
   });
+}
+
+/**
+ * Whether an instance is being killed and has not failed. Stays true through
+ * the graceful-shutdown window (while the instance still appears in `status`)
+ * and drops on failure or after {@link KILL_GRACE_MS}.
+ */
+export function useInstanceKillState(
+  pid: number,
+  script?: string
+): { killing: boolean } {
+  const intents = useKillIntents();
   return { killing: isInstanceKilling(intents, pid, script) };
+}
+
+/**
+ * Pids among `targets` with a kill that is still pending or shutting down.
+ * A bulk picker uses this to leave already-killing instances out of its
+ * selection.
+ */
+export function useKillingPids(
+  targets: readonly { pid: number; script?: string }[]
+): ReadonlySet<number> {
+  const intents = useKillIntents();
+  return activeKillPids(intents, targets);
 }

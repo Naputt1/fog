@@ -28,12 +28,12 @@ export const KILL_GRACE_MS = 90_000;
  */
 export function optimisticServicePatch(
   action: ServiceAction
-): Pick<InstanceServiceStatus, "running" | "health"> {
+): Pick<InstanceServiceStatus, "running" | "health" | "skipped"> {
   switch (action) {
     case "start":
-      return { running: true, health: "starting" };
+      return { running: true, health: "starting", skipped: false };
     case "restart":
-      return { running: true, health: "starting" };
+      return { running: true, health: "starting", skipped: false };
     case "stop":
       return { running: false, health: null };
   }
@@ -95,4 +95,22 @@ export function isInstanceKilling(
       (script == null || intent.script == null || intent.script === script) &&
       now - intent.submittedAt < KILL_GRACE_MS
   );
+}
+
+/**
+ * Every target whose kill was requested and has not failed, within
+ * {@link KILL_GRACE_MS}. Targets are matched by pid and script so a recycled
+ * pid cannot hide a different instance. Bulk controls use it to leave
+ * instances that are already shutting down out of their selection.
+ */
+export function activeKillPids(
+  intents: readonly KillIntentState[],
+  targets: readonly { pid: number; script?: string }[],
+  now: number = Date.now()
+): Set<number> {
+  const pids = new Set<number>();
+  for (const { pid, script } of targets) {
+    if (isInstanceKilling(intents, pid, script, now)) pids.add(pid);
+  }
+  return pids;
 }

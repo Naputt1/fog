@@ -42,6 +42,11 @@ pub struct ServiceStatus {
     /// index UI to attribute declared ports to services.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub port_names: Vec<String>,
+    /// Left out of this run with `--without`: no process, and `fog ls` /
+    /// `fog logs` / the index show it as skipped. Omitted when false so older
+    /// readers are unaffected.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub skipped: bool,
 }
 
 /// Allocated port map for an instance (symbolic name -> host port).
@@ -146,6 +151,10 @@ pub struct IpcState {
     pub handoff_all: Arc<AtomicBool>,
     /// Whether this instance was started with `--no-share`.
     pub no_share: bool,
+    /// Services forced with `--share` for this run, so `fog attach` can rebuild
+    /// the same invocation. Mutable so a worktree switch can drop names the
+    /// target script no longer defines.
+    pub forced_share: Arc<Mutex<Vec<String>>>,
     /// PID of the instance that cold-started this one through a cross-instance
     /// port reference, if any.
     pub autostarted_by: Option<u32>,
@@ -195,6 +204,7 @@ impl IpcState {
             handoff_done: Arc::new(AtomicBool::new(false)),
             handoff_all: Arc::new(AtomicBool::new(false)),
             no_share,
+            forced_share: Arc::new(Mutex::new(Vec::new())),
             autostarted_by: None,
             autostarted_by_label: None,
             control_req: Arc::new(Mutex::new(None)),
@@ -242,6 +252,10 @@ pub struct StatusResponse {
     /// Whether this instance was started with `--no-share`.
     #[serde(default)]
     pub no_share: bool,
+    /// Services forced with `--share` for this instance's run (empty for older
+    /// instances), replayed by `fog attach`.
+    #[serde(default)]
+    pub forced_share: Vec<String>,
     /// PID of the instance that cold-started this one, if any.
     #[serde(default)]
     pub autostarted_by: Option<u32>,

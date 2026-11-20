@@ -46,7 +46,9 @@ pub(crate) fn cmd_ls() -> io::Result<()> {
                     .services
                     .iter()
                     .map(|s| {
-                        let state = if s.running {
+                        let state = if s.skipped {
+                            "skipped".to_string()
+                        } else if s.running {
                             s.health.clone()
                         } else {
                             ServiceState::Stopped.as_str().to_string()

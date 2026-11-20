@@ -668,7 +668,7 @@ const VALIDATION_BRANCH: &str = "validation";
 /// The name a service is known by: its explicit `name`, else its path's
 /// basename. Mirrors the rule `runtime::resolve_dep_order` applies when it
 /// resolves `depends_on`.
-fn effective_name(entry: &ConfigEntry) -> String {
+pub(crate) fn effective_name(entry: &ConfigEntry) -> String {
     entry.name.clone().unwrap_or_else(|| {
         Path::new(&entry.path)
             .file_name()

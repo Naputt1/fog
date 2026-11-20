@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { ChevronRight, GitBranch, Plus, Terminal } from "lucide-react";
+import { ChevronRight, GitBranch, Plus, Skull, Terminal } from "lucide-react";
 
 import { useServices, useStatus } from "@/lib/hooks";
 import {
@@ -24,6 +24,7 @@ import { InstanceKillButton } from "@/components/instance-kill-button";
 import { InstanceKillingBadge } from "@/components/instance-killing-badge";
 import { InstancePortsButton } from "@/components/instance-ports";
 import { LaunchPopup } from "@/components/launch-instance";
+import { KillInstancesPopup } from "@/components/kill-instances";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
@@ -32,18 +33,29 @@ export const Route = createFileRoute("/projects/$project/")({
   component: BranchesPage,
 });
 
+type BranchServiceState = "running" | "skipped" | "stopped";
+
 /** Unique service names across a branch's instances, with an aggregate state. */
 function branchServiceNames(
   bucket: BranchBucket
-): { name: string; running: boolean }[] {
-  const byName = new Map<string, boolean>();
+): { name: string; state: BranchServiceState }[] {
+  const byName = new Map<string, { running: boolean; skipped: boolean }>();
   for (const inst of bucket.instances) {
     for (const svc of inst.services) {
-      byName.set(svc.name, (byName.get(svc.name) ?? false) || svc.running);
+      const current = byName.get(svc.name) ?? {
+        running: false,
+        skipped: true,
+      };
+      current.running ||= svc.running;
+      current.skipped &&= svc.skipped;
+      byName.set(svc.name, current);
     }
   }
   return [...byName.entries()]
-    .map(([name, running]) => ({ name, running }))
+    .map(([name, svc]): { name: string; state: BranchServiceState } => ({
+      name,
+      state: svc.running ? "running" : svc.skipped ? "skipped" : "stopped",
+    }))
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
@@ -105,6 +117,7 @@ function BranchCard({ bucket }: { bucket: BranchBucket }) {
   const param = worktreeParam(bucket.worktree);
   const label = bucket.worktree || DEFAULT_WORKTREE;
   const services = branchServiceNames(bucket);
+  const skipped = services.filter((svc) => svc.state === "skipped").length;
   const multi = bucket.instances.length > 1;
   const only = bucket.instances[0];
 
@@ -144,6 +157,7 @@ function BranchCard({ bucket }: { bucket: BranchBucket }) {
         <div className="text-muted-foreground text-2xs flex flex-wrap items-center gap-x-3 gap-y-1 font-mono">
           <span>{stats.total} services</span>
           <span className="text-primary">{stats.running} running</span>
+          {skipped > 0 ? <span>{skipped} skipped</span> : null}
           {multi ? <span>{bucket.instances.length} instances</span> : null}
         </div>
 
@@ -152,14 +166,20 @@ function BranchCard({ bucket }: { bucket: BranchBucket }) {
             {services.map((svc) => (
               <span
                 key={svc.name}
+                title={`${svc.name}: ${svc.state}`}
                 className={cn(
                   "border-border text-3xs rounded-full border px-2 py-0.5 font-mono",
-                  svc.running
+                  svc.state === "running"
                     ? "text-muted-foreground"
-                    : "text-muted-foreground/50 border-dashed"
+                    : svc.state === "skipped"
+                      ? "text-muted-foreground bg-muted/40 border-dashed"
+                      : "text-muted-foreground/50 border-dashed"
                 )}
               >
                 {svc.name}
+                {svc.state === "skipped" ? (
+                  <span className="text-muted-foreground/70"> · skipped</span>
+                ) : null}
               </span>
             ))}
           </div>
@@ -257,11 +277,13 @@ function BranchesPage() {
 
   // Another instance of this project, started from here.
   const [launchOpen, setLaunchOpen] = useState(false);
+  const [killOpen, setKillOpen] = useState(false);
 
   const needle = project.toLowerCase();
   const projectBuckets = groupByBranch(
     buildInstanceViews(status?.instances ?? [], services ?? [])
   ).filter((b) => b.project.toLowerCase() === needle);
+  const projectInstances = projectBuckets.flatMap((b) => b.instances);
 
   // Fallback to the docker directory when no instance reports this project
   // (e.g. the index server could not query the IPC sockets).
@@ -287,10 +309,22 @@ function BranchesPage() {
       <PageHeader
         title={project}
         actions={
-          <Button size="sm" onClick={() => setLaunchOpen(true)}>
-            <Plus aria-hidden />
-            Start instance
-          </Button>
+          <>
+            {projectInstances.length > 0 ? (
+              <Button
+                variant="destructiveOutline"
+                size="sm"
+                onClick={() => setKillOpen(true)}
+              >
+                <Skull aria-hidden />
+                Kill instances
+              </Button>
+            ) : null}
+            <Button size="sm" onClick={() => setLaunchOpen(true)}>
+              <Plus aria-hidden />
+              Start instance
+            </Button>
+          </>
         }
       />
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -307,6 +341,12 @@ function BranchesPage() {
             ))}
       </div>
       {launchPopup}
+      <KillInstancesPopup
+        open={killOpen}
+        onOpenChange={setKillOpen}
+        project={project}
+        instances={projectInstances}
+      />
     </div>
   );
 }

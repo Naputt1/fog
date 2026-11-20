@@ -114,11 +114,34 @@ impl DetachSpawn {
         }
     }
 
+    /// Arguments for the successor, including the current skip and forced-share
+    /// sets.
+    ///
+    /// Both are derived from the live app (not the startup sets): a service
+    /// started manually must not be skipped again, and a forced service the
+    /// current config no longer defines must not reach the successor.
+    fn successor_args(
+        &self,
+        without: &[String],
+        forced_share: &[String],
+    ) -> Vec<std::ffi::OsString> {
+        let mut args = self.args.clone();
+        for name in without {
+            args.push("--without".into());
+            args.push(name.into());
+        }
+        for name in forced_share {
+            args.push("--share".into());
+            args.push(name.into());
+        }
+        args
+    }
+
     /// Launches the detached successor and returns its pid.
-    fn spawn(&self) -> std::io::Result<u32> {
+    fn spawn(&self, without: &[String], forced_share: &[String]) -> std::io::Result<u32> {
         let mut cmd = std::process::Command::new(&self.exe);
-        cmd.args(&self.args)
-            .env("FOG_DAEMON_CHILD", "1")
+        cmd.args(self.successor_args(without, forced_share));
+        cmd.env("FOG_DAEMON_CHILD", "1")
             .env("FOG_DETACH_FROM", self.from_pid.to_string())
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
@@ -168,9 +191,10 @@ pub struct App {
     /// `ipc_state.branch` (which is set once at startup) so a worktree switch
     /// updates the title without changing the instance's IPC identity.
     title_branch: Option<String>,
-    /// Whether `--no-share` was passed: when true shared/reuse services are
-    /// always started fresh instead of borrowed/handed over.
-    no_share: bool,
+    /// `--no-share` / `--share` overrides for this run: which services are
+    /// shared even when their config does not say so, and whether sharing is
+    /// disabled entirely.
+    share: crate::runtime::SharePolicy,
     /// Whether `--verbose` was passed: gates informational setup output.
     verbose: bool,
     /// Set once a `d` detach has launched a detached successor; the run loop
@@ -216,7 +240,9 @@ pub struct AppCreateOpts {
     pub ipc_state: Arc<IpcState>,
     pub config_rel: PathBuf,
     pub save_logs: bool,
-    pub no_share: bool,
+    /// `--no-share` / `--share` overrides carried into worktree switches and
+    /// detach handling.
+    pub share: crate::runtime::SharePolicy,
     pub verbose: bool,
     /// Detach spawn recipe; `None` outside an interactive run.
     pub detach: Option<DetachSpawn>,
@@ -243,7 +269,7 @@ impl App {
             ipc_state,
             config_rel,
             save_logs,
-            no_share,
+            share,
             verbose,
             detach,
             startup_messages,
@@ -299,7 +325,7 @@ impl App {
             auto_scroll_col: 0,
             content_layout: Vec::new(),
             switch_popup: None,
-            no_share,
+            share,
             verbose,
             detaching: false,
             detach_pid: None,
@@ -330,7 +356,7 @@ impl App {
             self.note_error("detach is not supported on this platform".to_string());
             return;
         }
-        if self.no_share {
+        if self.share.no_share {
             self.note_error("cannot detach with --no-share: live handoff is disabled".to_string());
             return;
         }
@@ -338,7 +364,26 @@ impl App {
             self.note_error("detach is unavailable in this run".to_string());
             return;
         };
-        match spawn.spawn() {
+        let without: Vec<String> = self
+            .items
+            .iter()
+            .filter(|item| item.skipped)
+            .map(|item| item.name.clone())
+            .collect();
+        let live: std::collections::HashSet<&str> = self
+            .items
+            .iter()
+            .filter(|item| !item.skipped)
+            .map(|item| item.name.as_str())
+            .collect();
+        let forced_share: Vec<String> = self
+            .share
+            .forced
+            .iter()
+            .filter(|name| live.contains(name.as_str()))
+            .cloned()
+            .collect();
+        match spawn.spawn(&without, &forced_share) {
             Ok(pid) => {
                 self.detach_pid = Some(pid);
                 self.detaching = true;
@@ -448,7 +493,7 @@ mod tests {
             auto_scroll_col: 0,
             content_layout: Vec::new(),
             switch_popup: None,
-            no_share: false,
+            share: crate::runtime::SharePolicy::default(),
             verbose: false,
             detaching: false,
             detach_pid: None,
@@ -1045,5 +1090,40 @@ mod tests {
         // `x` still closes the current shell tab.
         app.handle_normal_key(KeyEvent::from(KeyCode::Char('x')));
         assert_eq!(app.items.len(), 1);
+    }
+
+    #[test]
+    fn detach_successor_args_use_the_current_skip_set() {
+        let spawn = DetachSpawn::new(
+            std::path::PathBuf::from("fog"),
+            vec!["dev".into(), "--config".into(), "fog.json".into()],
+            42,
+        );
+        assert_eq!(
+            spawn.successor_args(
+                &["db".to_string(), "worker".to_string()],
+                &["redis".to_string()],
+            ),
+            vec![
+                std::ffi::OsString::from("dev"),
+                std::ffi::OsString::from("--config"),
+                std::ffi::OsString::from("fog.json"),
+                std::ffi::OsString::from("--without"),
+                std::ffi::OsString::from("db"),
+                std::ffi::OsString::from("--without"),
+                std::ffi::OsString::from("worker"),
+                std::ffi::OsString::from("--share"),
+                std::ffi::OsString::from("redis"),
+            ]
+        );
+        assert_eq!(
+            spawn.successor_args(&[], &[]),
+            vec![
+                std::ffi::OsString::from("dev"),
+                std::ffi::OsString::from("--config"),
+                std::ffi::OsString::from("fog.json"),
+            ],
+            "a manually started service is no longer skipped"
+        );
     }
 }

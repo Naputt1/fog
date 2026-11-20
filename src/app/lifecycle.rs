@@ -328,7 +328,7 @@ impl App {
     /// Extracts live services requested for handover by a replacing instance
     /// and publishes them for the IPC thread to send over the socket.
     pub(crate) fn perform_handoff(&mut self) {
-        if self.no_share {
+        if self.share.no_share {
             self.ipc_state
                 .handoff_prepared
                 .store(true, Ordering::SeqCst);
@@ -398,6 +398,7 @@ impl App {
                 if entry.stopped != item.stopped
                     || entry.process_running != item.process_running
                     || entry.pending != pending
+                    || entry.skipped != item.skipped
                     || entry.health_status != health
                 {
                     changed = true;
@@ -405,6 +406,7 @@ impl App {
                 entry.stopped = item.stopped;
                 entry.process_running = item.process_running;
                 entry.pending = pending;
+                entry.skipped = item.skipped;
                 entry.health_status = health;
             }
         }
@@ -471,6 +473,7 @@ impl App {
                 shutdown_cmd: item.shutdown_cmd.clone(),
                 shared: item.shared,
                 port_names: item.port_names.clone(),
+                skipped: item.skipped,
             });
         }
         let mut proxy = self.ipc_state.proxy.lock().expect("mutex poisoned");
@@ -614,6 +617,7 @@ impl App {
                         reason: "already running".to_string(),
                     };
                 }
+                let was_skipped = item.skipped;
                 // The terminal remembers the command it was spawned with; a
                 // not-yet-started pending service still holds its real
                 // path/cmd in `pending_services`.
@@ -651,6 +655,14 @@ impl App {
                             if !item.health_checks.is_empty() {
                                 item.start_health_checks();
                             }
+                        } else if was_skipped {
+                            // A skipped service has no PendingService to promote;
+                            // starting it must also resume its health monitors.
+                            let item = &mut self.items[idx];
+                            if !item.health_checks.is_empty() {
+                                item.start_health_checks();
+                            }
+                            item.start_endpoint_health_checks();
                         }
                         ipc::ControlResponse {
                             ok: true,
