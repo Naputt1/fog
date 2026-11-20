@@ -21,6 +21,7 @@ import {
 } from "@/lib/services";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page-state";
 import { StatusBadge } from "@/components/status-badge";
+import { InstancePortsButton } from "@/components/instance-ports";
 import { ServiceUrl } from "@/components/service-url";
 import { ServiceActions } from "@/components/service-actions";
 import { InstanceKillButton } from "@/components/instance-kill-button";
@@ -429,6 +430,11 @@ function ScriptServicesPage() {
                 {inst.services.filter((s) => s.running).length}/
                 {inst.services.length} running
               </span>
+              <InstancePortsButton inst={inst} className="ml-auto" />
+            </div>
+          ) : inst.ports.length > 0 ? (
+            <div className="flex justify-end">
+              <InstancePortsButton inst={inst} />
             </div>
           ) : null}
 
