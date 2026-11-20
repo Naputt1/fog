@@ -867,19 +867,29 @@ impl Terminal {
     /// sibling instance and must not be handed over or have its ports seeded.
     #[cfg(unix)]
     pub fn can_handoff(&self) -> bool {
-        let has_pid = self.owned_pid.is_some()
-            || self
-                .child
+        if self.handed_off
+            || self.torn_down
+            || self.stopped
+            || !self.process_running
+            || self.child_reaped
+        {
+            return false;
+        }
+        let has_live_pid = if let Some(pid) = self.owned_pid {
+            process::is_pid_alive(pid)
+        } else {
+            self.child
                 .as_ref()
                 .and_then(|child| child.process_id())
-                .is_some();
+                .is_some()
+        };
         let has_fd = self.raw_fd.is_some()
             || self
                 .master
                 .as_ref()
                 .and_then(|master| master.as_raw_fd())
                 .is_some();
-        !self.handed_off && !self.torn_down && has_pid && has_fd
+        has_live_pid && has_fd
     }
 
     #[cfg(not(unix))]
@@ -1936,11 +1946,11 @@ mod tests {
         let mut t = Terminal::spawn_skipped(
             "db".into(),
             dir.to_string_lossy().into_owned(),
-            "true".into(),
+            "sleep 1".into(),
             100,
         );
         t.shared_on_start = true;
-        t.start(&dir.to_string_lossy(), "true").unwrap();
+        t.start(&dir.to_string_lossy(), "sleep 1").unwrap();
         assert!(!t.skipped);
         assert!(
             t.shared,
@@ -1952,6 +1962,35 @@ mod tests {
             "the started shared service owns a live process for a switch"
         );
         t.stop().unwrap();
+        drop(t);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_exited_shared_service_cannot_be_handed_over() {
+        let dir = std::env::temp_dir().join(format!("fog-test-exited-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut t = Terminal::spawn_skipped(
+            "db".into(),
+            dir.to_string_lossy().into_owned(),
+            "true".into(),
+            100,
+        );
+        assert!(!t.can_handoff(), "a skipped terminal has no process");
+        t.stopped = false;
+        t.process_running = true;
+        t.child_reaped = true;
+        assert!(
+            !t.can_handoff(),
+            "a reaped child must not hand a dead process to another branch"
+        );
+        t.child_reaped = false;
+        t.process_running = false;
+        assert!(
+            !t.can_handoff(),
+            "a stopped shell with no process cannot be handed over"
+        );
         drop(t);
         let _ = std::fs::remove_dir_all(&dir);
     }

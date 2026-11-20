@@ -660,6 +660,7 @@ pub fn unprobed_port_names(
     config_dir: &Path,
     share: &SharePolicy,
     without: &HashSet<String>,
+    declared_ports: Option<&HashMap<String, u16>>,
 ) -> HashSet<String> {
     let entries = script.service.as_deref().unwrap_or_default();
     let mut unprobed = HashSet::new();
@@ -673,9 +674,15 @@ pub fn unprobed_port_names(
         // A kept dependent that references the skipped service's port is a
         // consumer, not a binder, so the skipped reference still stays
         // unprobed. A genuine duplicate bind fails in that service's own tab.
-        if without.contains(&name)
-            || (share.shared(&name, flagged)
-                && entry_health_checks(entry, &config_dir.join(&entry.path)).is_empty())
+        if without.contains(&name) {
+            unprobed.extend(crate::ports::entry_referenced_ports(entry));
+            // Compose-style services often never name their own port; the
+            // declaration under the service's name is the next best signal.
+            if declared_ports.is_some_and(|ports| ports.contains_key(&name)) {
+                unprobed.insert(name.clone());
+            }
+        } else if share.shared(&name, flagged)
+            && entry_health_checks(entry, &config_dir.join(&entry.path)).is_empty()
         {
             unprobed.extend(crate::ports::entry_referenced_ports(entry));
         }
@@ -1401,7 +1408,13 @@ mod tests {
         );
         let script = script_with(vec![db, api]);
         let without: HashSet<String> = ["db".to_string()].into();
-        let names = unprobed_port_names(&script, Path::new("."), &SharePolicy::default(), &without);
+        let names = unprobed_port_names(
+            &script,
+            Path::new("."),
+            &SharePolicy::default(),
+            &without,
+            None,
+        );
         assert!(names.contains("db"));
         assert!(!names.contains("api"));
     }
@@ -1428,11 +1441,34 @@ mod tests {
         );
         let script = script_with(vec![db, api]);
         let without: HashSet<String> = ["db".to_string()].into();
-        let names = unprobed_port_names(&script, Path::new("."), &SharePolicy::default(), &without);
+        let names = unprobed_port_names(
+            &script,
+            Path::new("."),
+            &SharePolicy::default(),
+            &without,
+            None,
+        );
         assert!(
             names.contains("db"),
             "a dependent consuming the skipped port does not make it bindable"
         );
+    }
+
+    #[test]
+    fn test_unprobed_port_names_cover_compose_style_skipped_service() {
+        // A compose command need not name the port; `ports.<service>` is the
+        // declaration that the skipped service would bind.
+        let script = script_with(vec![entry("db", None), entry("api", Some(vec!["db"]))]);
+        let without: HashSet<String> = ["db".to_string()].into();
+        let declared: HashMap<String, u16> = [("db".to_string(), 54351)].into();
+        let names = unprobed_port_names(
+            &script,
+            Path::new("."),
+            &SharePolicy::default(),
+            &without,
+            Some(&declared),
+        );
+        assert!(names.contains("db"));
     }
 
     #[test]
@@ -1452,6 +1488,7 @@ mod tests {
             Path::new("."),
             &SharePolicy::default(),
             &HashSet::new(),
+            None,
         );
         assert!(
             names.contains("db"),
@@ -1473,6 +1510,7 @@ mod tests {
             Path::new("."),
             &SharePolicy::default(),
             &HashSet::new(),
+            None,
         );
         assert!(!names.contains("db"), "a borrowable service is probed");
     }

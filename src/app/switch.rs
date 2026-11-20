@@ -312,13 +312,14 @@ impl App {
             &without,
         );
         let specs = config.ports.clone().unwrap_or_default();
+        let unprobed =
+            runtime::unprobed_port_names(script, &config_dir, &share, &without, Some(&specs));
         let local_specs: std::collections::HashMap<String, u16> = specs
             .into_iter()
             .filter(|(name, _)| {
                 !adopted_ports.contains_key(name) && !handoff_ports.contains_key(name)
             })
             .collect();
-        let unprobed = runtime::unprobed_port_names(script, &config_dir, &share, &without);
         let mut port_map = if local_specs.is_empty() {
             std::collections::HashMap::new()
         } else {
@@ -353,7 +354,7 @@ impl App {
         let mut adopted: HashMap<String, ipc::HandoffItem> = HashMap::new();
         if !self.share.no_share {
             for item in &mut self.items {
-                if (item.reused || item.shared) && target_shared.contains(&item.name) {
+                if item.can_handoff() && target_shared.contains(&item.name) {
                     if let Some(handoff) = item.extract_handoff() {
                         adopted.insert(handoff.name.clone(), handoff);
                     } else {
