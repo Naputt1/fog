@@ -716,6 +716,8 @@ mod tests {
                 health: "pending".to_string(),
                 endpoints: Vec::new(),
                 shutdown_cmd: None,
+                shared: false,
+                port_names: Vec::new(),
                 skipped: false,
             },
             ipc::ServiceStatus {
@@ -724,6 +726,8 @@ mod tests {
                 health: "healthy".to_string(),
                 endpoints: Vec::new(),
                 shutdown_cmd: None,
+                shared: false,
+                port_names: Vec::new(),
                 skipped: false,
             },
         ];

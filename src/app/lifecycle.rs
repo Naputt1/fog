@@ -471,6 +471,8 @@ impl App {
                     .to_string(),
                 endpoints: item.endpoint_statuses(),
                 shutdown_cmd: item.shutdown_cmd.clone(),
+                shared: item.shared,
+                port_names: item.port_names.clone(),
                 skipped: item.skipped,
             });
         }
