@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  # Superseded runs on the same branch are useless: cancel them instead of paying
+  # for a second three-OS Rust matrix.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -17,6 +23,7 @@ jobs:
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
       frontend: ${{ steps.filter.outputs.frontend }}
+      docs: ${{ steps.filter.outputs.docs }}
     steps:
       - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v4
@@ -36,6 +43,11 @@ jobs:
               - '.github/workflows/**'
             frontend:
               - 'ui/**'
+              - '.bun-version'
+              - '.github/workflows/**'
+            docs:
+              - 'docs/**'
+              - '.bun-version'
               - '.github/workflows/**'
 
   frontend:
@@ -47,7 +59,7 @@ jobs:
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.4
+          bun-version-file: .bun-version
       - name: Cache Bun install
         uses: actions/cache@v6
         with:
@@ -66,6 +78,30 @@ jobs:
           name: ui-dist
           path: ui/dist
           if-no-files-found: error
+
+  docs:
+    needs: changes
+    if: needs.changes.outputs.docs == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: docs
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - name: Cache Bun install
+        uses: actions/cache@v6
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('docs/bun.lock') }}
+          restore-keys: ${{ runner.os }}-bun-
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Build VitePress
+        run: bun run docs:build
 
   rust:
     needs: [changes, frontend]
@@ -105,7 +141,7 @@ jobs:
         run: cargo test
 
   ci-required:
-    needs: [changes, frontend, rust]
+    needs: [changes, frontend, docs, rust]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -113,12 +149,13 @@ jobs:
         run: |
           echo "changes=${{ needs.changes.result }}"
           echo "frontend=${{ needs.frontend.result }}"
+          echo "docs=${{ needs.docs.result }}"
           echo "rust=${{ needs.rust.result }}"
           if [ "${{ needs.changes.result }}" != "success" ]; then
             echo "changes job did not succeed"
             exit 1
           fi
-          for result in "${{ needs.frontend.result }}" "${{ needs.rust.result }}"; do
+          for result in "${{ needs.frontend.result }}" "${{ needs.docs.result }}" "${{ needs.rust.result }}"; do
             case "$result" in
               success|skipped) ;;
               *) echo "Required job did not succeed: $result"; exit 1 ;;

@@ -1,6 +1,21 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": [
-    "config:recommended"
+  "extends": ["config:recommended"],
+  "packageRules": [
+    {
+      "matchDatasources": ["crate"],
+      "matchUpdateTypes": ["patch"],
+      "groupName": "rust patch updates",
+      "automerge": true
+    },
+    {
+      "matchDatasources": ["crate"],
+      "matchUpdateTypes": ["minor"],
+      "groupName": "rust minor updates"
+    },
+    {
+      "matchPackageNames": ["bun"],
+      "minimumReleaseAge": "3 days"
+    }
   ]
 }
