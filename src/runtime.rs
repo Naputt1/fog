@@ -662,33 +662,24 @@ pub fn unprobed_port_names(
     without: &HashSet<String>,
 ) -> HashSet<String> {
     let entries = script.service.as_deref().unwrap_or_default();
-    let mut skipped = HashSet::new();
-    let mut kept = HashSet::new();
-    let mut shared_without_health = HashSet::new();
+    let mut unprobed = HashSet::new();
     for entry in entries {
         let name = entry_name(entry, config_dir);
-        let skipped_entry = without.contains(&name);
-        let refs: HashSet<String> = crate::ports::entry_referenced_ports(entry)
-            .into_iter()
-            .collect();
-        if skipped_entry {
-            skipped.extend(refs);
-            continue;
-        }
-        kept.extend(refs);
         let flagged = if script.concurrent {
             entry.share
         } else {
             entry.reuse
         };
-        if share.shared(&name, flagged)
-            && entry_health_checks(entry, &config_dir.join(&entry.path)).is_empty()
+        // A kept dependent that references the skipped service's port is a
+        // consumer, not a binder, so the skipped reference still stays
+        // unprobed. A genuine duplicate bind fails in that service's own tab.
+        if without.contains(&name)
+            || (share.shared(&name, flagged)
+                && entry_health_checks(entry, &config_dir.join(&entry.path)).is_empty())
         {
-            shared_without_health.extend(crate::ports::entry_referenced_ports(entry));
+            unprobed.extend(crate::ports::entry_referenced_ports(entry));
         }
     }
-    let mut unprobed: HashSet<String> = skipped.difference(&kept).cloned().collect();
-    unprobed.extend(shared_without_health);
     unprobed
 }
 
@@ -1416,31 +1407,31 @@ mod tests {
     }
 
     #[test]
-    fn test_unprobed_port_names_keep_ports_a_running_service_uses() {
-        let mut worker = entry("worker", None);
-        worker.env = Some(
+    fn test_unprobed_port_names_cover_ports_a_kept_service_consumes() {
+        let mut db = entry("db", None);
+        db.env = Some(
             [(
-                "CACHE".to_string(),
-                "redis://127.0.0.1:${ports.cache}".to_string(),
+                "DATABASE_URL".to_string(),
+                "postgres://x@${ports.db}/x".to_string(),
             )]
             .into_iter()
             .collect(),
         );
-        let mut redis = entry("redis", None);
-        redis.env = Some(
+        let mut api = entry("api", Some(vec!["db"]));
+        api.env = Some(
             [(
-                "CACHE".to_string(),
-                "redis://127.0.0.1:${ports.cache}".to_string(),
+                "DATABASE_URL".to_string(),
+                "postgres://x@${ports.db}/x".to_string(),
             )]
             .into_iter()
             .collect(),
         );
-        let script = script_with(vec![worker, redis]);
-        let without: HashSet<String> = ["worker".to_string()].into();
+        let script = script_with(vec![db, api]);
+        let without: HashSet<String> = ["db".to_string()].into();
         let names = unprobed_port_names(&script, Path::new("."), &SharePolicy::default(), &without);
         assert!(
-            !names.contains("cache"),
-            "a kept service still binds this port, so it must be probed"
+            names.contains("db"),
+            "a dependent consuming the skipped port does not make it bindable"
         );
     }
 

@@ -860,6 +860,33 @@ impl Terminal {
         self.handed_off = true;
     }
 
+    /// Whether this terminal owns a live process and PTY that
+    /// [`extract_handoff`](Self::extract_handoff) can transfer.
+    ///
+    /// A borrowed (`reused`) terminal has neither: the process belongs to a
+    /// sibling instance and must not be handed over or have its ports seeded.
+    #[cfg(unix)]
+    pub fn can_handoff(&self) -> bool {
+        let has_pid = self.owned_pid.is_some()
+            || self
+                .child
+                .as_ref()
+                .and_then(|child| child.process_id())
+                .is_some();
+        let has_fd = self.raw_fd.is_some()
+            || self
+                .master
+                .as_ref()
+                .and_then(|master| master.as_raw_fd())
+                .is_some();
+        !self.handed_off && !self.torn_down && has_pid && has_fd
+    }
+
+    #[cfg(not(unix))]
+    pub fn can_handoff(&self) -> bool {
+        false
+    }
+
     /// Extracts this terminal's live process for transfer to another instance.
     ///
     /// Dups the PTY master fd and stops this terminal's reader so output is
@@ -1892,6 +1919,10 @@ mod tests {
         assert!(t.reused);
         assert!(t.process_running);
         assert!(!t.stopped);
+        assert!(
+            !t.can_handoff(),
+            "a borrowed terminal has no process of its own to hand over"
+        );
         assert!(t.is_ready());
         t.refresh_status();
         assert!(!t.stopped);
@@ -1916,6 +1947,10 @@ mod tests {
             "a manually started shared service must stay shared on teardown"
         );
         assert!(!t.shared_on_start);
+        assert!(
+            t.can_handoff(),
+            "the started shared service owns a live process for a switch"
+        );
         t.stop().unwrap();
         drop(t);
         let _ = std::fs::remove_dir_all(&dir);

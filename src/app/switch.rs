@@ -273,7 +273,7 @@ impl App {
         if !share.no_share {
             let current_ports = self.ipc_state.ports.lock().expect("mutex poisoned").clone();
             for item in &self.items {
-                if (item.reused || item.shared)
+                if item.can_handoff()
                     && target_shared.contains(&item.name)
                     && let Some(names) = target_ports.get(&item.name)
                 {
@@ -346,8 +346,10 @@ impl App {
             return Err(FogError::new(format!("switch worktree: {e}")));
         }
 
-        // Build the new runtime *before* tearing down the old one, so a
-        // build failure doesn't leave the UI empty.
+        // Build the new runtime *before* tearing down the old one, so a build
+        // failure doesn't leave the UI empty. A fixed port still held by the
+        // old services can fail allocation here; that is safer than tearing
+        // them down first and then discovering the target cannot start.
         let mut adopted: HashMap<String, ipc::HandoffItem> = HashMap::new();
         if !self.share.no_share {
             for item in &mut self.items {

@@ -27,20 +27,6 @@ pub(crate) fn cmd_restart(pid: Option<u32>, all: bool, cli: &Cli) -> io::Result<
 
     let targets = resolve_targets(&instances, pid, all, cli, "restart");
 
-    if let Some(name) = cli
-        .without
-        .iter()
-        .find(|name| cli.share.iter().any(|shared| shared == *name))
-    {
-        die(
-            crate::error::FogError::new(format!(
-                "service '{name}' cannot be both skipped and force-shared"
-            )),
-            Some("use either `--without` or `--share` for it; nothing was stopped"),
-            2,
-        );
-    }
-
     // Plan every restart before stopping anything: a typo in `--without`, a
     // missing script, or an unreadable config must not take down a target
     // that cannot be replaced. This also makes `--all` all-or-nothing.
@@ -124,6 +110,20 @@ pub(crate) fn cmd_restart(pid: Option<u32>, all: bool, cli: &Cli) -> io::Result<
         }
         let mut without: Vec<String> = without.into_iter().collect();
         without.sort();
+        if let Some(name) = cli
+            .share
+            .iter()
+            .map(|name| name.trim())
+            .find(|name| !name.is_empty() && without.iter().any(|skipped| skipped == name))
+        {
+            die(
+                crate::error::FogError::new(format!(
+                    "service '{name}' cannot be both skipped and force-shared"
+                )),
+                Some("use either `--without` or `--share` for it; nothing was stopped"),
+                2,
+            );
+        }
         // Fresh `--share` names are strict like `--without`: catch a typo
         // before stopping anything. Replayed names are filtered because the
         // config may have changed since the target started.
