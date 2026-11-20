@@ -487,6 +487,8 @@ mod tests {
             health: "unknown".into(),
             endpoints: Vec::new(),
             shutdown_cmd: None,
+            shared: false,
+            port_names: Vec::new(),
             skipped: false,
         });
         let state = Arc::new(state);
@@ -557,6 +559,8 @@ mod tests {
             health: "healthy".into(),
             endpoints: Vec::new(),
             shutdown_cmd: None,
+            shared: false,
+            port_names: Vec::new(),
             skipped: false,
         });
         state.proxy.lock().unwrap().replace(ProxyStatus {

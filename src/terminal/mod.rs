@@ -149,6 +149,10 @@ pub struct Terminal {
     /// `shutdown_cmd` is skipped on teardown while another instance on the
     /// same (project, script, branch) still serves it.
     pub shared: bool,
+    /// Symbolic port names (`${ports.*}`) this service references. The index
+    /// UI uses them to attribute a declared port to its service and to mark the
+    /// shared ones.
+    pub port_names: Vec<String>,
     /// Share decision to apply when a skipped service is started manually.
     /// A skipped terminal is not live, so it is not handed over or treated as
     /// shared yet; promoting it must restore the config/`--share` decision.
@@ -328,6 +332,7 @@ impl Terminal {
             reused: false,
             skipped: false,
             shared: false,
+            port_names: Vec::new(),
             shared_on_start: false,
             owned_pid: None,
             raw_fd: None,
@@ -396,6 +401,7 @@ impl Terminal {
             reused: false,
             skipped: false,
             shared: false,
+            port_names: Vec::new(),
             shared_on_start: false,
             owned_pid: None,
             raw_fd: None,
@@ -462,6 +468,7 @@ impl Terminal {
             reused: false,
             skipped: false,
             shared: false,
+            port_names: Vec::new(),
             shared_on_start: false,
             owned_pid: None,
             raw_fd: None,
@@ -525,6 +532,7 @@ impl Terminal {
             reused: false,
             skipped: false,
             shared: false,
+            port_names: Vec::new(),
             shared_on_start: false,
             owned_pid: None,
             raw_fd: None,
@@ -588,6 +596,7 @@ impl Terminal {
             reused: true,
             skipped: false,
             shared: false,
+            port_names: Vec::new(),
             shared_on_start: false,
             owned_pid: None,
             raw_fd: None,
@@ -643,6 +652,7 @@ impl Terminal {
             reused: false,
             skipped: true,
             shared: false,
+            port_names: Vec::new(),
             shared_on_start: false,
             owned_pid: None,
             raw_fd: None,
@@ -804,6 +814,7 @@ impl Terminal {
             reused: true,
             skipped: false,
             shared: false,
+            port_names: Vec::new(),
             shared_on_start: false,
             owned_pid: Some(pid),
             endpoints: Vec::new(),
