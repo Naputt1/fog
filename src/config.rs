@@ -862,7 +862,7 @@ fn port_map_with_external_refs(
 }
 
 /// Loads the global fog config (`~/.config/fog/fog.json`, the one with `theme`
-/// etc) if it exists. Used for `index.enabled` global override.
+/// etc) if it exists. Used for host-wide overrides (`index`, `router`).
 pub fn load_global_config() -> Option<Config> {
     let home = std::env::var("HOME").unwrap_or_default();
     if home.is_empty() {
