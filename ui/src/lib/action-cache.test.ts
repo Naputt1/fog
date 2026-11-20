@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { StatusSnapshot } from "@/lib/api";
 import {
+  activeKillPids,
   applyServiceAction,
   isInstanceKilling,
   KILL_GRACE_MS,
@@ -142,5 +143,62 @@ describe("isInstanceKilling", () => {
     expect(
       isInstanceKilling([intent({ script: undefined })], 1, "dev", now)
     ).toBe(true);
+  });
+});
+
+describe("activeKillPids", () => {
+  const now = 1_000_000;
+  const intent = (over: Partial<KillIntentState>): KillIntentState => ({
+    pid: 1,
+    script: "dev",
+    status: "pending",
+    submittedAt: now,
+    ...over,
+  });
+  const target = (pid: number, script = "dev") => ({ pid, script });
+
+  it("returns every target with an in-flight or successful kill", () => {
+    expect(
+      activeKillPids(
+        [
+          intent({ pid: 1, status: "pending" }),
+          intent({ pid: 2, status: "success" }),
+          intent({ pid: 3, status: "error" }),
+          intent({ pid: 4, status: "idle" }),
+        ],
+        [target(1), target(2), target(3), target(4)],
+        now
+      )
+    ).toEqual(new Set([1, 2]));
+  });
+
+  it("drops expired kills and intents without a pid", () => {
+    expect(
+      activeKillPids(
+        [
+          intent({ pid: 1, submittedAt: now - KILL_GRACE_MS }),
+          intent({ pid: undefined }),
+        ],
+        [target(1)],
+        now
+      )
+    ).toEqual(new Set());
+  });
+
+  it("only matches the target with the same pid and script", () => {
+    expect(
+      activeKillPids(
+        [intent({ pid: 1, script: "dev" })],
+        [target(2), target(1, "worker")],
+        now
+      )
+    ).toEqual(new Set());
+    expect(
+      activeKillPids(
+        [intent({ pid: 1, script: "dev" })],
+        [target(1, "dev"), target(1, "worker")],
+        now
+      )
+    ).toEqual(new Set([1]));
   });
 });
