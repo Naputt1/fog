@@ -41,6 +41,21 @@ See [`fog.schema.json`](https://github.com/Naputt1/fog/blob/main/fog.schema.json
 
 Run-time port overrides: `fog <script> --port <name>=<port>` (repeatable) replaces an allocated port for one run without editing `fog.json`; `--port <name>=0` re-randomizes it. A name not declared in `ports` is added for that run. Overrides apply before templating, so every `${ports.<name>}` consumer — service `cmd`/`env`/health checks, endpoint routes and native routes — resolves to the overridden value. A cross-instance key (`--port api@my-repo:main=4000`, or `--port api@my-repo:main:dev=4000` with a script segment) pins that reference for one run and skips lookup and auto-start.
 
+### Leaving services out of a run
+
+`--without <service>` (repeatable, or comma-separated) starts a script without the named services, without changing `fog.json`:
+
+```bash
+fog dev --without worker
+fog dev --without db,worker
+```
+
+Names are effective service names: an explicit `name`, or the basename of `path`. An unknown name is a usage error reported before ports, DNS, the router or any service is touched, and the message lists the script's services. A name cannot be both skipped and force-shared: `--without db --share db` is a usage error.
+
+A skipped service keeps its tab/status row (`skipped` in `fog ls` and the web UI), its allocated ports, and any proxy/native routes pointing at it. No process, health check, `share`/`reuse` borrow or hand-off is attached to it, and its `shutdown_cmd` is never run, because this run does not own it. If a kept service names a skipped service in `depends_on`, that edge is dropped with a warning and the kept service starts immediately instead of waiting forever. Ports and routes are intentionally left alone: when something else already provides the service on the configured port, routes keep working, and starting the skipped tab later needs no reconfiguration. A fixed port referenced by a skipped service, or declared under its name (the compose-style case), is not probed, even when a kept dependent uses the same `${ports.<name>}` value, so an external process already listening there does not block the run.
+
+The opt-out is per run and survives `-d`, `fog attach`, `fog restart`, and worktree switching. In the TUI press `R` on its tab, or use Start in the web UI, to clear `skipped` and run it normally for the rest of that instance. `fog restart` replays the skip, forced-share and `--no-share` choices, not per-run `--port` overrides: those revert to the values in `fog.json`. After an in-TUI worktree switch, `fog restart` and `fog attach` still reload the instance's startup config, because the instance keeps its original identity.
+
 ## Validation
 
 fog validates the config as it loads it and exits with every problem it finds before starting anything. Unknown keys are errors, not warnings: a misspelled `healt_check` or `depend_on` would otherwise silently drop a health check or a dependency, which is the hardest kind of mistake to notice.
@@ -252,7 +267,7 @@ Services flagged `"share": true` are **shared between all concurrent instances**
 
 `--share <SERVICE>` (repeatable) turns sharing on for the named service, whatever its config says: `share` behavior in a concurrent script, `reuse` behavior in a single-instance one. It exists for a resource that is safe to share (a database, a compose stack) when the config left the flag off. `--no-share` is the opposite: it starts every service fresh for the run. The two flags conflict.
 
-A forced service is still held to the same rules: it needs a `health_check` to be verified and borrowed (without one fog warns and starts it), and it is only borrowed when a same-branch sibling already owns it. The name must be one the script defines — an explicit `name`, else the `path` basename — otherwise fog exits `2` with the list of valid names. The override survives detach and worktree switches, and `fog attach` replays it.
+A forced service is still held to the same rules: it needs a `health_check` to be verified and borrowed (without one fog warns and starts it), and it is only borrowed when a same-branch sibling already owns it. Because fog cannot verify such a service, it also does not probe its fixed ports at startup: a sibling already holding them does not abort the run, and a duplicate start fails in that service's own tab instead. The name must be one the script defines — an explicit `name`, else the `path` basename — otherwise fog exits `2` with the list of valid names. The override survives detach, `fog attach`, `fog restart`, and worktree switches; `--no-share` is replayed across restart too. A name the current config no longer defines is dropped from the replay rather than making restart/attach fail, and a detach successor uses the live forced set.
 
 ### `FOG_BRANCH` environment variable
 

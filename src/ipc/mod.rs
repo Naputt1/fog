@@ -487,6 +487,7 @@ mod tests {
             health: "unknown".into(),
             endpoints: Vec::new(),
             shutdown_cmd: None,
+            skipped: false,
         });
         let state = Arc::new(state);
         let server_dir = dir.clone();
@@ -556,6 +557,7 @@ mod tests {
             health: "healthy".into(),
             endpoints: Vec::new(),
             shutdown_cmd: None,
+            skipped: false,
         });
         state.proxy.lock().unwrap().replace(ProxyStatus {
             running: true,

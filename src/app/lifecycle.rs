@@ -398,6 +398,7 @@ impl App {
                 if entry.stopped != item.stopped
                     || entry.process_running != item.process_running
                     || entry.pending != pending
+                    || entry.skipped != item.skipped
                     || entry.health_status != health
                 {
                     changed = true;
@@ -405,6 +406,7 @@ impl App {
                 entry.stopped = item.stopped;
                 entry.process_running = item.process_running;
                 entry.pending = pending;
+                entry.skipped = item.skipped;
                 entry.health_status = health;
             }
         }
@@ -469,6 +471,7 @@ impl App {
                     .to_string(),
                 endpoints: item.endpoint_statuses(),
                 shutdown_cmd: item.shutdown_cmd.clone(),
+                skipped: item.skipped,
             });
         }
         let mut proxy = self.ipc_state.proxy.lock().expect("mutex poisoned");
@@ -612,6 +615,7 @@ impl App {
                         reason: "already running".to_string(),
                     };
                 }
+                let was_skipped = item.skipped;
                 // The terminal remembers the command it was spawned with; a
                 // not-yet-started pending service still holds its real
                 // path/cmd in `pending_services`.
@@ -649,6 +653,14 @@ impl App {
                             if !item.health_checks.is_empty() {
                                 item.start_health_checks();
                             }
+                        } else if was_skipped {
+                            // A skipped service has no PendingService to promote;
+                            // starting it must also resume its health monitors.
+                            let item = &mut self.items[idx];
+                            if !item.health_checks.is_empty() {
+                                item.start_health_checks();
+                            }
+                            item.start_endpoint_health_checks();
                         }
                         ipc::ControlResponse {
                             ok: true,

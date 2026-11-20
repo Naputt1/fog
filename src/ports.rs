@@ -11,6 +11,19 @@ pub type PortMap = HashMap<String, u16>;
 /// `bind("127.0.0.1:0")`, `1-65535` is used verbatim (and warned if already
 /// in use). Returns the resolved map or a [`FogError`] naming the port.
 pub fn allocate_ports(specs: &HashMap<String, u16>) -> FogResult<PortMap> {
+    allocate_ports_unprobed(specs, &std::collections::HashSet::new())
+}
+
+/// Allocates host ports like [`allocate_ports`], except fixed ports named in
+/// `unprobed` are accepted without probing.
+///
+/// A port referenced only by services left out with `--without` may already be
+/// served by an external process; refusing to start because it is occupied
+/// would defeat the opt-out. Random (`0`) specs are still allocated normally.
+pub fn allocate_ports_unprobed(
+    specs: &HashMap<String, u16>,
+    unprobed: &std::collections::HashSet<String>,
+) -> FogResult<PortMap> {
     let mut out = HashMap::new();
     // Keep listeners alive until all allocations are done to avoid reusing same
     // free port when two names both request random.
@@ -60,7 +73,7 @@ pub fn allocate_ports(specs: &HashMap<String, u16>) -> FogResult<PortMap> {
     // Verify fixed ports are not colliding with random allocations and warn if
     // a fixed port is already in use by another process.
     for (name, port) in out.iter() {
-        if specs[name] != 0 {
+        if specs[name] != 0 && !unprobed.contains(name) {
             // Probe if already in use.
             if let Ok(listener) = TcpListener::bind(format!("127.0.0.1:{}", port)) {
                 drop(listener);
@@ -1547,6 +1560,28 @@ mod tests {
         // A local name may still be re-randomized for the run.
         let m = parse_port_overrides(&["api=0".to_string()]).unwrap();
         assert_eq!(m["api"], 0);
+    }
+
+    #[test]
+    fn test_allocate_ports_unprobed_accepts_occupied_fixed_port() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let specs = HashMap::from([("db".to_string(), port)]);
+        let unprobed = std::collections::HashSet::from(["db".to_string()]);
+
+        let out = allocate_ports_unprobed(&specs, &unprobed).unwrap();
+        assert_eq!(out["db"], port);
+
+        let err = allocate_ports(&specs).unwrap_err().to_string();
+        assert!(err.contains("already in use"), "{err}");
+    }
+
+    #[test]
+    fn test_allocate_ports_unprobed_still_allocates_random_specs() {
+        let specs = HashMap::from([("db".to_string(), 0)]);
+        let unprobed = std::collections::HashSet::from(["db".to_string()]);
+        let out = allocate_ports_unprobed(&specs, &unprobed).unwrap();
+        assert_ne!(out["db"], 0);
     }
 
     #[test]

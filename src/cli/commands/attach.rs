@@ -90,16 +90,60 @@ pub(crate) fn cmd_attach(cli: &Cli) -> io::Result<()> {
         );
     };
 
+    let config = crate::config::load(Path::new(&config_path)).unwrap_or_else(|e| {
+        die(
+            &format!("cannot attach to instance {pid}: {e}"),
+            Some("the target's config changed; restart it with a current fog build"),
+            1,
+        )
+    });
+    let Some(target_script) = config.scripts.get(&status.script) else {
+        die(
+            &format!(
+                "cannot attach to instance {pid}: script '{}' is no longer in '{config_path}'",
+                status.script
+            ),
+            Some("restore the script, or restart the instance"),
+            1,
+        );
+    };
+    // Replayed opt-outs are filtered against the current config: removing a
+    // skipped service from fog.json must not make the healthy instance
+    // impossible to attach to.
+    let config_dir = Path::new(&config_path)
+        .parent()
+        .unwrap_or_else(|| Path::new("."));
+    let replayed: Vec<String> = status
+        .services
+        .iter()
+        .filter(|service| service.skipped)
+        .map(|service| service.name.clone())
+        .collect();
+    let mut without: Vec<String> =
+        crate::runtime::filter_without(target_script, config_dir, &replayed)
+            .into_iter()
+            .collect();
+    without.sort();
+
     let mut argv: Vec<OsString> = vec![
         OsString::from("fog"),
         OsString::from(&status.script),
         OsString::from("--config"),
         OsString::from(&config_path),
     ];
+    for name in &without {
+        argv.push(OsString::from("--without"));
+        argv.push(OsString::from(name));
+    }
     // Replay `--share` so the attached session keeps the same sharing behavior
     // (borrowed services stay shared for teardown, and a detach successor
-    // rebuilds it too).
-    for service in &status.forced_share {
+    // rebuilds it too). Filter against the current config like the skip set:
+    // a service removed since startup must not make attach impossible.
+    for service in
+        crate::runtime::filter_forced_share(target_script, config_dir, &status.forced_share)
+            .into_iter()
+            .filter(|service| !without.contains(service))
+    {
         argv.push(OsString::from("--share"));
         argv.push(OsString::from(service));
     }

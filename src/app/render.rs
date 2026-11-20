@@ -199,6 +199,7 @@ impl App {
             return span("$ shell".to_string(), theme.terminal);
         }
         match entry {
+            Some(e) if e.skipped => span("⊘ skipped".to_string(), theme.text_muted),
             Some(e) if e.pending => span("◌ waiting".to_string(), theme.status_300),
             Some(e) if e.stopped => span("○ stopped".to_string(), theme.stopped),
             Some(e) => match e.health_status {

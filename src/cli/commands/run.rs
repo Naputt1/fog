@@ -82,6 +82,10 @@ pub(crate) fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>)
     // A `d` detach re-executes this process with `FOG_DETACH_FROM=<pid>` set:
     // the child is a headless takeover that adopts the named instance's live
     // services via handoff.
+    // A detach successor replays the skip set from the process it takes over;
+    // the config may have changed since, so those names are filtered instead
+    // of failing the takeover.
+    let replay_without = std::env::var_os("FOG_DETACH_FROM").is_some();
     let takeover_from = takeover_pid.or_else(|| {
         std::env::var("FOG_DETACH_FROM")
             .ok()
@@ -141,6 +145,27 @@ pub(crate) fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>)
         forced: cli.share.iter().cloned().collect(),
     };
     validate_forced_share(&share, script, name, &config_dir);
+    // Validate `--without` before any setup side effect (dnsmasq, router,
+    // ports, reclaim), so a typo cannot start half a stack.
+    let without = if replay_without {
+        crate::runtime::filter_without(script, &config_dir, &cli.without)
+    } else {
+        match crate::runtime::resolve_without(script, &config_dir, &cli.without) {
+            Ok(names) => names,
+            Err(e) => crate::cli::usage_error(
+                e,
+                "pass an effective service name, e.g. `fog dev --without worker`",
+            ),
+        }
+    };
+    if let Some(name) = without.iter().find(|name| share.forced.contains(*name)) {
+        crate::cli::usage_error(
+            crate::error::FogError::new(format!(
+                "service '{name}' cannot be both skipped and force-shared"
+            )),
+            "use either `--without` or `--share` for it",
+        );
+    }
 
     // Setup diagnostics are collected rather than printed immediately: in
     // interactive mode the TUI takes the screen moments later, so warnings are
@@ -214,7 +239,11 @@ pub(crate) fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>)
         // every live service (not just `reuse` ones) so the session keeps
         // running.
         note_phase(&mut progress, "adopting services");
-        match reclaim_takeover(from_pid, &all_service_names(script, &config_dir)) {
+        let takeover_names: Vec<String> = all_service_names(script, &config_dir)
+            .into_iter()
+            .filter(|name| !without.contains(name))
+            .collect();
+        match reclaim_takeover(from_pid, &takeover_names) {
             Some(handoffs) => adopted = handoffs,
             None => std::process::exit(1),
         }
@@ -224,7 +253,10 @@ pub(crate) fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>)
         // reclaim happens. Only single-instance scripts take over from a previous
         // run (handing over `reuse` services). `--no-share` disables reuse handoff.
         if !script.concurrent && !share.no_share {
-            let reuse = reuse_names(script, &config_dir, &share);
+            let reuse: Vec<String> = reuse_names(script, &config_dir, &share)
+                .into_iter()
+                .filter(|name| !without.contains(name))
+                .collect();
             note_phase(&mut progress, "reclaiming previous instance");
             (adopted, owner_lock) = reconcile_instance(project, name, branch.as_deref(), &reuse);
         } else if !script.concurrent && share.no_share {
@@ -257,7 +289,8 @@ pub(crate) fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>)
     ipc_state.config_dir = Some(config_dir.to_string_lossy().into_owned());
     ipc_state.config_path = Some(config_path.to_string_lossy().into_owned());
     // Publish the forced names so `fog attach` can rebuild this invocation.
-    ipc_state.forced_share = share.forced.iter().cloned().collect();
+    *ipc_state.forced_share.lock().expect("mutex poisoned") =
+        share.forced.iter().cloned().collect();
     // Cold-start provenance: `references::resolve` passes the parent's pid and
     // identity when it spawns this instance, so `fog ls` and `fog kill` can
     // show and optionally stop instances this one caused to start.
@@ -320,7 +353,7 @@ pub(crate) fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>)
     let has_shared = script.service.as_ref().is_some_and(|s| {
         s.iter().any(|e| {
             let name = crate::runtime::entry_name(e, &config_dir);
-            share.shared(&name, e.share)
+            !without.contains(&name) && share.shared(&name, e.share)
         })
     });
     let startup_lock = if script.concurrent && !share.no_share && has_shared {
@@ -385,14 +418,24 @@ pub(crate) fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>)
         branch_for_ports.as_deref(),
         &mut adopted_ports,
         &share,
+        &without,
     );
     let local_specs: std::collections::HashMap<String, u16> = port_specs
         .iter()
         .filter(|(key, _)| !adopted_ports.contains_key(*key))
         .map(|(key, port)| (key.clone(), *port))
         .collect();
+    // A port referenced only by a skipped service may already be served by an
+    // external process; do not reject the run because probing it fails.
+    let unprobed_ports = crate::runtime::unprobed_port_names(
+        script,
+        &config_dir,
+        &share,
+        &without,
+        Some(&port_specs),
+    );
     let mut port_map = if !local_specs.is_empty() {
-        match crate::ports::allocate_ports(&local_specs) {
+        match crate::ports::allocate_ports_unprobed(&local_specs, &unprobed_ports) {
             Ok(m) => m,
             Err(e) => {
                 if !detached {
@@ -544,6 +587,7 @@ pub(crate) fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>)
         share.clone(),
         takeover,
         &owned_shared,
+        &without,
     )
     .map_err(|e| {
         // Close any handoff fds we duped that the failed build did not consume.
@@ -656,13 +700,9 @@ pub(crate) fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>)
         if cli.verbose {
             args.push(OsString::from("--verbose"));
         }
-        // Keep the forced services across a detach: the successor rebuilds the
-        // run from these args, so dropping them would restart a borrowed
-        // resource instead of taking it over.
-        for service in &share.forced {
-            args.push(OsString::from("--share"));
-            args.push(OsString::from(service));
-        }
+        // The skip and forced-share sets are derived from the live app when
+        // detach is requested, so a manually started service is not re-skipped
+        // and a service removed by a worktree switch is not replayed.
         Some(crate::app::DetachSpawn::new(exe, args, std::process::id()))
     };
 

@@ -22,7 +22,7 @@ export type ServiceState = (typeof SERVICE_STATES)[number];
 /** Transitional states the UI shows locally while a request is in flight. */
 export type LocalServiceState = "stopping" | "killing";
 
-export type BadgeState = ServiceState | LocalServiceState;
+export type BadgeState = ServiceState | LocalServiceState | "skipped";
 
 /** Tones understood by `Badge`, matching `src/service_state.rs`'s semantic set. */
 export type ServiceTone =
@@ -52,6 +52,7 @@ export const SERVICE_STATE_STYLE: Record<BadgeState, ServiceStateStyle> = {
   stopped: { tone: "stopped", dot: "bg-muted-foreground" },
   stopping: { tone: "stopping", dot: "bg-warning" },
   killing: { tone: "killing", dot: "bg-warning" },
+  skipped: { tone: "unknown", dot: "bg-muted-foreground" },
   unhealthy: { tone: "unhealthy", dot: "bg-destructive" },
   // States without a dedicated palette entry share the neutral fallback, as
   // they did before the table existed.

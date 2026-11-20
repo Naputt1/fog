@@ -14,6 +14,7 @@ import {
   findWorktree,
   groupByBranch,
   groupServices,
+  serviceBadgeState,
   servicePid,
   type InstanceServiceView,
   type InstanceView,
@@ -109,7 +110,7 @@ function EndpointList({ svc }: { svc: InstanceServiceView }) {
           >
             <span className="text-muted-foreground">↳</span>
             <span className="text-foreground">{endpoint.name}</span>
-            <StatusBadge status={endpoint.health} />
+            {svc.skipped ? null : <StatusBadge status={endpoint.health} />}
             {displayUrl ? (
               <a
                 href={displayUrl}
@@ -164,7 +165,7 @@ function ServicePanel({
         <div className="flex min-w-0 flex-col">
           <div className="flex min-w-0 items-center gap-2">
             <DialogTitle>{svc.name}</DialogTitle>
-            <StatusBadge status={svc.running ? "running" : "stopped"} />
+            <StatusBadge status={serviceBadgeState(svc)} />
           </div>
           <span className="text-muted-foreground text-2xs truncate font-mono">
             {projectName} @ {label} · {script} pid {inst.pid}
@@ -456,9 +457,7 @@ function ScriptServicesPage() {
                       <span className="min-w-0 truncate font-mono text-sm font-medium">
                         {svc.name}
                       </span>
-                      <StatusBadge
-                        status={svc.running ? "running" : "stopped"}
-                      />
+                      <StatusBadge status={serviceBadgeState(svc)} />
                     </div>
                     {svc.service?.url ? (
                       <div className="mt-2">
@@ -530,9 +529,7 @@ function ScriptServicesPage() {
                                 {svc.name}
                               </TableCell>
                               <TableCell>
-                                <StatusBadge
-                                  status={svc.running ? "running" : "stopped"}
-                                />
+                                <StatusBadge status={serviceBadgeState(svc)} />
                               </TableCell>
                               <TableCell>
                                 {svc.service?.url ? (
