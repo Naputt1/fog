@@ -432,7 +432,7 @@ pub(crate) fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>)
         &config_dir,
         &share,
         &without,
-        config.ports.as_ref(),
+        Some(&port_specs),
     );
     let mut port_map = if !local_specs.is_empty() {
         match crate::ports::allocate_ports_unprobed(&local_specs, &unprobed_ports) {

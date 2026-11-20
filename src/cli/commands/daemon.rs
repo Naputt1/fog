@@ -188,7 +188,7 @@ pub(crate) fn daemonize(script: &str) -> io::Result<()> {
         if all_started {
             break;
         }
-        if child.try_wait().ok().flatten().is_some() {
+        if let Some(status) = child.try_wait().ok().flatten() {
             let _ = view.finish(&mut stdout());
             eprintln!(
                 "{} detached fog '{script}' (pid {pid}) exited during startup",
@@ -198,7 +198,9 @@ pub(crate) fn daemonize(script: &str) -> io::Result<()> {
                 eprintln!("  {hint}");
             }
             eprintln!("  logs: {}", ipc::instance_log_dir(pid).display());
-            std::process::exit(1);
+            // Keep the child's usage-error code (e.g. 2 for an unknown
+            // --without name); a bare signal exit still reports failure.
+            std::process::exit(status.code().filter(|code| *code != 0).unwrap_or(1));
         }
         if !socket_ready && std::time::Instant::now() >= socket_deadline {
             let _ = view.finish(&mut stdout());

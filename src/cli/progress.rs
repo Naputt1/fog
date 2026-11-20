@@ -34,6 +34,7 @@ const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "�
 struct ShutdownService {
     name: String,
     running: bool,
+    skipped: bool,
     shutdown_cmd: Option<String>,
 }
 
@@ -103,6 +104,7 @@ impl StopProgress {
             .map(|s| ShutdownService {
                 name: s.name.clone(),
                 running: s.running,
+                skipped: s.skipped,
                 shutdown_cmd: s.shutdown_cmd.clone(),
             })
             .collect();
@@ -232,7 +234,9 @@ fn shutdown_lines(
     let width = services.iter().map(|s| s.name.len()).max().unwrap_or(0);
     let mut lines = Vec::new();
     for svc in services {
-        let (marker, state) = if svc.running {
+        let (marker, state) = if svc.skipped {
+            (colored("⊘", MARKER_BLUE, color), "skipped")
+        } else if svc.running {
             (colored(pending, MARKER_BLUE, color), "shutting down")
         } else {
             (
@@ -241,7 +245,7 @@ fn shutdown_lines(
             )
         };
         lines.push(format!("  {marker} {:<width$}  {state}", svc.name));
-        for d in detail(svc) {
+        for d in if svc.skipped { Vec::new() } else { detail(svc) } {
             let d = match detail_width {
                 Some(width) => truncate_to(&d, width),
                 None => d,
@@ -503,16 +507,19 @@ mod tests {
             ShutdownService {
                 name: "api".into(),
                 running: false,
+                skipped: false,
                 shutdown_cmd: None,
             },
             ShutdownService {
                 name: "web".into(),
                 running: true,
+                skipped: false,
                 shutdown_cmd: Some("docker compose down".into()),
             },
             ShutdownService {
                 name: "db".into(),
                 running: true,
+                skipped: false,
                 shutdown_cmd: None,
             },
         ];
@@ -537,10 +544,25 @@ mod tests {
     }
 
     #[test]
+    fn test_shutdown_lines_marks_skipped_service() {
+        let services = vec![ShutdownService {
+            name: "worker".into(),
+            running: false,
+            skipped: true,
+            shutdown_cmd: Some("never run".into()),
+        }];
+        let lines = shutdown_lines(&services, SHUTDOWN_PENDING, false, None, |_| {
+            vec!["must not print".to_string()]
+        });
+        assert_eq!(lines, vec!["  ⊘ worker  skipped"]);
+    }
+
+    #[test]
     fn test_shutdown_lines_uses_spinner_frame() {
         let services = vec![ShutdownService {
             name: "web".into(),
             running: true,
+            skipped: false,
             shutdown_cmd: None,
         }];
         let lines = shutdown_lines(&services, SPINNER_FRAMES[3], false, None, |_| Vec::new());
@@ -556,11 +578,13 @@ mod tests {
             ShutdownService {
                 name: "api".into(),
                 running: false,
+                skipped: false,
                 shutdown_cmd: None,
             },
             ShutdownService {
                 name: "web".into(),
                 running: true,
+                skipped: false,
                 shutdown_cmd: None,
             },
         ];

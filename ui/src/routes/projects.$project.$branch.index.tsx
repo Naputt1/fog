@@ -42,6 +42,9 @@ function ScriptCard({
   instances: InstanceView[];
 }) {
   const stats = scriptStats(instances);
+  const skipped = instances
+    .flatMap((inst) => inst.services)
+    .filter((service) => service.skipped).length;
 
   return (
     <Card interactive spacing="none" padding="none">
@@ -64,6 +67,7 @@ function ScriptCard({
         <div className="text-muted-foreground text-2xs flex flex-wrap items-center gap-x-3 gap-y-1 font-mono">
           <span>{stats.total} services</span>
           <span className="text-primary">{stats.running} running</span>
+          {skipped > 0 ? <span>{skipped} skipped</span> : null}
           {instances.length > 1 ? (
             <span>{instances.length} instances</span>
           ) : null}

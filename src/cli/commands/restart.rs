@@ -26,6 +26,13 @@ pub(crate) fn cmd_restart(pid: Option<u32>, all: bool, cli: &Cli) -> io::Result<
     }
 
     let targets = resolve_targets(&instances, pid, all, cli, "restart");
+    // A shell user may pad a name; clap does not trim values.
+    let fresh_share: Vec<String> = cli
+        .share
+        .iter()
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .collect();
 
     // Plan every restart before stopping anything: a typo in `--without`, a
     // missing script, or an unreadable config must not take down a target
@@ -110,11 +117,9 @@ pub(crate) fn cmd_restart(pid: Option<u32>, all: bool, cli: &Cli) -> io::Result<
         }
         let mut without: Vec<String> = without.into_iter().collect();
         without.sort();
-        if let Some(name) = cli
-            .share
+        if let Some(name) = fresh_share
             .iter()
-            .map(|name| name.trim())
-            .find(|name| !name.is_empty() && without.iter().any(|skipped| skipped == name))
+            .find(|name| without.iter().any(|skipped| skipped == *name))
         {
             die(
                 crate::error::FogError::new(format!(
@@ -128,8 +133,7 @@ pub(crate) fn cmd_restart(pid: Option<u32>, all: bool, cli: &Cli) -> io::Result<
         // before stopping anything. Replayed names are filtered because the
         // config may have changed since the target started.
         let known: Vec<String> = crate::runtime::script_service_names(target_script, config_dir);
-        if let Some(name) = cli
-            .share
+        if let Some(name) = fresh_share
             .iter()
             .find(|name| !known.iter().any(|known| known == *name))
         {
@@ -141,7 +145,7 @@ pub(crate) fn cmd_restart(pid: Option<u32>, all: bool, cli: &Cli) -> io::Result<
         }
         // A target started with --no-share keeps it; an explicit --share asks
         // for the opposite, so it wins over the replayed flag.
-        let no_share = cli.no_share || (status.no_share && cli.share.is_empty());
+        let no_share = cli.no_share || (status.no_share && fresh_share.is_empty());
         let forced_share: Vec<String> = if no_share {
             Vec::new()
         } else {
@@ -152,7 +156,7 @@ pub(crate) fn cmd_restart(pid: Option<u32>, all: bool, cli: &Cli) -> io::Result<
             )
             .into_iter()
             .collect();
-            names.extend(cli.share.iter().cloned());
+            names.extend(fresh_share.iter().cloned());
             names.sort();
             names.dedup();
             // A skipped service cannot also run as a forced shared owner.
