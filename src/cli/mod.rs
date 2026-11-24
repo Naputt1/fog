@@ -37,6 +37,12 @@ fn is_builtin(name: &str) -> bool {
     BUILTIN_COMMANDS.contains(&name)
 }
 
+/// Whether `--port` can apply to the selected command: a configured script, or
+/// `fog restart`, which forwards the overrides to the replacement instance.
+fn allows_port_overrides(script: Option<&str>) -> bool {
+    script.is_some_and(|name| !is_builtin(name) || name == "restart")
+}
+
 /// Command-line interface arguments parsed via clap.
 #[derive(Parser)]
 #[command(
@@ -131,7 +137,8 @@ struct Cli {
 
     /// Override a top-level `ports` entry for this run, e.g. `--port api=4000`.
     /// Repeatable; use `0` to re-randomize. Names not in the config `ports` map
-    /// are added for this run. Only applies when running a script.
+    /// are added for this run. Applies when running a script and on
+    /// `fog restart`, which otherwise keeps the target's assigned ports.
     #[arg(long, value_name = "NAME=PORT")]
     port: Vec<String>,
 
@@ -424,10 +431,11 @@ pub fn run() -> io::Result<()> {
         );
     }
 
-    // `--port` only applies when running a script.
-    if !cli.port.is_empty() && cli.script.as_deref().is_none_or(is_builtin) {
+    // `--port` applies when running a script, or to `fog restart`, which
+    // overrides the ports it would otherwise keep for the replacement instance.
+    if !cli.port.is_empty() && !allows_port_overrides(cli.script.as_deref()) {
         usage_error(
-            "--port only applies when running a script",
+            "--port only applies when running a script or to `fog restart`",
             "e.g. `fog dev --port api=4000`",
         );
     }
@@ -608,6 +616,15 @@ mod tests {
             Cli::try_parse_from(["fog", "dev", "--port", "api=4000", "--port=web=0"]).unwrap();
         assert_eq!(cli.port, vec!["api=4000".to_string(), "web=0".to_string()]);
         assert_eq!(cli.script.as_deref(), Some("dev"));
+    }
+
+    #[test]
+    fn test_port_overrides_apply_to_scripts_and_restart_only() {
+        assert!(allows_port_overrides(Some("dev")));
+        assert!(allows_port_overrides(Some("restart")));
+        assert!(!allows_port_overrides(Some("kill")));
+        assert!(!allows_port_overrides(Some("logs")));
+        assert!(!allows_port_overrides(None));
     }
 
     #[test]

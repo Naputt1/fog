@@ -33,6 +33,15 @@ pub(crate) fn cmd_restart(pid: Option<u32>, all: bool, cli: &Cli) -> io::Result<
         .map(|name| name.trim().to_string())
         .filter(|name| !name.is_empty())
         .collect();
+    // Validate `--port` before anything stops. Overrides win over the ports a
+    // restart keeps, and `=0` re-randomizes one on purpose.
+    let port_overrides = crate::ports::parse_port_overrides(&cli.port).unwrap_or_else(|e| {
+        die(
+            &e.to_string(),
+            Some("pass --port NAME=PORT; nothing was stopped"),
+            2,
+        )
+    });
 
     // Plan every restart before stopping anything: a typo in `--without`, a
     // missing script, or an unreadable config must not take down a target
@@ -46,6 +55,7 @@ pub(crate) fn cmd_restart(pid: Option<u32>, all: bool, cli: &Cli) -> io::Result<
         without: Vec<String>,
         forced_share: Vec<String>,
         no_share: bool,
+        kept_ports: Vec<(String, u16)>,
     }
     let mut plans = Vec::with_capacity(targets.len());
     for (target_pid, path) in &targets {
@@ -95,6 +105,12 @@ pub(crate) fn cmd_restart(pid: Option<u32>, all: bool, cli: &Cli) -> io::Result<
                 1,
             );
         };
+        // Keep the ports the target was assigned for entries declared as `0`
+        // (random): re-randomizing them on restart would move every URL, route
+        // and dependent reference pointing at them. Fixed entries are not
+        // pinned because they come from the config loaded above, so editing one
+        // still takes effect on restart. `--port` overrides win over both.
+        let kept_ports = restart_kept_ports(&status.ports, config.ports.as_ref(), &port_overrides);
         // Replayed opt-outs are filtered because the config may have changed;
         // names passed to this command are strict so a typo is caught.
         let config_dir = config_path.parent().unwrap_or_else(|| Path::new("."));
@@ -172,6 +188,7 @@ pub(crate) fn cmd_restart(pid: Option<u32>, all: bool, cli: &Cli) -> io::Result<
             without,
             forced_share,
             no_share,
+            kept_ports,
         });
     }
 
@@ -185,6 +202,7 @@ pub(crate) fn cmd_restart(pid: Option<u32>, all: bool, cli: &Cli) -> io::Result<
             without,
             forced_share,
             no_share,
+            kept_ports,
         } = plan;
         // Wait for the old instance to fully exit before relaunching to avoid
         // port conflicts and owner-lock races. `--force` escalates to SIGKILL
@@ -202,14 +220,35 @@ pub(crate) fn cmd_restart(pid: Option<u32>, all: bool, cli: &Cli) -> io::Result<
         // Spawn a detached instance with the same script. The config_path already
         // points at the correct worktree's fog.json, so no --branch is needed
         // (branch is inferred from the worktree containing config_dir).
-        let new_pid = spawn_instance_detached(
+        if !kept_ports.is_empty() {
+            let listing: Vec<String> = kept_ports
+                .iter()
+                .map(|(name, port)| format!("{name} -> {port}"))
+                .collect();
+            println!("  keeping ports: {}", listing.join(", "));
+        }
+        let new_pid = match spawn_instance_detached(
             &config_path,
             &script,
             None,
             &without,
             &forced_share,
             no_share,
-        )?;
+            &kept_ports,
+            &cli.port,
+        ) {
+            Ok(pid) => pid,
+            Err(e) => {
+                die(
+                    &format!("cannot restart '{script}' (pid {target_pid}): {e}"),
+                    Some(
+                        "kept ports must stay free until the new instance binds them; \
+                         free the port, or pass --port <name>=<port> (or =0) to change it",
+                    ),
+                    1,
+                );
+            }
+        };
         println!("restarted fog '{script}' (old pid {target_pid} → new pid {new_pid})");
         if let Some(b) = branch {
             println!("  branch: {b}");
@@ -239,10 +278,34 @@ fn restart_config_path(config_path: Option<&str>, config_dir: Option<&str>, cli:
     resolve_config_path(&resolve_run_config(cli))
 }
 
+/// The ports a restart keeps: every port the target was assigned for a `ports`
+/// entry declared as `0` (random), minus names the command's `--port` overrides
+/// (which win, including `=0` to re-randomize). A fixed entry is left out so the
+/// reloaded config decides it, and a cross-instance key is left out so it
+/// re-resolves against the target's current port.
+fn restart_kept_ports(
+    status_ports: &ipc::PortMap,
+    specs: Option<&std::collections::HashMap<String, u16>>,
+    overrides: &std::collections::HashMap<String, u16>,
+) -> Vec<(String, u16)> {
+    let Some(specs) = specs else {
+        return Vec::new();
+    };
+    let mut kept: Vec<(String, u16)> = status_ports
+        .iter()
+        .filter(|(name, _)| specs.get(name.as_str()) == Some(&0))
+        .filter(|(name, _)| !overrides.contains_key(name.as_str()))
+        .map(|(name, port)| (name.clone(), *port))
+        .collect();
+    kept.sort();
+    kept
+}
+
 /// Spawns a `fog <script>` detached instance for restart, mirroring
-/// `daemonize` / `index::spawn_detached` but for generic scripts. `without` and
-/// `forced_share` replay the killed instance's per-run service overrides so the
-/// relaunch keeps the same skip/share behavior.
+/// `daemonize` / `index::spawn_detached` but for generic scripts. `without`,
+/// `forced_share` and `kept_ports` replay the killed instance's per-run choices
+/// so the relaunch keeps the same skips, shares and auto-assigned ports.
+#[allow(clippy::too_many_arguments)]
 fn spawn_instance_detached(
     config_path: &Path,
     script: &str,
@@ -250,8 +313,11 @@ fn spawn_instance_detached(
     without: &[String],
     forced_share: &[String],
     no_share: bool,
+    kept_ports: &[(String, u16)],
+    port_overrides: &[String],
 ) -> io::Result<u32> {
-    let extra_args = restart_extra_args(without, forced_share, no_share);
+    let extra_args =
+        restart_extra_args(without, forced_share, no_share, kept_ports, port_overrides);
     crate::ipc::spawn_detached(
         config_path,
         script,
@@ -262,9 +328,19 @@ fn spawn_instance_detached(
     )
 }
 
-/// Per-run flags for the replacement instance.
-fn restart_extra_args(without: &[String], forced_share: &[String], no_share: bool) -> Vec<String> {
-    let mut extra_args = Vec::with_capacity((without.len() + forced_share.len()) * 2 + 1);
+/// Per-run flags for the replacement instance. Kept ports come first, then the
+/// user's `--port` arguments verbatim (the run validates and applies both, with
+/// the user's overrides last).
+fn restart_extra_args(
+    without: &[String],
+    forced_share: &[String],
+    no_share: bool,
+    kept_ports: &[(String, u16)],
+    port_overrides: &[String],
+) -> Vec<String> {
+    let mut extra_args = Vec::with_capacity(
+        (without.len() + forced_share.len() + kept_ports.len() + port_overrides.len()) * 2 + 1,
+    );
     for service in without {
         extra_args.push("--without".to_string());
         extra_args.push(service.clone());
@@ -277,17 +353,26 @@ fn restart_extra_args(without: &[String], forced_share: &[String], no_share: boo
             extra_args.push(service.clone());
         }
     }
+    for (name, port) in kept_ports {
+        extra_args.push("--port".to_string());
+        extra_args.push(format!("{name}={port}"));
+    }
+    for port in port_overrides {
+        extra_args.push("--port".to_string());
+        extra_args.push(port.clone());
+    }
     extra_args
 }
 
 #[cfg(test)]
 mod tests {
-    use super::restart_extra_args;
+    use super::{restart_extra_args, restart_kept_ports};
+    use std::collections::HashMap;
 
     #[test]
     fn test_restart_extra_args_replay_skip_and_share() {
         assert_eq!(
-            restart_extra_args(&["db".to_string()], &["redis".to_string()], false),
+            restart_extra_args(&["db".to_string()], &["redis".to_string()], false, &[], &[]),
             vec!["--without", "db", "--share", "redis"]
         );
     }
@@ -295,8 +380,64 @@ mod tests {
     #[test]
     fn test_restart_extra_args_replay_no_share_without_forced_names() {
         assert_eq!(
-            restart_extra_args(&["db".to_string()], &["redis".to_string()], true),
+            restart_extra_args(&["db".to_string()], &["redis".to_string()], true, &[], &[]),
             vec!["--without", "db", "--no-share"]
         );
+    }
+
+    #[test]
+    fn test_restart_extra_args_replay_kept_and_override_ports() {
+        assert_eq!(
+            restart_extra_args(
+                &[],
+                &[],
+                false,
+                &[("api".to_string(), 51234), ("web".to_string(), 51800)],
+                &["worker=6000".to_string()],
+            ),
+            vec![
+                "--port",
+                "api=51234",
+                "--port",
+                "web=51800",
+                "--port",
+                "worker=6000",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_restart_kept_ports_only_pins_random_local_names() {
+        let status_ports = [
+            ("api".to_string(), 51234u16),
+            ("web".to_string(), 51800),
+            ("db".to_string(), 5432),
+            ("api@repo:main".to_string(), 4000),
+        ]
+        .into_iter()
+        .collect();
+        let specs = [
+            ("api".to_string(), 0u16),
+            ("web".to_string(), 0),
+            ("db".to_string(), 5432),
+        ]
+        .into_iter()
+        .collect::<HashMap<_, _>>();
+
+        // Random names are kept in sorted order; a fixed spec and a
+        // cross-instance key are not.
+        assert_eq!(
+            restart_kept_ports(&status_ports, Some(&specs), &HashMap::new()),
+            vec![("api".to_string(), 51234), ("web".to_string(), 51800)]
+        );
+        // An explicit `--port` wins over the kept value, including `=0` to
+        // re-randomize.
+        let overrides = [("api".to_string(), 0u16)].into_iter().collect();
+        assert_eq!(
+            restart_kept_ports(&status_ports, Some(&specs), &overrides),
+            vec![("web".to_string(), 51800)]
+        );
+        // No top-level `ports` means nothing to keep.
+        assert!(restart_kept_ports(&status_ports, None, &HashMap::new()).is_empty());
     }
 }
