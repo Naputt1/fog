@@ -337,46 +337,68 @@ pub fn ensure_native_routes(
         }
     }
 
-    // A routed hostname may sit one level deeper than `*.<domain>` matches
-    // (e.g. `<branch>.<service>.<domain>`). Refresh the TLS certificates so the
-    // domain cert gains the needed `*.<service>.<domain>` SANs. Best-effort: a
-    // certificate problem must never fail route setup.
-    if let Some(router) = &cfg.router
-        && router.tls.enabled
+    // Every routed host must appear in a certificate with an exact SAN: a bare
+    // `*.<domain>` is invalid for the single-label domains fog uses, so a
+    // verifier rejects it (`desired_sans`).
+    //
+    // Best-effort: a certificate problem must never fail route setup, and a
+    // config without `dnsmasq.domains` has nothing to certify.
+    let domains = cfg
+        .dnsmasq
+        .as_ref()
+        .map(|d| d.domains.clone())
+        .unwrap_or_default();
+    if !domains.is_empty()
+        && let Some(router) = tls_router(cfg)
+        && let Err(e) = ensure_tls(&router, &domains, &mut messages)
     {
-        let domains = cfg
-            .dnsmasq
-            .as_ref()
-            .map(|d| d.domains.clone())
-            .unwrap_or_default();
-        if let Err(e) = ensure_tls(router, &domains, &mut messages) {
-            messages.push(format!("⚠ could not refresh TLS certificates: {e}"));
-        }
+        messages.push(format!("⚠ could not refresh TLS certificates: {e}"));
     }
 
     messages
 }
 
-/// Removes native route files for a given branch (or all when `branch` is None).
+/// Router config to use when refreshing the certificates for routed hosts.
+///
+/// The router is host-global, so a project can route hosts through a TLS router
+/// it never declares itself. Prefer the project's `router`, then the global
+/// config's, and finally the shared router when it is already serving
+/// `websecure` — its certificates are what browsers see, whoever started it.
+/// `None` means nothing terminates HTTPS, so there is no entrypoint that would
+/// accept these certificates.
+fn tls_router(cfg: &crate::config::Config) -> Option<RouterConfig> {
+    let declared = cfg
+        .router
+        .clone()
+        .or_else(|| crate::config::load_global_config().and_then(|global| global.router));
+    if let Some(router) = &declared
+        && router.tls.enabled
+    {
+        return Some(router.clone());
+    }
+    let router = declared.unwrap_or_default();
+    let container = router_container_name(&router.image);
+    (container_exists(&container) && container_tls_enabled(&container)).then_some(router)
+}
+
+/// Removes the native route files this run owns.
+///
+/// The dynamic dir is host-global, so cleanup must stay within one branch: an
+/// unresolvable branch publishes under the `default` slug (see
+/// [`ensure_native_routes`]), and must not delete routes other projects still
+/// serve.
 pub fn cleanup_native_routes(branch: Option<&str>, cfg: &crate::config::Config) {
     let dynamic_dir = default_dynamic_dir_for_config(cfg);
-    let branch_slug = branch.map(sanitize_name);
+    let branch_slug = sanitize_name(branch.unwrap_or("default"));
     // Top-level `native-` routes and `ep-` endpoint routes belong to the
     // branch, so remove either prefix (`sub-` is the legacy endpoint prefix).
     let matches = |name: &str| -> bool {
         if !name.ends_with(".toml") {
             return false;
         }
-        match &branch_slug {
-            Some(b) => {
-                name.starts_with(&format!("native-{b}-"))
-                    || name.starts_with(&format!("ep-{b}-"))
-                    || name.starts_with(&format!("sub-{b}-"))
-            }
-            None => {
-                name.starts_with("native-") || name.starts_with("ep-") || name.starts_with("sub-")
-            }
-        }
+        name.starts_with(&format!("native-{branch_slug}-"))
+            || name.starts_with(&format!("ep-{branch_slug}-"))
+            || name.starts_with(&format!("sub-{branch_slug}-"))
     };
     let Ok(entries) = fs::read_dir(&dynamic_dir) else {
         return;
@@ -1014,5 +1036,62 @@ mod tests {
         let hosts = vec!["fix.admin.builds".to_string()];
         let sans = desired_sans("router.builds", &["builds".to_string()], &hosts);
         assert_eq!(sans, vec!["*.router.builds", "router.builds"]);
+    }
+
+    #[test]
+    fn test_cleanup_without_branch_leaves_other_branches_alone() {
+        let base = std::env::temp_dir().join(format!("fog-cleanup-none-{}", std::process::id()));
+        let cfg = native_cfg(&base);
+        let dir = default_dynamic_dir_for_config(&cfg);
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in [
+            "native-default-web-retail",
+            "native-main-web-retail",
+            "native-deepvision-x-web-retail",
+            "deepvision",
+        ] {
+            std::fs::write(dir.join(format!("{name}.toml")), "").unwrap();
+        }
+
+        cleanup_native_routes(None, &cfg);
+
+        let mut remaining: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        remaining.sort();
+        assert_eq!(
+            remaining,
+            vec![
+                "deepvision.toml".to_string(),
+                "native-deepvision-x-web-retail.toml".to_string(),
+                "native-main-web-retail.toml".to_string(),
+            ],
+            "cleanup without a branch must not delete other projects' routes"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_cleanup_without_branch_removes_the_default_slug_route() {
+        let base = std::env::temp_dir().join(format!("fog-cleanup-default-{}", std::process::id()));
+        let cfg = native_cfg(&base);
+        let mut routes = native_routes();
+        routes[0].host = "retail.red-fox".to_string();
+
+        // No branch: the route is still published, under the `default` slug.
+        let msgs = ensure_native_routes(&routes, &ports(), None, &cfg, true);
+        assert!(
+            msgs.iter().all(|m| !m.starts_with('⚠')),
+            "expected no warnings: {msgs:?}"
+        );
+        let dir = default_dynamic_dir_for_config(&cfg);
+        let file = dir.join("native-default-frontend-retail_red-fox.toml");
+        assert!(file.is_file(), "expected {} to exist", file.display());
+
+        cleanup_native_routes(None, &cfg);
+        assert!(!file.exists(), "cleanup must remove the default-slug route");
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
