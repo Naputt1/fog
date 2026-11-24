@@ -5,6 +5,8 @@ allow = [
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
     "BSD-3-Clause",
+    # notify 9 pulls xxhash-rust (event coalescing) under the Boost license.
+    "BSL-1.0",
     "ISC",
     "Unicode-3.0",
     "Unlicense",
