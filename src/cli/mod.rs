@@ -99,6 +99,13 @@ struct Cli {
     #[arg(short, long, default_value = "fog.json")]
     config: std::path::PathBuf,
 
+    /// Logical project root for this run: relative service `path` values, git
+    /// identity/branch lookups and the index name resolve here instead of the
+    /// config file's directory. Useful when `--config` points at a generated
+    /// copy outside the worktree.
+    #[arg(long, value_name = "DIR")]
+    project_dir: Option<std::path::PathBuf>,
+
     /// Save service output to `temp/<name>.txt` on exit.
     #[arg(long, help = "Save service output to temp/<name>.txt on exit")]
     save_logs: bool,
@@ -199,6 +206,21 @@ fn resolve_run_config(cli: &Cli) -> PathBuf {
     } else {
         wt.path.join(&cli.config)
     }
+}
+
+/// Resolves the optional `--project-dir` override to a logical absolute path.
+///
+/// Like [`crate::project::config_dir`], the path is made absolute lexically
+/// instead of being canonicalized: a management tool may point at a worktree
+/// through a symlinked path, and the link's name is the project root.
+pub(crate) fn resolve_project_dir(dir: Option<&Path>) -> Option<PathBuf> {
+    dir.map(|dir| {
+        std::path::absolute(dir).unwrap_or_else(|_| {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(dir))
+                .unwrap_or_else(|_| dir.to_path_buf())
+        })
+    })
 }
 
 /// Resolves the config path: if `path` is a directory, looks for `fog.json`
@@ -431,6 +453,15 @@ pub fn run() -> io::Result<()> {
         );
     }
 
+    // `--project-dir` is a run-time root; `fog restart`/`fog attach` replay the
+    // root recorded by the target instance instead of accepting a new one.
+    if cli.project_dir.is_some() && cli.script.as_deref().is_none_or(is_builtin) {
+        usage_error(
+            "--project-dir only applies when running a script",
+            "e.g. `fog dev --project-dir /path/to/worktree`",
+        );
+    }
+
     // `--port` applies when running a script, or to `fog restart`, which
     // overrides the ports it would otherwise keep for the replacement instance.
     if !cli.port.is_empty() && !allows_port_overrides(cli.script.as_deref()) {
@@ -636,5 +667,27 @@ mod tests {
         assert_eq!(cli.head, Some(LineRange::ExceptLast(50)));
         let cli = Cli::try_parse_from(["fog", "logs", "-s", "api", "--tail", "+51"]).unwrap();
         assert_eq!(cli.tail, Some(LineRange::From(51)));
+    }
+
+    #[test]
+    fn test_cli_accepts_project_dir() {
+        let dir = std::env::temp_dir().join("fog-worktree");
+        let cli =
+            Cli::try_parse_from(["fog", "dev", "--project-dir", dir.to_str().unwrap()]).unwrap();
+        assert_eq!(cli.script.as_deref(), Some("dev"));
+        assert_eq!(resolve_project_dir(cli.project_dir.as_deref()), Some(dir));
+    }
+
+    #[test]
+    fn test_resolve_project_dir_makes_relative_absolute() {
+        let cli = Cli::try_parse_from(["fog", "dev", "--project-dir=worktree"]).unwrap();
+        let got = resolve_project_dir(cli.project_dir.as_deref()).expect("override present");
+        assert!(got.is_absolute(), "override must be made absolute: {got:?}");
+        assert!(got.ends_with("worktree"), "unexpected path: {got:?}");
+    }
+
+    #[test]
+    fn test_resolve_project_dir_absent() {
+        assert_eq!(resolve_project_dir(None), None);
     }
 }

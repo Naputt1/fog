@@ -123,6 +123,10 @@ pub struct IpcState {
     /// Absolute path to this instance's config file. Set alongside
     /// `config_dir`; used by `fog attach` to reload the exact config.
     pub config_path: Option<String>,
+    /// Logical project root override (`--project-dir`), when the config file
+    /// lives outside the worktree it drives. Restart/attach replay it so
+    /// relative service paths keep resolving in the same worktree.
+    pub project_dir: Option<String>,
     /// Allocated ports for this instance (symbolic -> host port).
     pub ports: Arc<Mutex<PortMap>>,
     /// Native routes (templates) for this instance.
@@ -192,6 +196,7 @@ impl IpcState {
             branch,
             config_dir: None,
             config_path: None,
+            project_dir: None,
             ports: Arc::new(Mutex::new(PortMap::new())),
             native_routes: Arc::new(Mutex::new(Vec::new())),
             started_at: crate::lock::now_ms(),
@@ -240,6 +245,9 @@ pub struct StatusResponse {
     /// Absolute path to this instance's config file, if known.
     #[serde(default)]
     pub config_path: Option<String>,
+    /// Logical project root override (`--project-dir`), if any.
+    #[serde(default)]
+    pub project_dir: Option<String>,
     /// Epoch milliseconds when the instance started (0 for older versions).
     #[serde(default)]
     pub started_at: u64,

@@ -9,7 +9,6 @@ use crossterm::event::{
 };
 use ratatui::layout::Position;
 use std::io;
-use std::path::Path;
 use std::time::Instant;
 
 impl App {
@@ -336,12 +335,12 @@ impl App {
                     }
                 });
                 if let Some(wt) = selected {
-                    let config_dir = self.config_path.parent().unwrap_or_else(|| Path::new("."));
+                    let config_dir = self.project_dir();
                     let already_here = self
                         .switch_popup
                         .as_ref()
-                        .map(|p| worktree::is_current_worktree(&wt, &p.worktrees, config_dir))
-                        .unwrap_or_else(|| wt.contains(config_dir));
+                        .map(|p| worktree::is_current_worktree(&wt, &p.worktrees, &config_dir))
+                        .unwrap_or_else(|| wt.contains(&config_dir));
                     if already_here {
                         if let Some(p) = &mut self.switch_popup {
                             p.status = Some("already on this branch".to_string());

@@ -382,7 +382,7 @@ impl App {
         self.draw_alerts(frame, body_area);
 
         if let Some(popup) = &self.switch_popup {
-            let config_dir = self.config_path.parent().unwrap_or_else(|| Path::new("."));
+            let config_dir = self.project_dir();
             let matches = popup.matches();
 
             let overlay_width = 80u16.min(area.width.saturating_sub(4));
@@ -395,7 +395,7 @@ impl App {
                 Line::from(""),
             ];
             for (i, wt) in matches.iter().enumerate() {
-                let is_current = worktree::is_current_worktree(wt, &popup.worktrees, config_dir);
+                let is_current = worktree::is_current_worktree(wt, &popup.worktrees, &config_dir);
                 let is_running = popup
                     .running
                     .iter()

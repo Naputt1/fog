@@ -93,6 +93,7 @@ fog attach [pid]          # Reattach the TUI to a running instance (replays scre
 | Option | Description |
 |--------|-------------|
 | `-c`, `--config <PATH>` | Path to config file, or a directory containing `fog.json` (default: `fog.json`) |
+| `--project-dir <DIR>` | Logical project root for relative service paths, git lookups and index registration; use when the config is generated outside the worktree |
 | `--branch <BRANCH>` | Run in the git worktree for this branch (see [Agentic guide](/agentic)) |
 | `-d`, `--detach` | Run the script in the background without the TUI; shows setup and per-service progress until every service has started, then returns |
 | `--save-logs` | Save service output to `temp/<name>.txt` on exit |

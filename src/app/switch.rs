@@ -7,7 +7,6 @@ use crate::runtime;
 use crate::worktree;
 use crate::worktree::Worktree;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
 /// An open worktree-switch popup: the repository's worktrees plus an
@@ -61,11 +60,7 @@ pub(crate) fn subsequence_match(haystack: &str, needle: &str) -> bool {
 impl App {
     /// Opens the worktree-switch popup, listing the repository's worktrees.
     pub(crate) fn open_switch_popup(&mut self) {
-        let config_dir = self
-            .config_path
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let config_dir = self.project_dir();
         match worktree::list(&config_dir) {
             Some(worktrees) if !worktrees.is_empty() => {
                 self.switch_popup = Some(SwitchPopup {
@@ -117,8 +112,8 @@ impl App {
                 return;
             }
             let wt = &matches[popup.selected.min(matches.len() - 1)];
-            let config_dir = self.config_path.parent().unwrap_or_else(|| Path::new("."));
-            let is_current = worktree::is_current_worktree(wt, &popup.worktrees, config_dir);
+            let config_dir = self.project_dir();
+            let is_current = worktree::is_current_worktree(wt, &popup.worktrees, &config_dir);
             (wt.branch.clone(), is_current)
         };
         // Detached worktrees have `branch == None`. They are still killable
@@ -156,11 +151,11 @@ impl App {
     /// failure (caller should keep the popup open and show `msg` as status).
     pub(crate) fn switch_worktree(&mut self, wt: &Worktree) -> FogResult<()> {
         // Guard against switching to the worktree we are already on.
-        let current_dir = self.config_path.parent().unwrap_or_else(|| Path::new("."));
-        let already_here = if let Some(list) = worktree::list(current_dir) {
-            worktree::is_current_worktree(wt, &list, current_dir)
+        let current_dir = self.project_dir();
+        let already_here = if let Some(list) = worktree::list(&current_dir) {
+            worktree::is_current_worktree(wt, &list, &current_dir)
         } else {
-            wt.contains(current_dir)
+            wt.contains(&current_dir)
         };
         if already_here {
             return Err(FogError::new("already on this branch"));
@@ -174,7 +169,7 @@ impl App {
         // Absolute paths outside any worktree (e.g. `~/.config/fog/fog.json`)
         // stay shared, per user preference.
         let config_path = if self.config_rel.is_absolute() {
-            if let Some(list) = worktree::list(current_dir) {
+            if let Some(list) = worktree::list(&current_dir) {
                 let cur_root = worktree::containing_worktree(&list, &self.config_path)
                     .or_else(|| worktree::containing_worktree(&list, &self.config_rel));
                 if let Some(cur_root) = cur_root {
@@ -244,9 +239,14 @@ impl App {
             return Err(FogError::new(format!("switch worktree: {e}")));
         }
         // Same logical-path rule as `run`: the worktree containing the config
-        // link is the project root, not the symlink target's directory.
+        // link is the project root, not the symlink target's directory. With a
+        // `--project-dir` override the target worktree becomes the new root,
+        // since the config file itself lives outside every worktree.
         let config_path = std::path::absolute(&config_path).unwrap_or(config_path);
-        let config_dir = crate::project::config_dir(&config_path);
+        let adopt_project_dir = self.project_dir.is_some().then(|| wt.path.clone());
+        let config_dir = adopt_project_dir
+            .clone()
+            .unwrap_or_else(|| crate::project::config_dir(&config_path));
         let without = runtime::filter_without(script, &config_dir, &current);
         // Carry the current forced-share set into the target, dropping names it
         // no longer defines. A stale name would otherwise reach a detach
@@ -394,6 +394,9 @@ impl App {
             self.note_error(warning.clone());
         }
         self.share = share.clone();
+        if let Some(dir) = adopt_project_dir {
+            self.project_dir = Some(dir);
+        }
         *self.ipc_state.forced_share.lock().expect("mutex poisoned") =
             share.forced.iter().cloned().collect();
 
@@ -431,11 +434,7 @@ impl App {
             *self.ipc_state.native_routes.lock().expect("mutex poisoned") = routes;
         }
         // Clean up stale native routes from the previous branch before ensuring the new ones
-        let prev_branch = runtime::resolve_branch(
-            self.config_path
-                .parent()
-                .unwrap_or_else(|| std::path::Path::new(".")),
-        );
+        let prev_branch = runtime::resolve_branch(&current_dir);
         if prev_branch != branch_for_ports {
             crate::router::cleanup_native_routes(prev_branch.as_deref(), &config);
         }

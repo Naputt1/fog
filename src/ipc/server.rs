@@ -109,6 +109,7 @@ pub(crate) fn handle_connection(mut stream: Stream, state: Arc<IpcState>) {
                 branch: state.branch.clone(),
                 config_dir: state.config_dir.clone(),
                 config_path: state.config_path.clone(),
+                project_dir: state.project_dir.clone(),
                 started_at: state.started_at,
                 ports,
                 native_routes,
