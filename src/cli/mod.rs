@@ -671,12 +671,11 @@ mod tests {
 
     #[test]
     fn test_cli_accepts_project_dir() {
-        let cli = Cli::try_parse_from(["fog", "dev", "--project-dir", "/tmp/worktree"]).unwrap();
+        let dir = std::env::temp_dir().join("fog-worktree");
+        let cli =
+            Cli::try_parse_from(["fog", "dev", "--project-dir", dir.to_str().unwrap()]).unwrap();
         assert_eq!(cli.script.as_deref(), Some("dev"));
-        assert_eq!(
-            resolve_project_dir(cli.project_dir.as_deref()),
-            Some(PathBuf::from("/tmp/worktree"))
-        );
+        assert_eq!(resolve_project_dir(cli.project_dir.as_deref()), Some(dir));
     }
 
     #[test]
