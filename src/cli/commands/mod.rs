@@ -243,6 +243,7 @@ pub(crate) fn test_status(
         branch: None,
         config_dir: None,
         config_path: None,
+        project_dir: None,
         started_at: 0,
         ports: Default::default(),
         native_routes: Vec::new(),

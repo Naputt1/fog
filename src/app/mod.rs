@@ -171,6 +171,9 @@ pub struct App {
     errors: Vec<String>,
     proxy_filter: String,
     config_path: std::path::PathBuf,
+    /// Logical project root override (`--project-dir`), when the config file
+    /// lives outside the worktree it drives.
+    project_dir: Option<PathBuf>,
     /// The `--config` value as passed on the command line (may be relative),
     /// used to resolve a target worktree's config when switching.
     config_rel: PathBuf,
@@ -234,6 +237,8 @@ pub struct AppCreateOpts {
     pub sidebar_max: u16,
     pub theme: Theme,
     pub config_path: std::path::PathBuf,
+    /// Logical project root override (`--project-dir`).
+    pub project_dir: Option<PathBuf>,
     pub config_rx: std::sync::mpsc::Receiver<()>,
     /// Stop flag owned by the active config watcher, set when it is replaced.
     pub config_watcher_stop: Arc<AtomicBool>,
@@ -264,6 +269,7 @@ impl App {
             sidebar_max,
             theme,
             config_path,
+            project_dir,
             config_rx,
             config_watcher_stop,
             ipc_state,
@@ -311,6 +317,7 @@ impl App {
             errors: startup_messages.clone(),
             proxy_filter: String::new(),
             config_path,
+            project_dir,
             config_rel,
             save_logs,
             config_rx,
@@ -391,6 +398,18 @@ impl App {
             }
             Err(e) => self.note_error(format!("could not detach: {e}")),
         }
+    }
+
+    /// The logical project root: `--project-dir` when given, otherwise the
+    /// directory holding the config file. Kept logical (symlinks unresolved),
+    /// like the startup path.
+    pub(crate) fn project_dir(&self) -> PathBuf {
+        self.project_dir.clone().unwrap_or_else(|| {
+            self.config_path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."))
+                .to_path_buf()
+        })
     }
 
     /// Whether a detach has been requested (and the successor launched).
@@ -479,6 +498,7 @@ mod tests {
             errors: vec![],
             proxy_filter: String::new(),
             config_path: PathBuf::new(),
+            project_dir: None,
             config_rel: PathBuf::from("fog.json"),
             save_logs: false,
             config_rx: rx,

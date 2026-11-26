@@ -92,6 +92,20 @@ pub fn config_dir(config_path: &Path) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// Returns the logical project root for a run: `project_override` when the
+/// caller passed `--project-dir`, otherwise the config file's directory.
+///
+/// The override lets a generated config (for example a merged overlay copy in
+/// a cache directory) keep resolving relative service `path` values, git
+/// identity/branch lookups and index registration against the worktree, while
+/// `--config` still names the generated file.
+pub fn project_root(config_path: &Path, project_override: Option<&Path>) -> PathBuf {
+    match project_override {
+        Some(dir) => std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf()),
+        None => config_dir(config_path),
+    }
+}
+
 /// Returns the main working-tree root of the git repository containing `dir`,
 /// regardless of which worktree `dir` is checked out in.
 ///
@@ -347,6 +361,28 @@ mod tests {
         // target's directory: git, identity, and `path: "."` all use it.
         assert_eq!(config_dir(&link), worktree);
         assert_ne!(config_dir(&link), overlay);
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_project_root_prefers_override_and_keeps_config_dir_default() {
+        let base = std::env::temp_dir().join(format!("fog-project-root-{}", std::process::id()));
+        let cache = base.join("cache/fog/repo");
+        let worktree = base.join("worktree");
+        fs::create_dir_all(&cache).unwrap();
+        fs::create_dir_all(&worktree).unwrap();
+        let config_path = cache.join("dev.json");
+        fs::write(&config_path, "{}").unwrap();
+
+        // No override: the generated config's own directory is the root, which
+        // is exactly the bug when the file lives in a cache.
+        assert_eq!(project_root(&config_path, None), cache);
+
+        // With `--project-dir`, relative service paths resolve in the worktree.
+        let root = project_root(&config_path, Some(&worktree));
+        assert_eq!(root, worktree);
+        assert_eq!(root.join("src/main.ts"), worktree.join("src/main.ts"));
 
         let _ = fs::remove_dir_all(&base);
     }

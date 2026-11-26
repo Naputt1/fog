@@ -15,7 +15,8 @@ use crate::cli::commands::reclaim::{
 use crate::cli::presentation::color_enabled;
 use crate::cli::progress::StopProgress;
 use crate::cli::{
-    Cli, list_scripts_and_exit, load_config, resolve_config_path, resolve_run_config,
+    Cli, list_scripts_and_exit, load_config, resolve_config_path, resolve_project_dir,
+    resolve_run_config,
 };
 use crate::config_watcher;
 use crate::ipc;
@@ -130,13 +131,17 @@ pub(crate) fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>)
         Some(s) => s,
         None => list_scripts_and_exit(&config, &format!("unknown script '{name}'")),
     };
-    let config_path = config_path
-        .canonicalize()
-        .unwrap_or_else(|_| config_path.clone());
-    let config_dir = config_path
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."))
-        .to_path_buf();
+    // Keep the config path logical (absolute but with symlinks unresolved): a
+    // symlinked `fog.json` must retain the identity of the worktree that holds
+    // the link, not the link target's directory. The daemon also re-execs with
+    // this path via `--config`, so it must not be canonicalized either.
+    let config_path = std::path::absolute(&config_path).unwrap_or(config_path);
+    // `--project-dir` overrides the root the config file's directory would
+    // otherwise supply. A generated/merged config kept outside the worktree
+    // (e.g. Breeze's cache) then still resolves relative service `path`
+    // values, git identity and branch lookups against the worktree.
+    let project_dir_override = resolve_project_dir(cli.project_dir.as_deref());
+    let config_dir = crate::project::project_root(&config_path, project_dir_override.as_deref());
     // `--no-share` / `--share` overrides for this run, resolved against the
     // script that is actually about to start. A bad `--share` name is a usage
     // error, reported before anything is torn down or allocated.
@@ -201,13 +206,6 @@ pub(crate) fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>)
         note_phase(&mut progress, "index server");
         startup_messages.extend(crate::index::ensure_for_config(&config));
     }
-
-    // Keep the config path logical (absolute but with symlinks unresolved): a
-    // symlinked `fog.json` must retain the identity of the worktree that holds
-    // the link, not the link target's directory. The daemon also re-execs with
-    // this path via `--config`, so it must not be canonicalized either.
-    let config_path = std::path::absolute(&config_path).unwrap_or(config_path);
-    let config_dir = crate::project::config_dir(&config_path);
 
     // Every start — TUI, daemon or worktree switch — keeps the project in the
     // index's "known project" list after it stops. Only launchable configs
@@ -295,6 +293,9 @@ pub(crate) fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>)
     );
     ipc_state.config_dir = Some(config_dir.to_string_lossy().into_owned());
     ipc_state.config_path = Some(config_path.to_string_lossy().into_owned());
+    ipc_state.project_dir = project_dir_override
+        .as_ref()
+        .map(|dir| dir.to_string_lossy().into_owned());
     // Publish the forced names so `fog attach` can rebuild this invocation.
     *ipc_state.forced_share.lock().expect("mutex poisoned") =
         share.forced.iter().cloned().collect();
@@ -697,6 +698,10 @@ pub(crate) fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>)
             OsString::from("--config"),
             OsString::from(config_path.as_os_str()),
         ];
+        if let Some(dir) = project_dir_override.as_ref() {
+            args.push(OsString::from("--project-dir"));
+            args.push(OsString::from(dir.as_os_str()));
+        }
         if let Some(branch) = cli.branch.as_ref() {
             args.push(OsString::from("--branch"));
             args.push(OsString::from(branch));
@@ -727,6 +732,7 @@ pub(crate) fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>)
         config_watcher_stop,
         ipc_state,
         config_rel: cli.config.clone(),
+        project_dir: project_dir_override,
         save_logs: cli.save_logs,
         share: share.clone(),
         verbose: cli.verbose,

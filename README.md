@@ -190,6 +190,7 @@ instance), `2` a usage error (bad flag, unknown script).
 | Option                   | Description                                                                                                     |
 | ------------------------ | --------------------------------------------------------------------------------------------------------------- |
 | `-c`, `--config <PATH>`  | Path to config file or directory containing `fog.json` (default `fog.json`)                                     |
+| `--project-dir <DIR>`    | Logical project root for relative service `path` values, git identity/branch and index lookups; use when `--config` is a generated file outside the worktree |
 | `--branch <BRANCH>`      | Run in the git worktree for this branch                                                                         |
 | `--port <NAME=PORT>`     | Override a top-level `ports` entry for this run (repeatable; `0` re-randomizes, e.g. `fog dev --port api=4000`) |
 | `-d`, `--detach`         | Run in background without TUI; waits until services start, showing progress, logs to `$TMPDIR/fog-<pid>.logs/`  |

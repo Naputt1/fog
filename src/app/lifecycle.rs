@@ -11,7 +11,6 @@ use crate::terminal::{HealthStatus, Init};
 use crossterm::event;
 use ratatui::DefaultTerminal;
 use std::io::{self, Write};
-use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -293,8 +292,7 @@ impl App {
     /// Returns an error if terminal rendering or event polling fails.
     pub(crate) fn reload_config(&mut self) {
         let ports = self.ipc_state.ports.lock().expect("mutex poisoned").clone();
-        let branch =
-            runtime::resolve_branch(self.config_path.parent().unwrap_or_else(|| Path::new(".")));
+        let branch = runtime::resolve_branch(&self.project_dir());
         let had_proxy = self.proxy.is_some();
         match config_watcher::reload_config(
             &self.config_path,

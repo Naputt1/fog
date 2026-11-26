@@ -52,6 +52,9 @@ pub(crate) fn cmd_restart(pid: Option<u32>, all: bool, cli: &Cli) -> io::Result<
         script: String,
         branch: Option<String>,
         config_path: PathBuf,
+        /// Logical project root recorded by the target, when its config lives
+        /// outside the worktree (Breeze temp config).
+        project_dir: Option<String>,
         without: Vec<String>,
         forced_share: Vec<String>,
         no_share: bool,
@@ -113,7 +116,11 @@ pub(crate) fn cmd_restart(pid: Option<u32>, all: bool, cli: &Cli) -> io::Result<
         let kept_ports = restart_kept_ports(&status.ports, config.ports.as_ref(), &port_overrides);
         // Replayed opt-outs are filtered because the config may have changed;
         // names passed to this command are strict so a typo is caught.
-        let config_dir = config_path.parent().unwrap_or_else(|| Path::new("."));
+        let project_dir = status.project_dir.clone();
+        let config_dir = project_dir
+            .as_deref()
+            .map(Path::new)
+            .unwrap_or_else(|| config_path.parent().unwrap_or_else(|| Path::new(".")));
         let replayed: Vec<String> = status
             .services
             .iter()
@@ -185,6 +192,7 @@ pub(crate) fn cmd_restart(pid: Option<u32>, all: bool, cli: &Cli) -> io::Result<
             script,
             branch: status.branch,
             config_path,
+            project_dir,
             without,
             forced_share,
             no_share,
@@ -199,6 +207,7 @@ pub(crate) fn cmd_restart(pid: Option<u32>, all: bool, cli: &Cli) -> io::Result<
             script,
             branch,
             config_path,
+            project_dir,
             without,
             forced_share,
             no_share,
@@ -231,6 +240,7 @@ pub(crate) fn cmd_restart(pid: Option<u32>, all: bool, cli: &Cli) -> io::Result<
             &config_path,
             &script,
             None,
+            project_dir.as_deref(),
             &without,
             &forced_share,
             no_share,
@@ -310,14 +320,21 @@ fn spawn_instance_detached(
     config_path: &Path,
     script: &str,
     branch: Option<&str>,
+    project_dir: Option<&str>,
     without: &[String],
     forced_share: &[String],
     no_share: bool,
     kept_ports: &[(String, u16)],
     port_overrides: &[String],
 ) -> io::Result<u32> {
-    let extra_args =
-        restart_extra_args(without, forced_share, no_share, kept_ports, port_overrides);
+    let extra_args = restart_extra_args(
+        project_dir,
+        without,
+        forced_share,
+        no_share,
+        kept_ports,
+        port_overrides,
+    );
     crate::ipc::spawn_detached(
         config_path,
         script,
@@ -332,6 +349,7 @@ fn spawn_instance_detached(
 /// user's `--port` arguments verbatim (the run validates and applies both, with
 /// the user's overrides last).
 fn restart_extra_args(
+    project_dir: Option<&str>,
     without: &[String],
     forced_share: &[String],
     no_share: bool,
@@ -341,6 +359,10 @@ fn restart_extra_args(
     let mut extra_args = Vec::with_capacity(
         (without.len() + forced_share.len() + kept_ports.len() + port_overrides.len()) * 2 + 1,
     );
+    if let Some(dir) = project_dir {
+        extra_args.push("--project-dir".to_string());
+        extra_args.push(dir.to_string());
+    }
     for service in without {
         extra_args.push("--without".to_string());
         extra_args.push(service.clone());
@@ -372,15 +394,44 @@ mod tests {
     #[test]
     fn test_restart_extra_args_replay_skip_and_share() {
         assert_eq!(
-            restart_extra_args(&["db".to_string()], &["redis".to_string()], false, &[], &[]),
+            restart_extra_args(
+                None,
+                &["db".to_string()],
+                &["redis".to_string()],
+                false,
+                &[],
+                &[]
+            ),
             vec!["--without", "db", "--share", "redis"]
+        );
+    }
+
+    #[test]
+    fn test_restart_extra_args_replay_project_dir_first() {
+        assert_eq!(
+            restart_extra_args(
+                Some("/repo-worktree"),
+                &["db".to_string()],
+                &[],
+                false,
+                &[],
+                &[]
+            ),
+            vec!["--project-dir", "/repo-worktree", "--without", "db"]
         );
     }
 
     #[test]
     fn test_restart_extra_args_replay_no_share_without_forced_names() {
         assert_eq!(
-            restart_extra_args(&["db".to_string()], &["redis".to_string()], true, &[], &[]),
+            restart_extra_args(
+                None,
+                &["db".to_string()],
+                &["redis".to_string()],
+                true,
+                &[],
+                &[]
+            ),
             vec!["--without", "db", "--no-share"]
         );
     }
@@ -389,6 +440,7 @@ mod tests {
     fn test_restart_extra_args_replay_kept_and_override_ports() {
         assert_eq!(
             restart_extra_args(
+                None,
                 &[],
                 &[],
                 false,

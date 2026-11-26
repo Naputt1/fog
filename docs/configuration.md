@@ -6,6 +6,8 @@ title: Configuration
 
 fog is configured via a JSON file (default: `fog.json`). Use the `-c` / `--config` flag to specify a different path.
 
+When another tool generates the config outside the worktree — for example a merged overlay copy in a cache directory — also pass `--project-dir <worktree>`. Fog then resolves relative service `path` values, git identity and branch discovery, index registration, and restart/attach against that logical root, while `--config` continues to select the generated file. The path is made absolute without resolving symlinks, so a symlinked project keeps the worktree's name.
+
 See [`fog.schema.json`](https://github.com/Naputt1/fog/blob/main/fog.schema.json) for the formal JSON Schema.
 
 ## Top-level structure

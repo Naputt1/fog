@@ -110,9 +110,15 @@ pub(crate) fn cmd_attach(cli: &Cli) -> io::Result<()> {
     // Replayed opt-outs are filtered against the current config: removing a
     // skipped service from fog.json must not make the healthy instance
     // impossible to attach to.
-    let config_dir = Path::new(&config_path)
-        .parent()
-        .unwrap_or_else(|| Path::new("."));
+    let config_dir = status
+        .project_dir
+        .as_deref()
+        .map(Path::new)
+        .unwrap_or_else(|| {
+            Path::new(&config_path)
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+        });
     let replayed: Vec<String> = status
         .services
         .iter()
@@ -131,6 +137,10 @@ pub(crate) fn cmd_attach(cli: &Cli) -> io::Result<()> {
         OsString::from("--config"),
         OsString::from(&config_path),
     ];
+    if let Some(dir) = status.project_dir.as_ref() {
+        argv.push(OsString::from("--project-dir"));
+        argv.push(OsString::from(dir));
+    }
     for name in &without {
         argv.push(OsString::from("--without"));
         argv.push(OsString::from(name));
