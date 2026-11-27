@@ -1009,6 +1009,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_probe_domain_ignores_a_reply_from_another_socket() {
+        let responder = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let decoy = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let port = responder.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            let mut buf = [0u8; 512];
+            let (n, from) = responder.recv_from(&mut buf).unwrap();
+            // A wrong-answer datagram from another socket must be skipped,
+            // then the real resolver's answer must be accepted.
+            let wrong = a_response(&buf[..n], [10, 0, 0, 1]);
+            let _ = decoy.send_to(&wrong, from);
+            std::thread::sleep(Duration::from_millis(20));
+            let response = a_response(&buf[..n], [127, 0, 0, 1]);
+            let _ = responder.send_to(&response, from);
+        });
+        assert!(probe_domain("127.0.0.1", port, "red-fox"));
+        handle.join().unwrap();
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn test_launchctl_service_target_is_one_argument() {

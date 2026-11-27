@@ -6,6 +6,7 @@ use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+#[cfg(target_os = "macos")]
 use std::sync::Once;
 use std::time::Duration;
 
@@ -696,7 +697,9 @@ fn remember_hosts(cert_dir: &Path, domains: &[String], new_hosts: &[String]) -> 
 
 /// Path to the mkcert root CA currently in use, if mkcert is installed.
 fn mkcert_ca_root() -> Option<PathBuf> {
-    let out = Command::new("mkcert").arg("-CAROOT").output().ok()?;
+    let mut cmd = Command::new("mkcert");
+    cmd.arg("-CAROOT");
+    let out = run_with_timeout(cmd, Duration::from_secs(5))?;
     if !out.status.success() {
         return None;
     }
@@ -722,16 +725,15 @@ fn verify_ca_trust(messages: &mut Vec<String>) {
         let Some(root) = mkcert_ca_root() else {
             return;
         };
-        let Ok(status) = Command::new("security")
-            .args(["verify-cert", "-c"])
-            .arg(&root)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-        else {
+        // This now runs on every start, not only after generating a leaf, so
+        // a wedged `security` (locked keychain, stuck trust evaluation) must
+        // not be able to stall startup.
+        let mut cmd = Command::new("security");
+        cmd.args(["verify-cert", "-c"]).arg(&root);
+        let Some(output) = run_with_timeout(cmd, Duration::from_secs(5)) else {
             return;
         };
-        if !status.success() {
+        if !output.status.success() {
             messages.push(
                 "⚠ the mkcert root CA is not trusted by macOS. Run `mkcert -install` once, \
                  then restart fog."
