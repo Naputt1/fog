@@ -654,15 +654,17 @@ fn ensure_running(
 
     service_dnsmasq(action, non_interactive, messages);
 
-    let mut resolving = wait_for_dns(address, port, domains, Duration::from_secs(3));
+    let resolving = wait_for_dns(address, port, domains, Duration::from_secs(3));
 
     // `brew services` can report success while the loaded root LaunchDaemon is
     // untouched (Homebrew does not see a daemon it did not load). Kick the
     // actual launchd job and probe again before declaring failure.
     #[cfg(target_os = "macos")]
-    if !resolving && kickstart_dnsmasq(non_interactive, messages) {
-        resolving = wait_for_dns(address, port, domains, Duration::from_secs(2));
-    }
+    let resolving = if !resolving && kickstart_dnsmasq(non_interactive, messages) {
+        wait_for_dns(address, port, domains, Duration::from_secs(2))
+    } else {
+        resolving
+    };
 
     if resolving {
         messages.push(format!(
