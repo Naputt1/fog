@@ -1,5 +1,7 @@
 use crate::config::DnsmasqConfig;
 use crate::error::{FogError, FogResult};
+#[cfg(target_os = "macos")]
+use crate::process::run_with_timeout;
 use std::fs;
 #[cfg(target_os = "macos")]
 use std::io::Write;
@@ -692,7 +694,11 @@ fn wait_for_dns(address: &str, port: u16, domains: &[String], timeout: Duration)
 /// though dnsmasq now answers.
 #[cfg(target_os = "macos")]
 fn flush_dns_cache(non_interactive: bool) {
-    let _ = Command::new("dscacheutil").arg("-flushcache").status();
+    // Bound the flush: a wedged resolver must not hang a detached startup,
+    // which cannot even be interrupted from a TUI.
+    let mut flush = Command::new("dscacheutil");
+    flush.arg("-flushcache");
+    let _ = run_with_timeout(flush, Duration::from_secs(2));
     let _ = run_sudo(&["killall", "-HUP", "mDNSResponder"], non_interactive);
 }
 
@@ -731,16 +737,19 @@ fn flush_stale_system_cache(
 /// `/etc/resolver`, unlike a direct query to dnsmasq.
 #[cfg(target_os = "macos")]
 fn system_resolves(address: &str, domain: &str) -> bool {
-    let Ok(output) = Command::new("dscacheutil")
-        .args(["-q", "host", "-a", "name", &format!("fog-probe.{domain}")])
-        .output()
-    else {
+    let mut cmd = Command::new("dscacheutil");
+    cmd.args(["-q", "host", "-a", "name", &format!("fog-probe.{domain}")]);
+    // mDNSResponder can block behind an unreachable resolver. The probe is a
+    // health check, so a slow answer is treated as "not resolved" instead of
+    // stalling startup forever.
+    let Some(output) = run_with_timeout(cmd, Duration::from_secs(5)) else {
         return false;
     };
-    if !output.status.success() {
-        return false;
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
+    output.status.success() && output_has_ipv4(&String::from_utf8_lossy(&output.stdout), address)
+}
+
+#[cfg(target_os = "macos")]
+fn output_has_ipv4(text: &str, address: &str) -> bool {
     text.lines().any(|line| {
         line.trim()
             .strip_prefix("ip_address:")
@@ -828,10 +837,13 @@ fn kickstart_dnsmasq(non_interactive: bool, messages: &mut Vec<String>) -> bool 
 #[cfg(target_os = "macos")]
 fn bootout_user_agent() -> FogResult<()> {
     let domain = format!("gui/{}", unsafe { libc::getuid() });
+    // launchctl takes a single service target (`gui/<uid>/<label>`), not a
+    // domain followed by a separate label argument.
+    let target = launchctl_service_target(&domain, "homebrew.mxcl.dnsmasq");
     // Only try to unload if it is actually registered; otherwise bootout fails
     // with a confusing error.
     let loaded = Command::new("launchctl")
-        .args(["print", &domain, "homebrew.mxcl.dnsmasq"])
+        .args(["print", &target])
         .output()
         .ok()
         .map(|o| o.status.success())
@@ -840,7 +852,7 @@ fn bootout_user_agent() -> FogResult<()> {
         return Ok(());
     }
     let status = Command::new("launchctl")
-        .args(["bootout", &domain, "homebrew.mxcl.dnsmasq"])
+        .args(["bootout", &target])
         .status()
         .map_err(|e| FogError::new(format!("launchctl: {e}")))?;
     if status.success() {
@@ -850,6 +862,11 @@ fn bootout_user_agent() -> FogResult<()> {
             "launchctl bootout homebrew.mxcl.dnsmasq failed".to_string(),
         ))
     }
+}
+
+#[cfg(target_os = "macos")]
+fn launchctl_service_target(domain: &str, label: &str) -> String {
+    format!("{domain}/{label}")
 }
 
 #[cfg(target_os = "macos")]
@@ -972,6 +989,28 @@ mod tests {
             !argv.iter().any(|a| a == "rm"),
             "the user-owned staging file must not need a second sudo call: {argv:?}"
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_launchctl_service_target_is_one_argument() {
+        assert_eq!(
+            launchctl_service_target("gui/501", "homebrew.mxcl.dnsmasq"),
+            "gui/501/homebrew.mxcl.dnsmasq",
+            "launchctl print/bootout take domain/label as one service target"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_dscacheutil_output_matches_the_exact_ipv4() {
+        let text = "name: fog-probe.red-fox\nip_address: 127.0.0.1\n";
+        assert!(output_has_ipv4(text, "127.0.0.1"));
+        assert!(
+            !output_has_ipv4(text, "127.0.0.10"),
+            "a longer address must not match by prefix"
+        );
+        assert!(!output_has_ipv4("name: fog-probe.red-fox\n", "127.0.0.1"));
     }
 
     /// Builds a valid response to `query` with one A record.

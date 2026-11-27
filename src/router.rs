@@ -208,10 +208,14 @@ fn default_dynamic_dir_for_config(cfg: &crate::config::Config) -> PathBuf {
 }
 
 /// Sanitizes a string for use as a Traefik router/service name and filename.
+///
+/// Router names are written as TOML bare keys, which only allow ASCII letters,
+/// digits, `_` and `-`; a Unicode alphanumeric from a checkout, branch or
+/// service name would make the whole route file unparseable.
 fn sanitize_name(s: &str) -> String {
     s.chars()
         .map(|c| {
-            if c.is_alphanumeric() || c == '-' {
+            if c.is_ascii_alphanumeric() || c == '-' {
                 c
             } else {
                 '_'
@@ -475,20 +479,27 @@ pub fn cleanup_native_routes(branch: Option<&str>, scope: &Path, cfg: &crate::co
     }
 }
 
-/// Extracts the hostnames from a Traefik `Host(...)` rule fragment.
+/// Extracts the hostnames from every `Host(...)` rule fragment.
 ///
-/// Only `Host(...)` is matched (not `HostRegexp(...)`), and only the
-/// backtick-quoted argument immediately following it, so unrelated
-/// backtick-quoted content such as a dotted `PathPrefix` is ignored.
+/// Only `Host(...)` is matched (not `HostRegexp(...)`), and only its
+/// backtick-quoted arguments, so unrelated content such as a dotted
+/// `PathPrefix` is ignored. `Host(a, b)` is valid Traefik syntax and both hosts
+/// must enter the certificate.
 fn host_rule_hosts(rule: &str) -> Vec<String> {
     let mut hosts = Vec::new();
     let mut rest = rule;
-    while let Some(start) = rest.find("Host(`") {
-        let after = &rest[start + "Host(`".len()..];
-        let Some(end) = after.find('`') else { break };
-        let host = after[..end].trim();
-        if !host.is_empty() {
-            hosts.push(host.to_string());
+    while let Some(start) = rest.find("Host(") {
+        let after = &rest[start + "Host(".len()..];
+        let Some(end) = after.find(')') else { break };
+        let mut args = &after[..end];
+        while let Some(open) = args.find('`') {
+            let quoted = &args[open + 1..];
+            let Some(close) = quoted.find('`') else { break };
+            let host = quoted[..close].trim();
+            if !host.is_empty() && !hosts.iter().any(|h| h == host) {
+                hosts.push(host.to_string());
+            }
+            args = &quoted[close + 1..];
         }
         rest = &after[end + 1..];
     }
@@ -1318,9 +1329,27 @@ mod tests {
             host_rule_hosts("Host(`a.gems`) || Host(`b.gems`)"),
             vec!["a.gems".to_string(), "b.gems".to_string()]
         );
+        assert_eq!(
+            host_rule_hosts("Host(`a.gems`, `b.gems`) && PathPrefix(`/`)"),
+            vec!["a.gems".to_string(), "b.gems".to_string()],
+            "every argument of one Host() call is a route"
+        );
         assert!(
             host_rule_hosts("HostRegexp(`{host:.+}`)").is_empty(),
             "HostRegexp must not be treated as a Host rule"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_name_is_a_valid_toml_bare_key() {
+        assert_eq!(sanitize_name("Prüfung ✓"), "Pr_fung__");
+        let scope = route_scope(std::path::Path::new("/tmp/prüfung"));
+        assert!(scope.starts_with("pr_fung-"), "{scope}");
+        assert!(
+            scope
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            "route scope must be ASCII so it is a valid TOML bare key: {scope}"
         );
     }
 
