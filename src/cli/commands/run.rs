@@ -809,8 +809,11 @@ pub(crate) fn run_script_inner(name: &str, cli: &Cli, takeover_pid: Option<u32>)
 
     ipc::cleanup_socket();
 
-    // Clean up native Traefik routes for this branch (explicit only).
-    crate::router::cleanup_native_routes(branch_for_ports.as_deref(), &config_dir, &config);
+    // Clean up this instance's native Traefik routes (explicit only). The App
+    // tracks the checkout and branch actually being served now; after a
+    // worktree switch the startup `config_dir`/`branch_for_ports` are stale.
+    let cleanup_dir = app.project_dir();
+    crate::router::cleanup_native_routes(app.current_branch(), &cleanup_dir, &config);
 
     // The index server is left running after the last instance exits so its
     // SPA can launch the next one; stop it with `fog index kill`.

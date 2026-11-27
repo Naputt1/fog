@@ -279,6 +279,8 @@ pub fn ensure_native_routes(
     let dynamic_dir = default_dynamic_dir_for_config(cfg);
     let _ = fs::create_dir_all(&dynamic_dir);
     let scope_slug = route_scope(scope);
+    let branch_slug = sanitize_name(branch.unwrap_or("default"));
+    let owner = route_owner(&scope_slug, &branch_slug);
     let mut routed_hosts: Vec<String> = Vec::new();
 
     for r in routes {
@@ -313,7 +315,6 @@ pub fn ensure_native_routes(
                 continue;
             }
         };
-        let branch_slug = sanitize_name(branch.unwrap_or("default"));
         let svc_slug = sanitize_name(&r.service);
         let host_slug = sanitize_name(&host);
         // Endpoint routes get a distinct `ep-` prefix (both in the router
@@ -360,7 +361,9 @@ pub fn ensure_native_routes(
             format!("Host(`{}`)", host)
         };
         let content = format!(
-            r#"[http.routers]
+            r#"{owner}
+
+[http.routers]
   [http.routers.{name}]
     rule = "{rule}"
     entryPoints = ["web"]
@@ -451,6 +454,15 @@ fn tls_router(cfg: &crate::config::Config) -> Option<RouterConfig> {
     (container_exists(&container) && container_tls_enabled(&container)).then_some(router)
 }
 
+/// First line written into every generated route file. The file name can only
+/// encode a hyphen-delimited branch slug, so `main` and `main-2` share a
+/// prefix; the exact owner line lets cleanup tell them apart.
+const ROUTE_OWNER_PREFIX: &str = "# fog-route: ";
+
+fn route_owner(scope_slug: &str, branch_slug: &str) -> String {
+    format!("{ROUTE_OWNER_PREFIX}scope={scope_slug} branch={branch_slug}")
+}
+
 /// Removes the native route files this project+branch owns.
 ///
 /// The dynamic dir is host-global, so cleanup must stay within one project
@@ -462,6 +474,7 @@ pub fn cleanup_native_routes(branch: Option<&str>, scope: &Path, cfg: &crate::co
     let dynamic_dir = default_dynamic_dir_for_config(cfg);
     let branch_slug = sanitize_name(branch.unwrap_or("default"));
     let scope_slug = route_scope(scope);
+    let owner = route_owner(&scope_slug, &branch_slug);
     let prefixes = [
         format!("native-{scope_slug}-{branch_slug}-"),
         format!("ep-{scope_slug}-{branch_slug}-"),
@@ -473,7 +486,21 @@ pub fn cleanup_native_routes(branch: Option<&str>, scope: &Path, cfg: &crate::co
     };
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
-        if name.ends_with(".toml") && prefixes.iter().any(|p| name.starts_with(p)) {
+        if !name.ends_with(".toml") || !prefixes.iter().any(|p| name.starts_with(p)) {
+            continue;
+        }
+        // A generated file whose owner line names another branch only matched
+        // because one branch slug prefixes the other (`main` vs `main-2`).
+        // Files without an owner line predate the marker; the prefix is the
+        // best available ownership test and matches the old cleanup behavior.
+        let owned = match fs::read_to_string(entry.path()) {
+            Ok(content) => match content.lines().next() {
+                Some(line) if line.starts_with(ROUTE_OWNER_PREFIX) => line == owner,
+                _ => true,
+            },
+            Err(_) => true,
+        };
+        if owned {
             let _ = fs::remove_file(entry.path());
         }
     }
@@ -1528,6 +1555,34 @@ mod tests {
 
         cleanup_native_routes(None, &scope(), &cfg);
         assert!(!file.exists(), "cleanup must remove the default-slug route");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_cleanup_does_not_delete_a_branch_that_prefixes_another() {
+        let base = std::env::temp_dir().join(format!("fog-cleanup-prefix-{}", std::process::id()));
+        let cfg = native_cfg(&base);
+        let dir = default_dynamic_dir_for_config(&cfg);
+        std::fs::create_dir_all(&dir).unwrap();
+        let slug = route_scope(&scope());
+        let main_2 = dir.join(format!("native-{slug}-main-2-frontend-retail_red-fox.toml"));
+        std::fs::write(&main_2, format!("{}\n", route_owner(&slug, "main-2"))).unwrap();
+        // Files from before the owner marker still fall back to the prefix.
+        let legacy_main = dir.join(format!("native-{slug}-main-frontend-retail_red-fox.toml"));
+        std::fs::write(&legacy_main, "").unwrap();
+
+        cleanup_native_routes(Some("main"), &scope(), &cfg);
+        assert!(
+            main_2.is_file(),
+            "cleanup for `main` must not delete `main-2` routes"
+        );
+        assert!(!legacy_main.exists(), "the legacy same-branch file is ours");
+
+        cleanup_native_routes(Some("main-2"), &scope(), &cfg);
+        assert!(
+            !main_2.exists(),
+            "cleanup for `main-2` removes its own route"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
