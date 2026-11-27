@@ -118,8 +118,8 @@ fog <script>
 
 ### DNS works for direct ports but not for `*.domain`
 
-dnsmasq is answering or listening when it should not. Check the resolver file
-and probe the daemon directly:
+dnsmasq is not answering, or the macOS resolver file is missing or stale. Check
+the resolver file and probe the daemon directly:
 
 ```bash
 cat /etc/resolver/<domain>            # must contain: nameserver 127.0.0.1
@@ -147,7 +147,8 @@ and start/restart the root dnsmasq daemon. Interactive runs now request it once
 per startup and only when a file or the daemon actually needs repair; a healthy
 startup asks for nothing. If it still prompts every time, sudo credentials are
 not being cached on your machine — run `sudo -v` once and start fog again.
-Detached runs never prompt; they print the exact command to run instead.
+Detached runs never prompt; they warn and leave the repair for an interactive
+run.
 
 ### Two projects on the same branch break each other's routes
 

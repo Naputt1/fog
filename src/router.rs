@@ -930,16 +930,20 @@ fn ensure_tls(
     let ca_changed = current_ca.is_some() && previous_ca.as_deref() != current_ca.as_deref();
 
     // Names covered by the certificates: every wildcard domain, the dashboard
-    // hostname, and localhost.
-    let mut names: Vec<String> = domains.to_vec();
-    if let Some(h) = &cfg.hostname
-        && !names.contains(h)
+    // hostname, and localhost. Skip anything that is not a plain hostname: the
+    // name becomes a file name under cert_dir and an mkcert argument, so a
+    // stray `/` or `..` in config must not escape that directory.
+    let mut names: Vec<String> = Vec::new();
+    for name in domains
+        .iter()
+        .map(String::as_str)
+        .chain(cfg.hostname.as_deref())
+        .filter(|name| is_plain_hostname(name))
     {
-        names.push(h.clone());
+        push_unique(&mut names, name);
     }
-    names.push("localhost".to_string());
-    names.push("127.0.0.1".to_string());
-    names.dedup();
+    push_unique(&mut names, "localhost");
+    push_unique(&mut names, "127.0.0.1");
 
     let mut generated = false;
     for name in &names {
@@ -1462,6 +1466,16 @@ mod tests {
         assert!(on_disk.contains("main.red-fox"));
         assert!(on_disk.contains("feat.red-fox"));
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_plain_hostname_rejects_paths_and_wildcards() {
+        assert!(is_plain_hostname("api.red-fox"));
+        assert!(is_plain_hostname("127.0.0.1"));
+        assert!(!is_plain_hostname("../certs"));
+        assert!(!is_plain_hostname("a/b"));
+        assert!(!is_plain_hostname("*.red-fox"));
+        assert!(!is_plain_hostname(""));
     }
 
     #[test]

@@ -137,7 +137,8 @@ a sibling project stops and removes its route file: once a host has been
 certified it stays certified. When the mkcert root CA changes (reinstall, new
 `CAROOT`), a `ca.fingerprint` marker forces every leaf to be regenerated, and fog
 checks the CA is trusted and warns with `mkcert -install` when it is not. Delete
-`known-hosts.txt` to forget old hosts deliberately.
+`known-hosts.txt` **and** a domain's `<domain>.sans` sidecar to forget old hosts
+deliberately; the sidecar re-seeds the registry on the next start otherwise.
 
 Prerequisites (one-time):
 

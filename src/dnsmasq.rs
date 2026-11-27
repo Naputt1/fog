@@ -638,7 +638,7 @@ fn ensure_running(
     let tcp_up = is_running(address, port);
     let resolving = !tcp_up || domains.iter().all(|d| probe_domain(address, port, d));
     let Some(action) = next_service_action(changed, tcp_up, resolving) else {
-        flush_stale_system_cache(address, domains, non_interactive, messages);
+        flush_stale_system_cache(address, port, domains, non_interactive, messages);
         return;
     };
 
@@ -708,12 +708,19 @@ fn flush_dns_cache(non_interactive: bool) {
 /// password.
 fn flush_stale_system_cache(
     address: &str,
+    port: u16,
     domains: &[String],
     non_interactive: bool,
     messages: &mut Vec<String>,
 ) {
     #[cfg(target_os = "macos")]
     {
+        // /etc/resolver files written by fog carry no port, so macOS always
+        // queries :53. A daemon on another port cannot be validated through
+        // the system resolver; checking it would flush and warn every start.
+        if port != 53 {
+            return;
+        }
         if domains.iter().all(|d| system_resolves(address, d)) {
             return;
         }
@@ -730,7 +737,7 @@ fn flush_stale_system_cache(
         }
     }
     #[cfg(not(target_os = "macos"))]
-    let _ = (address, domains, non_interactive, messages);
+    let _ = (address, port, domains, non_interactive, messages);
 }
 
 /// Resolves a probe name through the OS resolver stack, which honours
@@ -1011,6 +1018,26 @@ mod tests {
             "a longer address must not match by prefix"
         );
         assert!(!output_has_ipv4("name: fog-probe.red-fox\n", "127.0.0.1"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_system_cache_check_skips_a_nonstandard_port() {
+        // /etc/resolver has no port, so a non-:53 daemon is not reachable
+        // through dscacheutil. The check must return without flushing,
+        // prompting, or warning on every healthy start.
+        let mut messages = Vec::new();
+        flush_stale_system_cache(
+            "127.0.0.1",
+            5353,
+            &["red-fox".to_string()],
+            false,
+            &mut messages,
+        );
+        assert!(
+            messages.is_empty(),
+            "a non-:53 daemon must not trigger a cache repair: {messages:?}"
+        );
     }
 
     /// Builds a valid response to `query` with one A record.
