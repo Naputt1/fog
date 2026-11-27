@@ -1,12 +1,23 @@
 use crate::config::DnsmasqConfig;
 use crate::error::{FogError, FogResult};
+#[cfg(target_os = "macos")]
+use crate::process::run_with_timeout;
 use std::fs;
 #[cfg(target_os = "macos")]
 use std::io::Write;
-use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use std::net::{Ipv4Addr, SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+/// Whether an interactive `sudo -v` has already cached credentials for this
+/// process. All privileged steps share one prompt instead of one per command.
+static SUDO_PRIMED: AtomicBool = AtomicBool::new(false);
+
+/// Set once an interactive `sudo -v` fails, so a declined prompt is not asked
+/// again for every remaining step in the same startup.
+static SUDO_DENIED: AtomicBool = AtomicBool::new(false);
 
 /// Applies the configured dnsmasq wildcard-DNS setup on startup.
 ///
@@ -193,7 +204,14 @@ fn apply_macos_at(
     }
 
     if restart {
-        ensure_running(changed, &cfg.address, cfg.port, non_interactive, messages);
+        ensure_running(
+            changed,
+            &cfg.address,
+            cfg.port,
+            &cfg.domains,
+            non_interactive,
+            messages,
+        );
     }
 
     Ok(())
@@ -268,7 +286,14 @@ fn apply_linux(
         )),
     }
 
-    ensure_running(changed, &cfg.address, cfg.port, non_interactive, messages);
+    ensure_running(
+        changed,
+        &cfg.address,
+        cfg.port,
+        &cfg.domains,
+        non_interactive,
+        messages,
+    );
 
     Ok(())
 }
@@ -326,23 +351,64 @@ fn append_line(path: &Path, line: &str) -> FogResult<()> {
         .map_err(|e| FogError::new(format!("could not write {}: {}", path.display(), e)))
 }
 
-/// Builds the argument vectors `sudo_write` invokes: `install(1)` to move the
-/// staged file into place as root, then `rm -f` to remove the staging file.
-/// Argument vectors are used so a path from config is never interpreted by a
-/// shell.
-fn sudo_write_argv(tmp: &Path, path: &Path) -> [Vec<String>; 2] {
-    let tmp = tmp.to_string_lossy().into_owned();
-    let dest = path.to_string_lossy().into_owned();
-    [
-        vec![
-            "install".to_string(),
-            "-m".to_string(),
-            "644".to_string(),
-            tmp.clone(),
-            dest,
-        ],
-        vec!["rm".to_string(), "-f".to_string(), tmp],
+/// Builds the `install(1)` argument vector `sudo_write` invokes to move the
+/// staged file into place as root. Argument vectors are used so a path from
+/// config is never interpreted by a shell.
+fn sudo_write_argv(tmp: &Path, path: &Path) -> Vec<String> {
+    vec![
+        "install".to_string(),
+        "-m".to_string(),
+        "644".to_string(),
+        tmp.to_string_lossy().into_owned(),
+        path.to_string_lossy().into_owned(),
     ]
+}
+
+/// Caches sudo credentials once per process in interactive mode, so a run that
+/// needs several privileged steps prompts only once (or not at all when
+/// everything is already healthy). Headless runs never prompt: they rely on
+/// `sudo -n` and report a warning if the cached ticket is missing.
+fn ensure_sudo(non_interactive: bool) -> FogResult<()> {
+    if non_interactive || SUDO_PRIMED.load(Ordering::Relaxed) {
+        return Ok(());
+    }
+    if SUDO_DENIED.load(Ordering::Relaxed) {
+        return Err(FogError::new(
+            "sudo authentication was declined earlier in this run".to_string(),
+        ));
+    }
+    match Command::new("sudo").arg("-v").status() {
+        Ok(s) if s.success() => {
+            SUDO_PRIMED.store(true, Ordering::Relaxed);
+            Ok(())
+        }
+        Ok(s) => {
+            SUDO_DENIED.store(true, Ordering::Relaxed);
+            Err(FogError::new(format!("sudo authentication failed ({s})")))
+        }
+        Err(e) => {
+            SUDO_DENIED.store(true, Ordering::Relaxed);
+            Err(FogError::new(format!("sudo: {e}")))
+        }
+    }
+}
+
+/// Runs a privileged command, sharing the single interactive sudo prompt.
+fn sudo_status(args: &[&str], non_interactive: bool) -> FogResult<()> {
+    ensure_sudo(non_interactive)?;
+    let mut cmd = Command::new("sudo");
+    if non_interactive {
+        cmd.arg("-n");
+    }
+    cmd.args(args);
+    let status = cmd
+        .status()
+        .map_err(|e| FogError::new(format!("sudo: {e}")))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(FogError::new(format!("sudo exited with {status}")))
+    }
 }
 
 /// Writes `content` to `path`, escalating to `sudo` when the path is not
@@ -352,18 +418,19 @@ fn sudo_write(path: &Path, content: &str, non_interactive: bool) -> FogResult<()
     if let Some(parent) = path.parent()
         && !parent.exists()
     {
-        run_sudo(&["mkdir", "-p", &parent.to_string_lossy()], non_interactive)?;
+        sudo_status(&["mkdir", "-p", &parent.to_string_lossy()], non_interactive)?;
     }
     if fs::write(path, content).is_ok() {
         return Ok(());
     }
     // Not writable: stage a temp file in the OS temp dir and install it via
-    // sudo (we cannot pipe stdin through `sudo cat`).
+    // sudo (we cannot pipe stdin through `sudo cat`). The staging file is
+    // owned by us, so it is removed without another sudo call.
     let tmp = std::env::temp_dir().join(format!(
         "fog-dnsmasq-stage-{}-{}",
         std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos()
     ));
@@ -372,24 +439,19 @@ fn sudo_write(path: &Path, content: &str, non_interactive: bool) -> FogResult<()
     // Run as argv, never through a shell, so a config-derived `path` cannot
     // inject commands into a root shell.
     let argv = sudo_write_argv(&tmp, path);
-    let install: Vec<&str> = argv[0].iter().map(String::as_str).collect();
-    let res = run_sudo(&install, non_interactive);
-    // Clean up the staging file whether or not the install succeeded.
-    let cleanup: Vec<&str> = argv[1].iter().map(String::as_str).collect();
-    let _ = run_sudo(&cleanup, non_interactive);
-    if res.is_ok() {
-        Ok(())
-    } else {
-        let _ = fs::remove_file(&tmp);
-        Err(FogError::new(format!(
-            "sudo write to {} failed",
-            path.display()
-        )))
-    }
+    let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+    let res = sudo_status(&refs, non_interactive);
+    let _ = fs::remove_file(&tmp);
+    res
 }
 
 #[cfg(target_os = "linux")]
 fn sudo_read_contains(path: &Path, needle: &str, non_interactive: bool) -> FogResult<bool> {
+    // dnsmasq drop-ins are usually world-readable; reading them directly
+    // avoids a sudo prompt for a check that changes nothing.
+    if let Ok(content) = fs::read_to_string(path) {
+        return Ok(content.lines().any(|l| l.trim() == needle));
+    }
     // A missing file means "route not configured yet" — the caller will write
     // it, rather than this being treated as an error.
     let exists = run_sudo_output(&["test", "-e", &path.to_string_lossy()], non_interactive).is_ok();
@@ -398,6 +460,143 @@ fn sudo_read_contains(path: &Path, needle: &str, non_interactive: bool) -> FogRe
         return Ok(out.lines().any(|l| l.trim() == needle));
     }
     Ok(false)
+}
+
+/// Sends a real UDP DNS query for a probe host under `domain` and checks that
+/// dnsmasq answers with the configured address. A TCP connect to :53 only
+/// proves a socket is listening; it says nothing about whether the daemon
+/// reloaded its routes, so every repair decision is based on this query.
+///
+/// Non-IPv4 mappings cannot be checked this way, so they are treated as
+/// unverified rather than failing every run.
+fn probe_domain(address: &str, port: u16, domain: &str) -> bool {
+    let Ok(expected) = address.parse::<Ipv4Addr>() else {
+        return true;
+    };
+    let Ok(mut addrs) = format!("{address}:{port}").to_socket_addrs() else {
+        return false;
+    };
+    let Some(target) = addrs.next() else {
+        return false;
+    };
+    let id = next_query_id();
+    let query = build_dns_query(id, &format!("fog-probe.{domain}"));
+    let Ok(socket) = UdpSocket::bind("0.0.0.0:0") else {
+        return false;
+    };
+    if socket.send_to(&query, target).is_err() {
+        return false;
+    }
+    let mut buf = [0u8; 512];
+    let deadline = Instant::now() + Duration::from_millis(700);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return false;
+        }
+        let _ = socket.set_read_timeout(Some(remaining));
+        match socket.recv_from(&mut buf) {
+            // Ignore datagrams from anything but the queried resolver: a stray
+            // local responder must not make a broken daemon look healthy.
+            Ok((n, from)) if from == target => return parse_dns_a(&buf[..n], id, expected),
+            Ok(_) => continue,
+            Err(_) => return false,
+        }
+    }
+}
+
+/// A fresh query id per probe, so a delayed answer cannot be mistaken for the
+/// current one. The id only needs to differ between in-flight queries.
+fn next_query_id() -> u16 {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos();
+    (std::process::id() as u16) ^ (nanos as u16)
+}
+
+/// Builds a minimal recursive DNS query for an A record.
+fn build_dns_query(id: u16, name: &str) -> Vec<u8> {
+    let mut query = Vec::with_capacity(12 + name.len() + 6);
+    query.extend_from_slice(&id.to_be_bytes());
+    query.extend_from_slice(&[0x01, 0x00]); // RD=1
+    query.extend_from_slice(&1u16.to_be_bytes()); // QDCOUNT
+    query.extend_from_slice(&[0, 0, 0, 0, 0, 0]); // AN/NS/AR counts
+    for label in name.split('.').filter(|label| !label.is_empty()) {
+        query.push(label.len() as u8);
+        query.extend_from_slice(label.as_bytes());
+    }
+    query.push(0);
+    query.extend_from_slice(&1u16.to_be_bytes()); // QTYPE A
+    query.extend_from_slice(&1u16.to_be_bytes()); // QCLASS IN
+    query
+}
+
+/// Returns `true` when `msg` is a response to `id` that carries an A record
+/// equal to `expected`. Malformed input returns `false`, never panics.
+fn parse_dns_a(msg: &[u8], id: u16, expected: Ipv4Addr) -> bool {
+    if msg.len() < 12 {
+        return false;
+    }
+    if u16::from_be_bytes([msg[0], msg[1]]) != id {
+        return false;
+    }
+    let flags = u16::from_be_bytes([msg[2], msg[3]]);
+    if flags & 0x8000 == 0 || flags & 0x000F != 0 {
+        return false; // not a response, or an error rcode
+    }
+    let qdcount = u16::from_be_bytes([msg[4], msg[5]]);
+    let ancount = u16::from_be_bytes([msg[6], msg[7]]);
+    if qdcount != 1 || ancount == 0 {
+        return false;
+    }
+    let mut pos = 12;
+    if skip_dns_name(msg, &mut pos).is_none() || pos + 4 > msg.len() {
+        return false;
+    }
+    pos += 4; // QTYPE + QCLASS
+
+    for _ in 0..ancount {
+        if skip_dns_name(msg, &mut pos).is_none() || pos + 10 > msg.len() {
+            return false;
+        }
+        let rtype = u16::from_be_bytes([msg[pos], msg[pos + 1]]);
+        let class = u16::from_be_bytes([msg[pos + 2], msg[pos + 3]]);
+        let rdlen = u16::from_be_bytes([msg[pos + 8], msg[pos + 9]]) as usize;
+        pos += 10;
+        if pos + rdlen > msg.len() {
+            return false;
+        }
+        if rtype == 1 && class == 1 && rdlen == 4 && msg[pos..pos + 4] == expected.octets() {
+            return true;
+        }
+        pos += rdlen;
+    }
+    false
+}
+
+/// Skips a DNS name at `pos`, following a compression pointer's two bytes (the
+/// label data itself lives elsewhere and does not need to be visited).
+fn skip_dns_name(msg: &[u8], pos: &mut usize) -> Option<()> {
+    for _ in 0..128 {
+        let len = *msg.get(*pos)? as usize;
+        if len == 0 {
+            *pos += 1;
+            return Some(());
+        }
+        if len & 0xC0 == 0xC0 {
+            *pos += 2;
+            return Some(());
+        }
+        if len & 0xC0 != 0 {
+            return None;
+        }
+        *pos += 1 + len;
+        if *pos > msg.len() {
+            return None;
+        }
+    }
+    None
 }
 
 /// Returns `true` if the dnsmasq daemon is currently serving on `address:port`.
@@ -415,61 +614,170 @@ fn is_running(address: &str, port: u16) -> bool {
 }
 
 /// Decides what to do with the dnsmasq service given whether the config
-/// changed and whether the daemon is currently up:
+/// changed, whether the daemon is up, and whether it answers a real query:
 ///
 /// * `start` — the daemon is down; bring it up.
-/// * `restart` — the daemon is up but the config changed; reload it.
-/// * `None` — the daemon is up and the config is unchanged; do nothing.
+/// * `restart` — the daemon is up but its config changed or it does not
+///   resolve the configured domains (a stale route or a failed previous
+///   reload); reload it.
+/// * `None` — the daemon is up and every configured domain resolves.
 ///
 /// Split out so the decision logic is pure and testable.
-fn next_service_action(changed: bool, running: bool) -> Option<&'static str> {
-    match (running, changed) {
-        (false, _) => Some("start"),
-        (true, true) => Some("restart"),
-        (true, false) => None,
+fn next_service_action(changed: bool, running: bool, resolving: bool) -> Option<&'static str> {
+    if !running {
+        Some("start")
+    } else if changed || !resolving {
+        Some("restart")
+    } else {
+        None
     }
 }
 
-/// Ensures the dnsmasq daemon is running (starting it if it is down), and
-/// restarts it when the config changed so new routes take effect. Reports
-/// outcomes through `messages`; never fails the run.
-///
-/// This replaces the old "restart only when config changed" behavior: a
-/// stopped-but-correctly-configured dnsmasq now gets started automatically.
+/// Ensures the dnsmasq daemon is running (starting it if it is down) and
+/// restarts it when the config changed **or a configured domain does not
+/// resolve**. A previously failed restart is therefore repaired on the next
+/// run instead of being skipped because the files look unchanged.
 fn ensure_running(
     changed: bool,
     address: &str,
     port: u16,
+    domains: &[String],
     non_interactive: bool,
     messages: &mut Vec<String>,
 ) {
-    let running = is_running(address, port);
-    let action = match next_service_action(changed, running) {
-        Some(a) => a,
-        None => return,
+    let tcp_up = is_running(address, port);
+    let resolving = !tcp_up || domains.iter().all(|d| probe_domain(address, port, d));
+    let Some(action) = next_service_action(changed, tcp_up, resolving) else {
+        flush_stale_system_cache(address, port, domains, non_interactive, messages);
+        return;
     };
+
     service_dnsmasq(action, non_interactive, messages);
-    // After starting, give the daemon a moment to bind before confirming.
-    if action == "start" {
-        for _ in 0..10 {
-            if is_running(address, port) {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(200));
-        }
-        if is_running(address, port) {
-            messages.push(format!(
-                "  + dnsmasq is up on {address}:{port} and resolving wildcard domains"
-            ));
-        } else {
-            messages.push(
-                "⚠ dnsmasq did not come up after starting; check `brew services list dnsmasq` \
-                 or system logs."
-                    .to_string(),
-            );
-        }
+
+    let resolving = wait_for_dns(address, port, domains, Duration::from_secs(3));
+
+    // `brew services` can report success while the loaded root LaunchDaemon is
+    // untouched (Homebrew does not see a daemon it did not load). Kick the
+    // actual launchd job and probe again before declaring failure.
+    #[cfg(target_os = "macos")]
+    let resolving = if !resolving && kickstart_dnsmasq(non_interactive, messages) {
+        wait_for_dns(address, port, domains, Duration::from_secs(2))
+    } else {
+        resolving
+    };
+
+    if resolving {
+        messages.push(format!(
+            "  + dnsmasq is up on {address}:{port} and resolving all configured domains"
+        ));
+        flush_dns_cache(non_interactive);
+    } else if is_running(address, port) {
+        messages.push(format!(
+            "⚠ dnsmasq is listening on {address}:{port} but did not answer for {}. \
+             Existing routes may be stale; run `fog <script>` interactively once.",
+            domains.join(", ")
+        ));
+    } else {
+        messages.push(
+            "⚠ dnsmasq did not come up after starting; check `brew services list dnsmasq` \
+             or system logs."
+                .to_string(),
+        );
     }
 }
+
+/// Polls dnsmasq with real queries until every domain answers or `timeout`
+/// expires.
+fn wait_for_dns(address: &str, port: u16, domains: &[String], timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if is_running(address, port) && domains.iter().all(|d| probe_domain(address, port, d)) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
+}
+
+/// Drops the system resolver's negative cache after a repair. Without this a
+/// host that failed before the fix can keep returning NXDOMAIN in Chrome even
+/// though dnsmasq now answers.
+#[cfg(target_os = "macos")]
+fn flush_dns_cache(non_interactive: bool) {
+    // Bound the flush: a wedged resolver must not hang a detached startup,
+    // which cannot even be interrupted from a TUI.
+    let mut flush = Command::new("dscacheutil");
+    flush.arg("-flushcache");
+    let _ = run_with_timeout(flush, Duration::from_secs(2));
+    let _ = run_sudo(&["killall", "-HUP", "mDNSResponder"], non_interactive);
+}
+
+/// Even with a healthy dnsmasq and a correct `/etc/resolver` file, macOS can
+/// keep serving a cached negative answer. Check the system resolver itself and
+/// flush only when it disagrees with dnsmasq, so a healthy start asks for no
+/// password.
+fn flush_stale_system_cache(
+    address: &str,
+    port: u16,
+    domains: &[String],
+    non_interactive: bool,
+    messages: &mut Vec<String>,
+) {
+    #[cfg(target_os = "macos")]
+    {
+        // /etc/resolver files written by fog carry no port, so macOS always
+        // queries :53. A daemon on another port cannot be validated through
+        // the system resolver; checking it would flush and warn every start.
+        if port != 53 {
+            return;
+        }
+        if domains.iter().all(|d| system_resolves(address, d)) {
+            return;
+        }
+        messages.push("  + dnsmasq answers; flush a stale macOS DNS cache".to_string());
+        flush_dns_cache(non_interactive);
+        for domain in domains {
+            if !system_resolves(address, domain) {
+                messages.push(format!(
+                    "⚠ the system resolver still does not resolve {domain}; \
+                     check `/etc/resolver/{domain}` and run \
+                     `sudo killall -HUP mDNSResponder`."
+                ));
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (address, port, domains, non_interactive, messages);
+}
+
+/// Resolves a probe name through the OS resolver stack, which honours
+/// `/etc/resolver`, unlike a direct query to dnsmasq.
+#[cfg(target_os = "macos")]
+fn system_resolves(address: &str, domain: &str) -> bool {
+    let mut cmd = Command::new("dscacheutil");
+    cmd.args(["-q", "host", "-a", "name", &format!("fog-probe.{domain}")]);
+    // mDNSResponder can block behind an unreachable resolver. The probe is a
+    // health check, so a slow answer is treated as "not resolved" instead of
+    // stalling startup forever.
+    let Some(output) = run_with_timeout(cmd, Duration::from_secs(5)) else {
+        return false;
+    };
+    output.status.success() && output_has_ipv4(&String::from_utf8_lossy(&output.stdout), address)
+}
+
+#[cfg(target_os = "macos")]
+fn output_has_ipv4(text: &str, address: &str) -> bool {
+    text.lines().any(|line| {
+        line.trim()
+            .strip_prefix("ip_address:")
+            .is_some_and(|ip| ip.trim() == address)
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn flush_dns_cache(_non_interactive: bool) {}
 
 /// Starts or restarts the dnsmasq service through the platform service manager.
 ///
@@ -482,17 +790,11 @@ fn ensure_running(
 fn service_dnsmasq(action: &str, non_interactive: bool, messages: &mut Vec<String>) {
     #[cfg(target_os = "linux")]
     {
-        let mut c = Command::new("sudo");
-        if non_interactive {
-            // Never block on a password prompt in headless runs.
-            c.arg("-n");
-        }
-        c.args(["systemctl", action, "dnsmasq"]);
-        match c.status() {
-            Ok(s) if s.success() => messages.push(format!(
+        match sudo_status(&["systemctl", action, "dnsmasq"], non_interactive) {
+            Ok(()) => messages.push(format!(
                 "  + dnsmasq {action}ed (sudo systemctl {action} dnsmasq)"
             )),
-            Ok(_) | Err(_) => {
+            Err(_) => {
                 messages.push(format!(
                     "⚠ could not {action} dnsmasq (sudo systemctl {action} dnsmasq). Existing \
                      routes may not be active yet."
@@ -504,22 +806,17 @@ fn service_dnsmasq(action: &str, non_interactive: bool, messages: &mut Vec<Strin
     #[cfg(target_os = "macos")]
     {
         // A stale user-level brew Agent (from the pre-root era) would fail to
-        // bind :53 and could crash-loop or shadow the daemon. Remove it first.
-        let _ = bootout_user_agent(non_interactive);
+        // bind :53 and could crash-loop or shadow the daemon. Remove it first;
+        // this is our own GUI domain, so it needs no root.
+        let _ = bootout_user_agent();
 
         // Running `brew services` as root installs a LaunchDaemon in
         // /Library/LaunchDaemons so dnsmasq runs as root and can bind :53.
-        let mut c = Command::new("sudo");
-        if non_interactive {
-            // Never block on a password prompt in headless runs.
-            c.arg("-n");
-        }
-        c.args(["brew", "services", action, "dnsmasq"]);
-        match c.status() {
-            Ok(s) if s.success() => messages.push(format!(
+        match sudo_status(&["brew", "services", action, "dnsmasq"], non_interactive) {
+            Ok(()) => messages.push(format!(
                 "  + dnsmasq {action}ed (sudo brew services {action} dnsmasq)"
             )),
-            Ok(_) | Err(_) => {
+            Err(_) => {
                 messages.push(format!(
                     "⚠ could not {action} dnsmasq (sudo brew services {action} dnsmasq). Run \
                      `fog <script>` interactively once and approve the sudo prompt. Existing \
@@ -530,15 +827,42 @@ fn service_dnsmasq(action: &str, non_interactive: bool, messages: &mut Vec<Strin
     }
 }
 
-/// Boots out any user-level `homebrew.mxcl.dnsmasq` LaunchAgent so it cannot
-/// compete with (or shadow) the root LaunchDaemon draining :53.
+/// Restarts the loaded root LaunchDaemon directly when `brew services` left it
+/// untouched. On machines where dnsmasq was loaded by `brew services` under
+/// root, Homebrew itself reports it as "not loaded", so its restart command can
+/// succeed without reloading anything.
 #[cfg(target_os = "macos")]
-fn bootout_user_agent(non_interactive: bool) -> FogResult<()> {
+fn kickstart_dnsmasq(non_interactive: bool, messages: &mut Vec<String>) -> bool {
+    for label in ["system/sh.brew.dnsmasq", "system/homebrew.mxcl.dnsmasq"] {
+        let loaded = Command::new("launchctl")
+            .args(["print", label])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !loaded {
+            continue;
+        }
+        if sudo_status(&["launchctl", "kickstart", "-k", label], non_interactive).is_ok() {
+            messages.push(format!("  + restarted dnsmasq through launchctl ({label})"));
+            return true;
+        }
+    }
+    false
+}
+
+/// Boots out any user-level `homebrew.mxcl.dnsmasq` LaunchAgent so it cannot
+/// compete with (or shadow) the root LaunchDaemon draining :53. The agent
+/// lives in the current user's GUI domain, so no sudo is needed.
+#[cfg(target_os = "macos")]
+fn bootout_user_agent() -> FogResult<()> {
     let domain = format!("gui/{}", unsafe { libc::getuid() });
+    // launchctl takes a single service target (`gui/<uid>/<label>`), not a
+    // domain followed by a separate label argument.
+    let target = launchctl_service_target(&domain, "homebrew.mxcl.dnsmasq");
     // Only try to unload if it is actually registered; otherwise bootout fails
     // with a confusing error.
     let loaded = Command::new("launchctl")
-        .args(["print", &domain, "homebrew.mxcl.dnsmasq"])
+        .args(["print", &target])
         .output()
         .ok()
         .map(|o| o.status.success())
@@ -546,37 +870,32 @@ fn bootout_user_agent(non_interactive: bool) -> FogResult<()> {
     if !loaded {
         return Ok(());
     }
-    let mut c = Command::new("sudo");
-    if non_interactive {
-        c.arg("-n");
-    }
-    c.args(["launchctl", "bootout", &domain, "homebrew.mxcl.dnsmasq"]);
-    match c.status() {
-        Ok(s) if s.success() => Ok(()),
-        Ok(_) | Err(_) => Err(FogError::new(
-            "launchctl bootout homebrew.mxcl.dnsmasq failed".to_string(),
-        )),
-    }
-}
-
-fn run_sudo(args: &[&str], non_interactive: bool) -> FogResult<()> {
-    let mut cmd = Command::new("sudo");
-    if non_interactive {
-        cmd.arg("-n");
-    }
-    cmd.args(args);
-    let status = cmd
+    let status = Command::new("launchctl")
+        .args(["bootout", &target])
         .status()
-        .map_err(|e| FogError::new(format!("sudo: {e}")))?;
+        .map_err(|e| FogError::new(format!("launchctl: {e}")))?;
     if status.success() {
         Ok(())
     } else {
-        Err(FogError::new(format!("sudo exited with {}", status)))
+        Err(FogError::new(
+            "launchctl bootout homebrew.mxcl.dnsmasq failed".to_string(),
+        ))
     }
+}
+
+#[cfg(target_os = "macos")]
+fn launchctl_service_target(domain: &str, label: &str) -> String {
+    format!("{domain}/{label}")
+}
+
+#[cfg(target_os = "macos")]
+fn run_sudo(args: &[&str], non_interactive: bool) -> FogResult<()> {
+    sudo_status(args, non_interactive)
 }
 
 #[cfg(target_os = "linux")]
 fn run_sudo_output(args: &[&str], non_interactive: bool) -> FogResult<String> {
+    ensure_sudo(non_interactive)?;
     let mut cmd = Command::new("sudo");
     if non_interactive {
         cmd.arg("-n");
@@ -604,6 +923,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "calls the real dnsmasq setup and can change host DNS state"]
     fn test_missing_dnsmasq_warns() {
         // When dnsmasq is missing, ensure() warns and does not panic. When it
         // IS installed, ensure() still returns without panicking. Either way it
@@ -615,18 +935,27 @@ mod tests {
 
     #[test]
     fn test_next_action_starts_when_down() {
-        assert_eq!(next_service_action(false, false), Some("start"));
-        assert_eq!(next_service_action(true, false), Some("start"));
+        assert_eq!(next_service_action(false, false, true), Some("start"));
+        assert_eq!(next_service_action(true, false, true), Some("start"));
     }
 
     #[test]
     fn test_next_action_restarts_when_changed_and_up() {
-        assert_eq!(next_service_action(true, true), Some("restart"));
+        assert_eq!(next_service_action(true, true, true), Some("restart"));
     }
 
     #[test]
-    fn test_next_action_noop_when_up_and_unchanged() {
-        assert_eq!(next_service_action(false, true), None);
+    fn test_next_action_restarts_when_dns_does_not_resolve() {
+        assert_eq!(
+            next_service_action(false, true, false),
+            Some("restart"),
+            "a listening daemon that does not answer must be repaired"
+        );
+    }
+
+    #[test]
+    fn test_next_action_noop_when_up_and_resolving() {
+        assert_eq!(next_service_action(false, true, true), None);
     }
 
     #[test]
@@ -667,21 +996,143 @@ mod tests {
             Path::new("/tmp/fog-stage-1"),
             Path::new("/etc/resolver/red-fox"),
         );
-        for cmd in &argv {
-            assert!(
-                !cmd.iter().any(|a| a == "sh" || a == "-c"),
-                "argv must not invoke a shell: {cmd:?}"
-            );
-        }
-        assert_eq!(argv[0][0], "install");
-        assert_eq!(
-            argv[1],
-            vec![
-                "rm".to_string(),
-                "-f".to_string(),
-                "/tmp/fog-stage-1".to_string()
-            ]
+        assert!(
+            !argv.iter().any(|a| a == "sh" || a == "-c"),
+            "argv must not invoke a shell: {argv:?}"
         );
+        assert_eq!(argv[0], "install");
+        assert_eq!(
+            argv.last().map(String::as_str),
+            Some("/etc/resolver/red-fox")
+        );
+        assert!(
+            !argv.iter().any(|a| a == "rm"),
+            "the user-owned staging file must not need a second sudo call: {argv:?}"
+        );
+    }
+
+    #[test]
+    fn test_probe_domain_ignores_a_reply_from_another_socket() {
+        let responder = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let decoy = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let port = responder.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            let mut buf = [0u8; 512];
+            let (n, from) = responder.recv_from(&mut buf).unwrap();
+            // A wrong-answer datagram from another socket must be skipped,
+            // then the real resolver's answer must be accepted.
+            let wrong = a_response(&buf[..n], [10, 0, 0, 1]);
+            let _ = decoy.send_to(&wrong, from);
+            std::thread::sleep(Duration::from_millis(20));
+            let response = a_response(&buf[..n], [127, 0, 0, 1]);
+            let _ = responder.send_to(&response, from);
+        });
+        assert!(probe_domain("127.0.0.1", port, "red-fox"));
+        handle.join().unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_launchctl_service_target_is_one_argument() {
+        assert_eq!(
+            launchctl_service_target("gui/501", "homebrew.mxcl.dnsmasq"),
+            "gui/501/homebrew.mxcl.dnsmasq",
+            "launchctl print/bootout take domain/label as one service target"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_dscacheutil_output_matches_the_exact_ipv4() {
+        let text = "name: fog-probe.red-fox\nip_address: 127.0.0.1\n";
+        assert!(output_has_ipv4(text, "127.0.0.1"));
+        assert!(
+            !output_has_ipv4(text, "127.0.0.10"),
+            "a longer address must not match by prefix"
+        );
+        assert!(!output_has_ipv4("name: fog-probe.red-fox\n", "127.0.0.1"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_system_cache_check_skips_a_nonstandard_port() {
+        // /etc/resolver has no port, so a non-:53 daemon is not reachable
+        // through dscacheutil. The check must return without flushing,
+        // prompting, or warning on every healthy start.
+        let mut messages = Vec::new();
+        flush_stale_system_cache(
+            "127.0.0.1",
+            5353,
+            &["red-fox".to_string()],
+            false,
+            &mut messages,
+        );
+        assert!(
+            messages.is_empty(),
+            "a non-:53 daemon must not trigger a cache repair: {messages:?}"
+        );
+    }
+
+    /// Builds a valid response to `query` with one A record.
+    fn a_response(query: &[u8], ip: [u8; 4]) -> Vec<u8> {
+        let mut response = query.to_vec();
+        response[2] = 0x81; // QR=1, RD=1
+        response[3] = 0x80; // RA=1, rcode=0
+        response[6] = 0;
+        response[7] = 1; // ANCOUNT
+        response.extend_from_slice(&[0xC0, 0x0C, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4]);
+        response.extend_from_slice(&ip);
+        response
+    }
+
+    #[test]
+    fn test_build_dns_query_encodes_labels_and_a_record() {
+        let query = build_dns_query(0x1234, "fog-probe.red-fox");
+        assert_eq!(&query[..2], &[0x12, 0x34]);
+        assert_eq!(&query[4..6], &[0, 1], "one question");
+        assert_eq!(query[12], 9);
+        assert_eq!(&query[13..22], b"fog-probe");
+        assert_eq!(query[22], 7);
+        assert_eq!(&query[23..30], b"red-fox");
+        assert_eq!(query[30], 0);
+        assert_eq!(&query[31..35], &[0, 1, 0, 1], "QTYPE A / QCLASS IN");
+    }
+
+    #[test]
+    fn test_parse_dns_a_accepts_the_configured_address() {
+        let query = build_dns_query(7, "fog-probe.red-fox");
+        let response = a_response(&query, [127, 0, 0, 1]);
+        assert!(parse_dns_a(&response, 7, Ipv4Addr::new(127, 0, 0, 1)));
+        assert!(
+            !parse_dns_a(&response, 7, Ipv4Addr::new(10, 0, 0, 1)),
+            "an answer for another address must not count"
+        );
+    }
+
+    #[test]
+    fn test_parse_dns_a_rejects_wrong_id_and_error_rcode() {
+        let query = build_dns_query(7, "fog-probe.red-fox");
+        let response = a_response(&query, [127, 0, 0, 1]);
+        assert!(!parse_dns_a(&response, 8, Ipv4Addr::new(127, 0, 0, 1)));
+        assert!(!parse_dns_a(&[0u8; 3], 7, Ipv4Addr::new(127, 0, 0, 1)));
+
+        let mut nxdomain = response.clone();
+        nxdomain[3] = 0x83; // rcode 3
+        assert!(!parse_dns_a(&nxdomain, 7, Ipv4Addr::new(127, 0, 0, 1)));
+    }
+
+    #[test]
+    fn test_probe_domain_round_trips_a_udp_query() {
+        let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let port = server.local_addr().unwrap().port();
+        let join = std::thread::spawn(move || {
+            let mut buf = [0u8; 512];
+            let (n, from) = server.recv_from(&mut buf).unwrap();
+            let response = a_response(&buf[..n], [127, 0, 0, 1]);
+            server.send_to(&response, from).unwrap();
+        });
+        assert!(probe_domain("127.0.0.1", port, "red-fox"));
+        join.join().unwrap();
     }
 
     #[cfg(target_os = "macos")]

@@ -152,6 +152,9 @@ impl App {
     pub(crate) fn switch_worktree(&mut self, wt: &Worktree) -> FogResult<()> {
         // Guard against switching to the worktree we are already on.
         let current_dir = self.project_dir();
+        // Capture the effective branch being torn down before `title_branch`
+        // is replaced below. An explicit `--branch` can differ from git.
+        let prev_title_branch = self.title_branch.clone();
         let already_here = if let Some(list) = worktree::list(&current_dir) {
             worktree::is_current_worktree(wt, &list, &current_dir)
         } else {
@@ -433,16 +436,16 @@ impl App {
             routes.extend(runtime::endpoint_route_infos(&built.items));
             *self.ipc_state.native_routes.lock().expect("mutex poisoned") = routes;
         }
-        // Clean up stale native routes from the previous branch before ensuring the new ones
-        let prev_branch = runtime::resolve_branch(&current_dir);
-        if prev_branch != branch_for_ports {
-            crate::router::cleanup_native_routes(prev_branch.as_deref(), &config);
-        }
+        // Clean up the routes of the topology being torn down before ensuring
+        // the new ones. Scoped file names mean the target no longer overwrites
+        // them, so this must run even when both worktrees are on one branch.
+        crate::router::cleanup_native_routes(prev_title_branch.as_deref(), &current_dir, &config);
         if let Some(routes) = &config.native_routes {
             for msg in crate::router::ensure_native_routes(
                 routes,
                 &port_map,
                 branch_for_ports.as_deref(),
+                &config_dir,
                 &config,
                 self.verbose,
             ) {
@@ -454,6 +457,7 @@ impl App {
             &runtime::endpoint_routes(&built.items),
             &port_map,
             branch_for_ports.as_deref(),
+            &config_dir,
             &config,
             self.verbose,
         ) {

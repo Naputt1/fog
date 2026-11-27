@@ -33,17 +33,23 @@ dev URLs like `main.acme` or `feature-x.acme`.
 When `fog <script>` starts and a `dnsmasq` section is configured, fog:
 
 1. Verifies `dnsmasq` is installed; if not, it **warns and continues** (install it with `brew install dnsmasq`).
-2. On **macOS** (Homebrew): writes the domain mapping into `$prefix/etc/dnsmasq.d/fog-<domain>.conf`, pins the listener to `address:port`, ensures `conf-dir` is enabled in `dnsmasq.conf`, creates `/etc/resolver/<domain>` (via `sudo`), then **starts** dnsmasq as a **root LaunchDaemon** via `sudo brew services start dnsmasq`. Any stale user-level LaunchAgent is booted out first.
-3. On **Linux**: writes `/etc/dnsmasq.d/fog-<domain>.conf` and starts dnsmasq via `sudo systemctl start dnsmasq`.
+2. On **macOS** (Homebrew): writes the domain mapping into `$prefix/etc/dnsmasq.d/fog-<domain>.conf`, pins the listener to `address:port`, ensures `conf-dir` is enabled in `dnsmasq.conf`, creates `/etc/resolver/<domain>` (via `sudo`), then **starts or repairs** dnsmasq as a **root LaunchDaemon** via `sudo brew services`, falling back to `sudo launchctl kickstart -k` when Homebrew cannot see a root-loaded daemon. Any stale user-level LaunchAgent is booted out first.
+3. On **Linux**: writes `/etc/dnsmasq.d/fog-<domain>.conf` and starts or repairs dnsmasq via `sudo systemctl`.
 4. On other platforms it warns that the setup is unsupported.
 
-The setup is **idempotent**: existing files are left untouched and dnsmasq is
-only restarted when something changed — and if the daemon is already running it
-is left alone. If dnsmasq is **not** running, fog starts it automatically and
-verifies it actually came up on `address:port`. Detached (`-d`) runs use `sudo -n` so a password prompt cannot
-hang them; if a privileged step is needed but cannot run headless, fog prints a
-warning telling you to run `fog <script>` interactively once. Any failure is a
-warning, never a hard error.
+The setup is **idempotent** for files and **self-healing** for the daemon:
+after rewriting config it sends a real UDP DNS query (`fog-probe.<domain>`) to
+`address:port` for every configured domain. A daemon that is merely listening
+but does not answer — a failed earlier reload, a stale route, or a missing
+`/etc/resolver/<domain>` — is restarted and re-probed, even when no file
+changed. After a successful repair fog flushes the macOS resolver cache so Chrome
+does not keep a cached `NXDOMAIN`; it also checks the system resolver itself
+(`dscacheutil`) and flushes when dnsmasq already answers but macOS still holds a
+stale negative answer. Interactive runs share **one** sudo prompt
+for the whole startup, and a healthy setup asks for nothing; detached (`-d`)
+runs use `sudo -n` so a password prompt cannot hang them, and print a warning
+telling you to run `fog <script>` interactively once. Any failure is a warning,
+never a hard error.
 
 > **Why root?** macOS 26+ restricts binding to privileged ports (<1024) to
 > root, and macOS ignores the `port` directive in `/etc/resolver/<domain>` files. dnsmasq therefore must listen on `:53` as a **root LaunchDaemon**. fog only ever binds it to `127.0.0.1` (`bind-interfaces`), so the daemon is not exposed to the LAN.
@@ -124,6 +130,16 @@ Because browsers reject a wildcard whose suffix is a single label (such as
 wildcard. Traefik then terminates HTTPS on a `:443` `websecure` entrypoint while
 HTTP on `:80` keeps working.
 
+Hostnames are collected from this run's routes, the file provider, Traefik's
+Docker-label routers, and a persistent `known-hosts.txt` registry in
+`cert_dir`. The registry is what stops a shared certificate from shrinking when
+a sibling project stops and removes its route file: once a host has been
+certified it stays certified. When the mkcert root CA changes (reinstall, new
+`CAROOT`), a `ca.fingerprint` marker forces every leaf to be regenerated, and fog
+checks the CA is trusted and warns with `mkcert -install` when it is not. Delete
+`known-hosts.txt` **and** a domain's `<domain>.sans` sidecar to forget old hosts
+deliberately; the sidecar re-seeds the registry on the next start otherwise.
+
 Prerequisites (one-time):
 
 ```bash
@@ -157,8 +173,8 @@ For non-container services you can declare explicit file-provider routes:
 
 Each entry maps a `Host` rule to a service's allocated port via `host.docker.internal`. See [Configuration](/configuration) for the full `native_routes` schema.
 
-Route files are rewritten on every start (ports allocated with `0` are random and the files are removed on shutdown), so the wiring lines (`native route … -> host.docker.internal:…`) are only printed with `fog <script> --verbose` / `-v`. Warnings always print.
+Route files are rewritten on every start (ports allocated with `0` are random and the files are removed on shutdown), so the wiring lines (`native route … -> host.docker.internal:…`) are only printed with `fog <script> --verbose` / `-v`. Warnings always print. File names include a per-checkout scope (`native-<scope>-<branch>-…` / `ep-<scope>-<branch>-…`), so shutdown removes only the routes this checkout wrote — two projects on the same branch no longer delete each other's routes. Pre-scope files for a route are removed when that route is rewritten.
 
 ### Endpoint routes
 
-[`endpoint`](/configuration#endpoints) entries that set both `host` and `port` generate the same file-provider routes automatically, without repeating an entry in `native_routes`. They are named `ep-<branch>-<service>-<name>-<host>` (distinct from `native-*`, so both can coexist) and are cleaned up with the branch's native routes on shutdown. An endpoint with no `host` is display + health only and produces no route.
+[`endpoint`](/configuration#endpoints) entries that set both `host` and `port` generate the same file-provider routes automatically, without repeating an entry in `native_routes`. They are named `ep-<scope>-<branch>-<service>-<name>-<host>` (distinct from `native-*`, so both can coexist) and are cleaned up with the branch's native routes on shutdown. An endpoint with no `host` is display + health only and produces no route.

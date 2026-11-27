@@ -412,6 +412,12 @@ impl App {
         })
     }
 
+    /// Effective branch this instance currently serves, if any. Unlike
+    /// `ipc_state.branch` this follows a worktree switch.
+    pub(crate) fn current_branch(&self) -> Option<&str> {
+        self.title_branch.as_deref()
+    }
+
     /// Whether a detach has been requested (and the successor launched).
     pub(crate) fn detach_spawned(&self) -> bool {
         self.detaching
