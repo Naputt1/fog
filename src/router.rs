@@ -6,6 +6,7 @@ use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Once;
 use std::time::Duration;
 
 /// Wall-clock budget for the fast docker control-plane calls made during router
@@ -693,44 +694,55 @@ fn remember_hosts(cert_dir: &Path, domains: &[String], new_hosts: &[String]) -> 
     hosts
 }
 
-/// Identifies the mkcert root CA currently in use. Leaves signed by a replaced
-/// CA are untrusted even though their SANs look right, so a change forces every
-/// certificate to be regenerated and the user to re-run `mkcert -install`.
-fn ca_fingerprint() -> Option<String> {
+/// Path to the mkcert root CA currently in use, if mkcert is installed.
+fn mkcert_ca_root() -> Option<PathBuf> {
     let out = Command::new("mkcert").arg("-CAROOT").output().ok()?;
     if !out.status.success() {
         return None;
     }
-    let root = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()).join("rootCA.pem");
-    let bytes = fs::read(root).ok()?;
+    Some(PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()).join("rootCA.pem"))
+}
+
+/// Identifies the mkcert root CA currently in use. Leaves signed by a replaced
+/// CA are untrusted even though their SANs look right, so a change forces every
+/// certificate to be regenerated and the user to re-run `mkcert -install`.
+fn ca_fingerprint() -> Option<String> {
+    let bytes = fs::read(mkcert_ca_root()?).ok()?;
     Some(format!("{:016x}", fnv1a(&bytes)))
 }
 
-/// Warns when the mkcert CA is not trusted by the OS. Without this, freshly
-/// generated, correct certificates still surface as "self-signed" in Chrome.
+/// Warns when the mkcert CA is not trusted by the OS. Without this, correct
+/// certificates still surface as "self-signed" in Chrome. Checks the root CA
+/// itself, once per process, so an already-generated untrusted cert is caught
+/// too, not only a freshly generated one.
 #[cfg(target_os = "macos")]
-fn verify_certificate_trust(cert_dir: &Path, name: &str, messages: &mut Vec<String>) {
-    let cert = cert_dir.join(format!("{name}.pem"));
-    let Ok(status) = Command::new("security")
-        .args(["verify-cert", "-c"])
-        .arg(&cert)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-    else {
-        return;
-    };
-    if !status.success() {
-        messages.push(
-            "⚠ the generated TLS certificate is not trusted by macOS. Run `mkcert -install` \
-             once, then restart fog."
-                .to_string(),
-        );
-    }
+fn verify_ca_trust(messages: &mut Vec<String>) {
+    static CHECKED: Once = Once::new();
+    CHECKED.call_once(|| {
+        let Some(root) = mkcert_ca_root() else {
+            return;
+        };
+        let Ok(status) = Command::new("security")
+            .args(["verify-cert", "-c"])
+            .arg(&root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+        else {
+            return;
+        };
+        if !status.success() {
+            messages.push(
+                "⚠ the mkcert root CA is not trusted by macOS. Run `mkcert -install` once, \
+                 then restart fog."
+                    .to_string(),
+            );
+        }
+    });
 }
 
 #[cfg(not(target_os = "macos"))]
-fn verify_certificate_trust(_cert_dir: &Path, _name: &str, _messages: &mut Vec<String>) {}
+fn verify_ca_trust(_messages: &mut Vec<String>) {}
 
 /// Reads the routers Traefik currently knows about, including those registered
 /// by Docker labels. File-provider hosts are already discoverable from disk;
@@ -766,6 +778,9 @@ fn hosts_from_traefik_routers(body: &str) -> Vec<String> {
 /// Minimal HTTP GET for localhost diagnostics. The Traefik API runs with
 /// `--api.insecure` on a local port, so no TLS or auth is involved.
 fn http_get(address: &str, path: &str) -> Option<String> {
+    /// A wedged or hostile local server must not make fog buffer unbounded
+    /// data. Traefik's router list fits comfortably in a few MiB.
+    const MAX_RESPONSE: u64 = 4 * 1024 * 1024;
     let mut addrs = address.to_socket_addrs().ok()?;
     let target = addrs.next()?;
     let mut stream = TcpStream::connect_timeout(&target, Duration::from_millis(500)).ok()?;
@@ -778,7 +793,10 @@ fn http_get(address: &str, path: &str) -> Option<String> {
     )
     .ok()?;
     let mut bytes = Vec::new();
-    stream.read_to_end(&mut bytes).ok()?;
+    (&mut stream)
+        .take(MAX_RESPONSE)
+        .read_to_end(&mut bytes)
+        .ok()?;
     let split = bytes.windows(4).position(|w| w == b"\r\n\r\n")?;
     let head = String::from_utf8_lossy(&bytes[..split]).to_ascii_lowercase();
     if !head.starts_with("http/1.1 200") && !head.starts_with("http/1.0 200") {
@@ -945,17 +963,14 @@ fn ensure_tls(
     push_unique(&mut names, "localhost");
     push_unique(&mut names, "127.0.0.1");
 
-    let mut generated = false;
     for name in &names {
         let sans = desired_sans(name, domains, &known_hosts);
-        generated |= ensure_named_cert(name, &sans, &cert_dir, &dynamic_dir, ca_changed, messages)?;
+        ensure_named_cert(name, &sans, &cert_dir, &dynamic_dir, ca_changed, messages)?;
     }
     if ca_changed && let Some(fingerprint) = &current_ca {
         let _ = fs::write(&ca_marker, fingerprint);
     }
-    if generated && let Some(name) = names.first() {
-        verify_certificate_trust(&cert_dir, name, messages);
-    }
+    verify_ca_trust(messages);
 
     Ok((cert_dir, dynamic_dir))
 }
@@ -1186,6 +1201,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "calls the real router setup and can recreate the host Traefik container"]
     fn test_ensure_on_machine_without_docker_warns_without_panic() {
         // If docker is missing this warns and returns; if present it still
         // returns without panicking. Either way ensure() must not crash.
@@ -1233,6 +1249,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "calls the real router setup and writes host mkcert certificates"]
     fn test_ensure_tls_without_mkcert_warns_without_panic() {
         // ensure_tls must return Err (or generate certs if mkcert is present)
         // without panicking.

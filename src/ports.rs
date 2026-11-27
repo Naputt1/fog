@@ -70,6 +70,22 @@ pub fn allocate_ports_unprobed(
         }
     }
 
+    // Check for duplicate fixed values (two names same port) before probing
+    // availability, so a collision is reported as a config error even when the
+    // port also happens to be occupied by another process.
+    {
+        let mut seen: HashMap<u16, String> = HashMap::new();
+        for (name, port) in &out {
+            if let Some(other) = seen.get(port) {
+                return Err(FogError::new(format!(
+                    "ports '{}' and '{}' both map to {} — duplicate port",
+                    other, name, port
+                )));
+            }
+            seen.insert(*port, name.clone());
+        }
+    }
+
     // Verify fixed ports are not colliding with random allocations and warn if
     // a fixed port is already in use by another process.
     for (name, port) in out.iter() {
@@ -83,21 +99,6 @@ pub fn allocate_ports_unprobed(
                     port, name
                 )));
             }
-        }
-    }
-
-    // Check for duplicate fixed values (two names same port) — error, since
-    // explicit ports are user-specified collisions.
-    {
-        let mut seen: HashMap<u16, String> = HashMap::new();
-        for (name, port) in &out {
-            if let Some(other) = seen.get(port) {
-                return Err(FogError::new(format!(
-                    "ports '{}' and '{}' both map to {} — duplicate port",
-                    other, name, port
-                )));
-            }
-            seen.insert(*port, name.clone());
         }
     }
 

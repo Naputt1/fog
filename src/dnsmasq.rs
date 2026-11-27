@@ -484,14 +484,24 @@ fn probe_domain(address: &str, port: u16, domain: &str) -> bool {
     let Ok(socket) = UdpSocket::bind("0.0.0.0:0") else {
         return false;
     };
-    let _ = socket.set_read_timeout(Some(Duration::from_millis(700)));
     if socket.send_to(&query, target).is_err() {
         return false;
     }
     let mut buf = [0u8; 512];
-    match socket.recv_from(&mut buf) {
-        Ok((n, _)) => parse_dns_a(&buf[..n], id, expected),
-        Err(_) => false,
+    let deadline = Instant::now() + Duration::from_millis(700);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return false;
+        }
+        let _ = socket.set_read_timeout(Some(remaining));
+        match socket.recv_from(&mut buf) {
+            // Ignore datagrams from anything but the queried resolver: a stray
+            // local responder must not make a broken daemon look healthy.
+            Ok((n, from)) if from == target => return parse_dns_a(&buf[..n], id, expected),
+            Ok(_) => continue,
+            Err(_) => return false,
+        }
     }
 }
 
@@ -911,6 +921,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "calls the real dnsmasq setup and can change host DNS state"]
     fn test_missing_dnsmasq_warns() {
         // When dnsmasq is missing, ensure() warns and does not panic. When it
         // IS installed, ensure() still returns without panicking. Either way it
