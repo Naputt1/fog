@@ -93,6 +93,69 @@ for ConPTY. Some features differ from macOS and Linux:
 - **The Traefik router requires Docker Desktop**, and its `mkcert` helper
   expects a `brew`-style install.
 
+## Router & DNS
+
+### `https://<branch>.<domain>` shows a self-signed certificate
+
+This means Traefik fell back to its built-in default certificate because the
+shared certificate did not include that host. Confirm what is being served:
+
+```bash
+openssl s_client -connect 127.0.0.1:443 -servername main.red-fox </dev/null 2>/dev/null \
+  | openssl x509 -noout -subject -ext subjectAltName
+```
+
+With a current fog, hosts are remembered in `~/.config/fog/certs/known-hosts.txt`
+and Docker-label routers are discovered through Traefik's API on each start, so
+the certificate should include them after one restart. If the certificate is
+still wrong, force a regeneration and check the CA is trusted:
+
+```bash
+rm ~/.config/fog/certs/<domain>.pem ~/.config/fog/certs/<domain>.sans
+mkcert -install
+fog <script>
+```
+
+### DNS works for direct ports but not for `*.domain`
+
+dnsmasq is answering or listening when it should not. Check the resolver file
+and probe the daemon directly:
+
+```bash
+cat /etc/resolver/<domain>            # must contain: nameserver 127.0.0.1
+dig fog-probe.<domain> @127.0.0.1 +short
+```
+
+If the file is missing, run `fog <script>` once interactively and approve the one
+sudo prompt. If the file exists but the probe fails, restart the root daemon:
+
+```bash
+sudo launchctl kickstart -k system/sh.brew.dnsmasq
+```
+
+After a repair, flush the macOS resolver cache so Chrome stops reusing the old
+`NXDOMAIN`:
+
+```bash
+dscacheutil -flushcache && sudo killall -HUP mDNSResponder
+```
+
+### fog asks for a password every time
+
+The only password fog asks for is `sudo`, used to write `/etc/resolver/<domain>`
+and start/restart the root dnsmasq daemon. Interactive runs now request it once
+per startup and only when a file or the daemon actually needs repair; a healthy
+startup asks for nothing. If it still prompts every time, sudo credentials are
+not being cached on your machine — run `sudo -v` once and start fog again.
+Detached runs never prompt; they print the exact command to run instead.
+
+### Two projects on the same branch break each other's routes
+
+Older versions named route files by branch only and deleted every same-branch
+file on shutdown. Current fog scopes names by checkout
+(`native-<scope>-<branch>-…`), so this no longer happens. Restart both projects
+once with the new version to migrate the old files.
+
 ## FAQ
 
 ### Can I run fog as a daemon?

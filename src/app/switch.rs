@@ -436,13 +436,14 @@ impl App {
         // Clean up stale native routes from the previous branch before ensuring the new ones
         let prev_branch = runtime::resolve_branch(&current_dir);
         if prev_branch != branch_for_ports {
-            crate::router::cleanup_native_routes(prev_branch.as_deref(), &config);
+            crate::router::cleanup_native_routes(prev_branch.as_deref(), &current_dir, &config);
         }
         if let Some(routes) = &config.native_routes {
             for msg in crate::router::ensure_native_routes(
                 routes,
                 &port_map,
                 branch_for_ports.as_deref(),
+                &config_dir,
                 &config,
                 self.verbose,
             ) {
@@ -454,6 +455,7 @@ impl App {
             &runtime::endpoint_routes(&built.items),
             &port_map,
             branch_for_ports.as_deref(),
+            &config_dir,
             &config,
             self.verbose,
         ) {
